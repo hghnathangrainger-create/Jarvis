@@ -1,21 +1,6 @@
 """
 settings.py
 
-Loads and manages all configuration for Jarvis.
-
-Responsibilities:
-- Load environment variables.
-- Store application settings.
-- Provide a single source of configuration.
-
-Does NOT:
-- Connect to APIs.
-- Execute business logic.
-- Control other modules.
-"""
-"""
-settings.py
-
 Centralised configuration loading for the Jarvis AI Operating System.
 
 Responsibilities:
