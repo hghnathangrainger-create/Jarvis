@@ -47,10 +47,57 @@ def test_format_shows_core_fields() -> None:
     assert "YELLOW" in text
 
 
+def test_format_includes_request_id() -> None:
+    request = _request()
+    assert request.request_id in format_approval_request(request)
+
+
+def test_format_includes_action() -> None:
+    request = _request(action="delete a calendar event")
+    assert "delete a calendar event" in format_approval_request(request)
+
+
+def test_format_includes_reason() -> None:
+    request = _request(reason="This changes your calendar.")
+    assert "This changes your calendar." in format_approval_request(request)
+
+
+def test_format_includes_risk_tier() -> None:
+    request = _request()
+    text = format_approval_request(request)
+    assert "YELLOW" in text
+    # A plain-language hint helps a beginner understand the tier.
+    assert "sensitive" in text.lower()
+
+
+def test_format_makes_it_obvious_this_is_an_approval() -> None:
+    request = _request()
+    text = format_approval_request(request)
+    assert "approval required" in text.lower()
+
+
+def test_format_labels_are_present_and_readable() -> None:
+    request = _request()
+    text = format_approval_request(request)
+    for label in ("Request ID:", "Action:", "Reason:", "Risk tier:"):
+        assert label in text
+    # The output is multi-line, one field per line, so it reads clearly.
+    assert len(text.splitlines()) >= 6
+
+
 def test_format_shows_metadata() -> None:
     request = _request(metadata={"to": "alex@example.com"})
     text = format_approval_request(request)
     assert "to: alex@example.com" in text
+
+
+def test_format_shows_multiple_metadata_sorted() -> None:
+    request = _request(metadata={"to": "alex@example.com", "subject": "Update"})
+    text = format_approval_request(request)
+    assert "to: alex@example.com" in text
+    assert "subject: Update" in text
+    # Keys are shown in sorted order: 'subject' before 'to'.
+    assert text.index("subject:") < text.index("to:")
 
 
 def test_format_omits_details_when_no_metadata() -> None:
@@ -149,4 +196,4 @@ def test_prompt_displays_request_before_asking() -> None:
 
     prompt_for_approval(request, input_func=_in, output_func=_out)
     assert events[0][0] == "out"
-    assert "Approval required" in events[0][1]
+    assert "approval required" in events[0][1].lower()

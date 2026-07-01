@@ -185,13 +185,13 @@ def _yellow_tool_response(
 
 def test_yellow_response_triggers_prompt_and_approve() -> None:
     orchestrator, output = _run_cli(["send email to Alex", "yes", "exit"])
-    assert "Approval required" in output
+    assert "approval required" in output.lower()
     assert "[APPROVED]" in output
 
 
 def test_yellow_response_triggers_prompt_and_decline() -> None:
     orchestrator, output = _run_cli(["send email to Alex", "no", "exit"])
-    assert "Approval required" in output
+    assert "approval required" in output.lower()
     assert "[DECLINED]" in output
     assert "cancelled" in output.lower()
 
@@ -208,13 +208,13 @@ def test_invalid_then_valid_approval_input_reprompts() -> None:
 
 def test_green_response_does_not_trigger_prompt() -> None:
     _orchestrator, output = _run_cli(["show me system info", "exit"])
-    assert "Approval required" not in output
+    assert "approval required" not in output.lower()
     assert "[OK]" in output
 
 
 def test_red_response_does_not_trigger_prompt() -> None:
     _orchestrator, output = _run_cli(["format drive C", "exit"])
-    assert "Approval required" not in output
+    assert "approval required" not in output.lower()
     assert "[BLOCKED]" in output
 
 
@@ -388,7 +388,7 @@ def test_cli_approve_executes_and_displays_result() -> None:
         orchestrator, crafted, ["send a message", "yes", "exit"]
     )
 
-    assert "Approval required" in output
+    assert "approval required" in output.lower()
     assert "[APPROVED]" in output
     assert "Message sent!" in output
     assert tool.ran is True

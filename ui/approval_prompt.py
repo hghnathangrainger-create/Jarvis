@@ -39,8 +39,8 @@ def format_approval_request(request: ApprovalRequest) -> str:
     """Format an approval request into readable, multi-line text.
 
     The output shows the request id, the action, the reason, the security
-    tier, and any metadata, so the user can see exactly what they are being
-    asked to approve.
+    tier (with a short plain-language note), and any metadata, so the user can
+    see exactly what they are being asked to approve.
 
     Args:
         request: The approval request to display.
@@ -49,12 +49,13 @@ def format_approval_request(request: ApprovalRequest) -> str:
         A multi-line string ready to print.
     """
     lines = [
-        "Approval required",
-        "-----------------",
+        "=================================================",
+        "  APPROVAL REQUIRED - Jarvis needs your decision",
+        "=================================================",
         f"  Request ID: {request.request_id}",
         f"  Action:     {request.action}",
         f"  Reason:     {request.reason}",
-        f"  Risk tier:  {request.security_tier.name}",
+        f"  Risk tier:  {request.security_tier.name} (sensitive - needs your approval)",
     ]
 
     if request.metadata:
