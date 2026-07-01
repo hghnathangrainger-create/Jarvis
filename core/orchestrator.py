@@ -25,6 +25,7 @@ a way around them.
 
 from __future__ import annotations
 
+from approval.approval_manager import ApprovalManager
 from config.constants import SecurityTier
 from core.request_models import JarvisRequest, JarvisResponse
 from planner.plan_models import Plan
@@ -51,6 +52,8 @@ class JarvisOrchestrator:
         _planner: Produces a Plan from the request.
         _executor: Runs tools behind the security gate.
         _registry: Used to check which tools are available.
+        _approvals: Creates and holds pending approval requests for YELLOW
+            actions.
     """
 
     def __init__(
@@ -59,6 +62,7 @@ class JarvisOrchestrator:
         planner: Planner,
         executor: ToolExecutor,
         registry: ToolRegistry,
+        approval_manager: ApprovalManager | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -66,10 +70,25 @@ class JarvisOrchestrator:
             planner: The Planner used to plan requests.
             executor: The ToolExecutor used to run tools safely.
             registry: The ToolRegistry used to check tool availability.
+            approval_manager: The ApprovalManager used to create approval
+                requests for YELLOW actions. A new one is created if omitted.
         """
         self._planner = planner
         self._executor = executor
         self._registry = registry
+        self._approvals = approval_manager or ApprovalManager()
+
+    @property
+    def approvals(self) -> ApprovalManager:
+        """Return the approval manager this orchestrator uses.
+
+        Exposed so that a later step (CLI or approval flow) can retrieve and
+        act on the pending requests this orchestrator creates.
+
+        Returns:
+            The ApprovalManager instance.
+        """
+        return self._approvals
 
     def handle_request(
         self, user_request: str, *, session_id: int | None = None
@@ -114,7 +133,7 @@ class JarvisOrchestrator:
             result = self._executor.execute(
                 tool_name, tool_input, session_id=request.session_id
             )
-            return self._tool_response(plan, result)
+            return self._tool_response(plan, result, text, request.session_id)
 
         # No tool matched. Fall back to the plan's own classification so the
         # request is still handled safely: blocked if RED, withheld if YELLOW,
@@ -123,7 +142,7 @@ class JarvisOrchestrator:
             return self._blocked_response(plan)
 
         if plan.requires_confirmation:
-            return self._confirmation_response(plan)
+            return self._confirmation_response(plan, text, request.session_id)
 
         return self._unrecognised_green_response(plan)
 
@@ -146,16 +165,31 @@ class JarvisOrchestrator:
             blocked=True,
         )
 
-    def _confirmation_response(self, plan: Plan) -> JarvisResponse:
+    def _confirmation_response(
+        self, plan: Plan, action: str, session_id: int | None
+    ) -> JarvisResponse:
         """Build a response for a plan that requires user confirmation.
+
+        A pending approval request is created for the YELLOW action via the
+        ApprovalManager and returned in the response. The action is not
+        executed in this step; it simply becomes pending.
 
         Args:
             plan: The plan that requires confirmation.
+            action: The request text to record as the action needing approval.
+            session_id: Optional session identifier for the request.
 
         Returns:
-            A JarvisResponse indicating confirmation is required, with the plan.
+            A JarvisResponse indicating confirmation is required, including the
+            plan and the pending approval request.
         """
         step = next(step for step in plan.steps if step.requires_confirmation)
+        approval = self._approvals.create_request(
+            action=action,
+            reason=step.reason,
+            security_tier=SecurityTier.YELLOW,
+            session_id=session_id,
+        )
         return JarvisResponse(
             success=False,
             message=(
@@ -164,6 +198,7 @@ class JarvisOrchestrator:
             ),
             plan=plan,
             requires_confirmation=True,
+            approval_request=approval,
         )
 
     def _unrecognised_green_response(self, plan: Plan) -> JarvisResponse:
@@ -188,16 +223,26 @@ class JarvisOrchestrator:
             plan=plan,
         )
 
-    def _tool_response(self, plan: Plan, result: ToolResult) -> JarvisResponse:
+    def _tool_response(
+        self,
+        plan: Plan,
+        result: ToolResult,
+        action: str,
+        session_id: int | None,
+    ) -> JarvisResponse:
         """Build a response from a tool execution result.
 
         The ToolExecutor enforces the security gate, so even a GREEN-planned
         request may still come back needing confirmation or blocked if the
         tool's own action classifies higher. Those outcomes are reflected here.
+        When the tool needs confirmation (YELLOW), a pending approval request
+        is created and returned; the action is not executed in this step.
 
         Args:
             plan: The plan that led to this execution.
             result: The result returned by the ToolExecutor.
+            action: The request text to record as the action needing approval.
+            session_id: Optional session identifier for the approval request.
 
         Returns:
             A JarvisResponse reflecting the tool result, with the plan.
@@ -212,12 +257,19 @@ class JarvisOrchestrator:
             )
 
         if result.requires_confirmation:
+            approval = self._approvals.create_request(
+                action=action,
+                reason=result.error or "This action requires your confirmation.",
+                security_tier=SecurityTier.YELLOW,
+                session_id=session_id,
+            )
             return JarvisResponse(
                 success=False,
                 message=result.error or "This action requires your confirmation.",
                 plan=plan,
                 tool_result=result,
                 requires_confirmation=True,
+                approval_request=approval,
             )
 
         if not result.success:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from approval.approval_models import ApprovalRequest
 from planner.plan_models import Plan
 from tools.base_tool import ToolResult
 
@@ -51,6 +52,9 @@ class JarvisResponse:
         requires_confirmation: True when the request was withheld because it
             needs user confirmation (a YELLOW action).
         blocked: True when the request was blocked outright (a RED action).
+        approval_request: The pending approval request created for a YELLOW
+            action, if any. Present only when requires_confirmation is True and
+            the action was routed into the approval flow.
     """
 
     success: bool
@@ -59,3 +63,4 @@ class JarvisResponse:
     tool_result: ToolResult | None = None
     requires_confirmation: bool = False
     blocked: bool = False
+    approval_request: ApprovalRequest | None = None
