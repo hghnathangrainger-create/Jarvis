@@ -1,0 +1,193 @@
+# Jarvis Phase 3 Implementation Plan
+
+**Version:** 1.0
+**Phase name:** Live CLI Approval Execution and Practical Workflow Tools
+**Builds on:** `phase-2-approval-flow`
+**Date:** _______________
+
+---
+
+## 1. Purpose of Phase 3
+
+Phase 2 built the approval flow and proved it works end to end: a sensitive (YELLOW) action can be requested, approved or declined, executed only when approved, and recorded in the audit log. But that flow is not yet wired into everyday use. When the user runs Jarvis and types a real request, the interactive command line does not yet walk them through approving and then running a YELLOW action.
+
+Phase 3 closes that gap. Its purpose is to connect the approval flow to the live CLI, so the user can approve or decline YELLOW actions during real Jarvis use, and to add a small number of practical, safe workflow tools that make Jarvis genuinely useful day to day.
+
+> Phase 3 builds directly on the `phase-2-approval-flow` checkpoint. Everything from Phase 2 is preserved; Phase 3 makes it usable in the live interface.
+
+---
+
+## 2. Scope
+
+Phase 3 delivers the following, in priority order:
+
+1. **Live CLI approval** — connect the interactive command line to the approval prompt so a YELLOW request is presented to the user for a real decision.
+2. **Execute approved actions** — run an approved YELLOW action through the Tool Executor from within the live CLI session.
+3. **Cancel declined actions** — cleanly cancel a declined YELLOW action so nothing runs, with clear feedback to the user.
+4. **Clearer CLI output** — improve how GREEN, YELLOW, RED, and failed actions are shown, and display approval request details clearly.
+5. **Register file tools live** — ensure `file_list` and `file_read` are available in the live CLI/Core path.
+6. **Practical read-only commands** — add a few safe, read-only workflow commands built on the existing tools.
+7. **CLI end-to-end tests** — test the full live approval journey through the CLI, using injected input and output.
+
+---
+
+## 3. What Is NOT Included in Phase 3
+
+To keep Phase 3 focused and safe, the following are intentionally excluded:
+
+- File writing, deleting, moving, renaming, or editing. Phase 3 stays read-only; any write capability belongs to a later phase and would require a stronger approval design.
+- Any RED action becoming allowed. Dangerous actions stay blocked, always.
+- Live Claude API responses. The provider remains ready, but no live call is required, and enabling one is a deliberate future step.
+- Autonomous behaviour. Jarvis still acts only in response to the user, one request at a time.
+- Voice, phone, or graphical interfaces. Phase 3 remains a text command line.
+- Durable storage of pending approvals across restarts. This remains a future consideration.
+
+> **Discipline first.** Phase 3 makes the existing, tested approval flow usable. It does not add risky new powers. Anything not in the scope is deferred on purpose.
+
+---
+
+## 4. Safety Rules
+
+The Phase 2 safety model is preserved in full and carried into the live interface:
+
+- **GREEN — may run automatically.** Read-only actions (listing a folder, reading a file, searching memories) run without asking.
+- **YELLOW — must ask the user first.** A sensitive action is presented to the user in the CLI. Approved YELLOW may execute. Declined YELLOW must not execute.
+- **RED — must always stay blocked.** Dangerous actions are refused and never run, even if an approval is somehow supplied.
+
+Rules that never change in Phase 3:
+
+- No file writing, deleting, moving, renaming, or editing — unless a later phase explicitly adds it with a stronger approval design.
+- No live Claude API requirement yet.
+- Every action still passes through the single security gate (the Tool Executor).
+- Every approval decision is still logged.
+- The user remains in control at all times.
+
+---
+
+## 5. Development Principles
+
+Phase 3 follows the same principles that made Phases 1 and 2 stable:
+
+1. Build one feature at a time. Finish and test each step before starting the next.
+2. The user is always in control. No sensitive action runs without an explicit approval in the live session.
+3. Never bypass the Security Manager. Every action, new or old, passes through the same gate.
+4. Read-only before read-write. Phase 3 stays read-only; destructive powers are not added here.
+5. Reuse, do not rewrite. The approval prompt, Approval Manager, and executor already exist and are tested; Phase 3 wires them together.
+6. Test as you build. A feature is not done until its tests pass, and no earlier test may break.
+7. Keep the CLI simple. Clear text in, clear text out; no advanced UI yet.
+
+---
+
+## 6. Branch & Checkpoint Instructions
+
+Phase 3 begins from the `phase-2-approval-flow` tag, so the stable Phase 2 milestone is always recoverable.
+
+**Create the phase branch:**
+
+```powershell
+git checkout -b phase-3-live-cli phase-2-approval-flow
+```
+
+**Develop each step on a short-lived feature branch**, merged into the phase branch when a step is complete and tested. For example:
+
+```powershell
+git checkout -b feature/live-cli-approval phase-3-live-cli
+```
+
+Never develop directly on `main`.
+
+**Tag when Phase 3 is complete**, tested, and documented:
+
+```powershell
+git tag phase-3-live-cli
+```
+
+---
+
+## 7. Proposed Module Order
+
+Build in this order. Each step depends on the previous one being complete and tested.
+
+| Step | Module | What it delivers |
+|---|---|---|
+| 1 | Branch & checkpoint rules | Create the Phase 3 branch from the Phase 2 tag and confirm the working rules. |
+| 2 | Connect live CLI to prompt | Wire the interactive CLI to the existing approval prompt for YELLOW actions. |
+| 3 | Execute approved YELLOW | Run an approved YELLOW tool action through the Tool Executor from the CLI. |
+| 4 | Cancel declined YELLOW | Cleanly cancel a declined action so nothing runs, with clear feedback. |
+| 5 | Show request details | Display the approval request's action, reason, and tier clearly in the CLI. |
+| 6 | Improve CLI output | Format GREEN, YELLOW, RED, and failed actions clearly and consistently. |
+| 7 | Register file tools live | Ensure `file_list` and `file_read` are registered in the live CLI/Core path. |
+| 8 | Practical read-only commands | Add a few safe workflow commands built on the existing tools. |
+| 9 | CLI end-to-end tests | Test the full live approval journey using injected input and output. |
+| 10 | Update README | Describe the new live approval experience and workflow commands. |
+| 11 | Phase 3 completion report | Write the milestone report, mirroring Phases 1 and 2. |
+| 12 | Tag Phase 3 | Create the `phase-3-live-cli` checkpoint tag. |
+
+---
+
+## 8. Testing Strategy
+
+Testing remains part of building, not a final step.
+
+**Unit tests** — for any new CLI helper functions and any new workflow commands, tested in isolation with injected input and output.
+
+**Integration / CLI end-to-end tests** — drive the live CLI with scripted input to prove the full journeys: a YELLOW request that is approved and then runs, and one that is declined and is cancelled — all without a real terminal.
+
+**Safety tests** — confirm that, through the live CLI: a RED action is still blocked and can never be approved; a YELLOW action never runs without an explicit approval; and the file tools never modify anything.
+
+**Regression tests** — the entire Phase 1 and Phase 2 test suite must continue to pass unchanged.
+
+> A Phase 3 feature is only complete when its own tests pass AND no earlier test has broken.
+
+---
+
+## 9. Definition of Done
+
+Phase 3 is complete when all of the following are true:
+
+- A YELLOW request typed into the live CLI presents an approval prompt to the user.
+- An approved YELLOW action then executes through the Tool Executor.
+- A declined YELLOW action is cleanly cancelled and does not run.
+- The CLI clearly shows GREEN, YELLOW, RED, and failed outcomes, and displays approval request details.
+- `file_list` and `file_read` are available in the live CLI/Core path.
+- A few safe, read-only workflow commands are available and tested.
+- Dangerous RED actions remain blocked, and no approval can unlock them.
+- No file is written, deleted, moved, renamed, or edited; no live Claude call is required.
+- The full test suite passes, including all Phase 1 and Phase 2 tests and new CLI end-to-end tests.
+- The README is updated and a Phase 3 completion report is written.
+
+---
+
+## 10. Risks & Known Limitations
+
+These are understood going in, and shape the careful scope of Phase 3:
+
+- **Interactive input is harder to test than pure functions.** This is mitigated by keeping CLI logic in small, testable helpers and driving the loop with injected input and output, as in Phases 1 and 2.
+- **Approvals remain in memory for the session.** Pending approvals are not yet persisted across restarts; only the audit records of decisions are stored. Durable approval storage is deferred.
+- **The toolset stays read-only.** Practical commands added in Phase 3 use only existing read-only tools, so Jarvis is still limited to safe, non-destructive actions.
+- **No live AI reasoning yet.** Decisions are rule-based; the Claude provider is not connected into the request path in this phase.
+- **Scope creep is the main project risk.** The plan deliberately lists what is excluded to keep Phase 3 small and safe.
+
+---
+
+## 11. Recommended Next Phase
+
+**Phase 4 — Live AI Reasoning and Guarded Write Actions (proposed).**
+
+Once the approval flow is fully usable in the live CLI and a set of practical read-only tools is in place, the natural next steps are:
+
+- Connect the existing Claude provider into the request path, once API credits are available, as a deliberate and controlled step — so Jarvis can reason about requests, while every resulting action still passes through the same approval flow.
+- Introduce the first guarded write actions (for example, creating or appending to a file) behind a stronger approval design, so Jarvis can begin to change things safely, never without explicit and clear consent.
+- Consider durable storage of pending approvals, so an approval can outlive a single session.
+
+> **The through-line:** every phase adds capability only behind the Security Manager, and never lets automation run ahead of the user's control.
+
+---
+
+## Summary
+
+Phase 3 — Live CLI Approval Execution and Practical Workflow Tools — takes the approval flow that Phase 2 built and tested, and makes it real in everyday use. The user will be able to type a request, see a clear approval prompt for anything sensitive, and approve or decline it on the spot, with approved actions running and declined actions cancelled.
+
+Dangerous actions stay blocked, the toolset stays read-only, live AI remains a deliberate future step, and the whole phase builds cleanly on the stable `phase-2-approval-flow` checkpoint.
+
+**The goal of Phase 3:** make the approval flow something the user actually uses — safely, clearly, and always in control.
