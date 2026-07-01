@@ -41,6 +41,33 @@ _STATUS_NOT_HANDLED = "NOT HANDLED"
 _PROMPT = "you> "
 _GOODBYE = "Jarvis Offline. Goodbye."
 
+#: Prompt prefixes that may be accidentally pasted at the start of a request.
+#: Both the full prompt ("you> ") and its trimmed form ("you>") are handled.
+_PROMPT_PREFIXES: tuple[str, ...] = ("you>", "jarvis>")
+
+
+def strip_prompt_prefix(text: str) -> str:
+    """Remove an accidentally pasted prompt prefix from the start of input.
+
+    When a user copies a whole line from the terminal, the leading prompt
+    (for example "you> ") can end up in the pasted text. This removes a single
+    such prefix so that "you> exit" behaves exactly like "exit". Only one
+    prefix is removed, and only when it appears at the very start.
+
+    Args:
+        text: The raw user input.
+
+    Returns:
+        The input with a single leading prompt prefix removed, if present, and
+        with surrounding whitespace stripped.
+    """
+    cleaned = text.strip()
+    lowered = cleaned.casefold()
+    for prefix in _PROMPT_PREFIXES:
+        if lowered.startswith(prefix):
+            return cleaned[len(prefix) :].strip()
+    return cleaned
+
 
 def is_exit_command(text: str) -> bool:
     """Report whether the given input is an exit command.
@@ -150,7 +177,7 @@ class JarvisCLI:
                 self._output(_GOODBYE)
                 return
 
-            text = raw.strip()
+            text = strip_prompt_prefix(raw)
             if not text:
                 continue
 
@@ -164,5 +191,8 @@ class JarvisCLI:
     def _print_banner(self) -> None:
         """Print the startup banner and a short usage hint."""
         self._output(STARTUP_BANNER)
-        self._output(f"{APP_NAME} Phase 1 CLI. Type 'exit', 'quit', or 'bye' to leave.")
+        self._output(f"{APP_NAME} Phase 1 CLI.")
+        self._output("Type only your request after the prompt.")
+        self._output("Do not type the 'you>' prompt text itself.")
+        self._output("Type 'exit', 'quit', or 'bye' to leave.")
         self._output("")

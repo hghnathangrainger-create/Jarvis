@@ -31,6 +31,7 @@ from ui.cli import (
     format_response,
     is_exit_command,
     status_for,
+    strip_prompt_prefix,
 )
 
 
@@ -187,6 +188,73 @@ def test_cli_ignores_blank_lines(orchestrator: JarvisOrchestrator) -> None:
     cli.run()
     # Blank lines produce no jarvis> output; only banner + goodbye appear.
     assert not any(line.startswith("jarvis>") for line in outputs)
+
+
+# --- Prompt-prefix stripping (pasted "you>" handling) ------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("you> exit", "exit"),
+        ("you> show me system info", "show me system info"),
+        ("you>exit", "exit"),
+        ("YOU> exit", "exit"),
+        ("  you>  echo hi  ", "echo hi"),
+        ("jarvis> hello", "hello"),
+        ("exit", "exit"),
+        ("you are great", "you are great"),
+        ("tell me about you> stuff", "tell me about you> stuff"),
+    ],
+)
+def test_strip_prompt_prefix(raw: str, expected: str) -> None:
+    assert strip_prompt_prefix(raw) == expected
+
+
+def test_pasted_prompt_exit_still_exits(orchestrator: JarvisOrchestrator) -> None:
+    """'you> exit' should exit, not be processed as a request."""
+    scripted = iter(["you> exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    assert any("Goodbye" in line for line in outputs)
+    assert not any(line.startswith("jarvis>") for line in outputs)
+
+
+def test_pasted_prompt_request_is_processed(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """'you> echo hi' should behave exactly like 'echo hi'."""
+    scripted = iter(["you> echo hi", "exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    assert any("[OK] echo hi" in line for line in outputs)
+
+
+def test_banner_warns_against_typing_prompt(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """The startup banner tells the user not to type the prompt text."""
+    scripted = iter(["exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    banner = "\n".join(outputs)
+    assert "Do not type" in banner
+    assert "you>" in banner
 
 
 # --- Entry point -------------------------------------------------------------
