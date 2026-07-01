@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalRequest
 from config.constants import SecurityTier
 from core.orchestrator import JarvisOrchestrator
@@ -262,6 +263,17 @@ def test_format_decision_declined() -> None:
     text = format_decision(decision)
     assert "[DECLINED]" in text
     assert "cancelled" in text.lower()
+    assert "will not run" in text.lower()
+
+
+def test_format_decision_names_the_action() -> None:
+    request = ApprovalRequest(
+        action="send email to Alex", reason="x", security_tier=SecurityTier.YELLOW
+    )
+    approved = request.decide(approved=True, decided_by="user")
+    declined = request.decide(approved=False, decided_by="user")
+    assert "send email to Alex" in format_decision(approved, request.action)
+    assert "send email to Alex" in format_decision(declined, request.action)
 
 
 # --- Approved execution (Step 3) ---------------------------------------------
@@ -294,6 +306,31 @@ def test_declined_decision_does_not_execute() -> None:
 
     assert executed.success is False
     assert tool.ran is False
+
+
+def test_declined_request_is_no_longer_pending() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    response = _yellow_tool_response(orchestrator, "send")
+    request_id = response.approval_request.request_id
+
+    orchestrator.approvals.decline(request_id, decided_by="user")
+
+    assert not orchestrator.approvals.has_pending(request_id)
+    assert orchestrator.approvals.list_pending() == []
+
+
+def test_declined_decision_is_recorded() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    response = _yellow_tool_response(orchestrator, "send")
+    request_id = response.approval_request.request_id
+
+    orchestrator.approvals.decline(request_id, decided_by="user")
+
+    decisions = orchestrator.approvals.list_decisions()
+    assert len(decisions) == 1
+    assert decisions[0].is_declined is True
 
 
 def test_red_tool_stays_blocked_even_when_approved() -> None:
@@ -369,3 +406,51 @@ def test_cli_decline_does_not_execute() -> None:
     assert "[DECLINED]" in output
     assert "Message sent!" not in output
     assert tool.ran is False
+
+
+def test_cli_decline_is_clean_and_audited() -> None:
+    """A full CLI decline: nothing runs, it is recorded, audited, and cleared."""
+    logger = _SpyLogger()
+    security = SecurityManager()
+    registry = ToolRegistry()
+    tool = _SendTool()
+    registry.register_tool(EchoTool())
+    registry.register_tool(tool)
+    executor = ToolExecutor(
+        registry=registry,
+        security_manager=security,
+        logger=logger,  # type: ignore[arg-type]
+    )
+    approvals = ApprovalManager(audit_logger=logger)  # type: ignore[arg-type]
+    orchestrator = JarvisOrchestrator(
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        approval_manager=approvals,
+    )
+    crafted = _yellow_tool_response(orchestrator, "send")
+    request_id = crafted.approval_request.request_id
+
+    output = _run_cli_with_crafted_yellow(
+        orchestrator, crafted, ["send a message", "no", "exit"]
+    )
+
+    # Nothing ran.
+    assert tool.ran is False
+    # Clear cancellation feedback that says it will not run.
+    assert "[DECLINED]" in output
+    assert "will not run" in output.lower()
+    # Recorded and no longer pending.
+    assert orchestrator.approvals.list_decisions()[0].is_declined is True
+    assert not orchestrator.approvals.has_pending(request_id)
+    # The decline was written to the audit log.
+    approval_events = [
+        e for e in logger.events if e.get("action_type") == "approval_decision"
+    ]
+    assert len(approval_events) == 1
+    assert "outcome=declined" in str(approval_events[0]["detail"])
+    # No successful tool execution was logged.
+    success_tool_events = [
+        e for e in logger.events if "success=True" in str(e.get("detail", ""))
+    ]
+    assert success_tool_events == []

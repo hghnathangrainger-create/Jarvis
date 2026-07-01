@@ -136,19 +136,28 @@ def format_response(response: JarvisResponse) -> str:
     return "\n".join(lines)
 
 
-def format_decision(decision: ApprovalDecision) -> str:
+def format_decision(
+    decision: ApprovalDecision, action: str | None = None
+) -> str:
     """Format the feedback shown after the user approves or declines.
 
     Args:
         decision: The recorded approval decision.
+        action: The action the decision applies to. When provided, it is named
+            in the feedback so the user sees exactly what was approved or
+            cancelled.
 
     Returns:
         A single line clearly stating the outcome. An approval notes that the
-        action will run in a later step; a decline notes it was cancelled.
+        action will run; a decline notes it was cancelled and did not run.
     """
+    subject = f" '{action}'" if action else " this action"
     if decision.is_approved:
-        return "jarvis> [APPROVED] You approved this action."
-    return "jarvis> [DECLINED] You declined this action. It has been cancelled."
+        return f"jarvis> [APPROVED] You approved{subject}."
+    return (
+        f"jarvis> [DECLINED] You declined{subject}. "
+        "It has been cancelled and will not run."
+    )
 
 
 class JarvisCLI:
@@ -253,7 +262,7 @@ class JarvisCLI:
             )
             return
 
-        self._output(format_decision(decision))
+        self._output(format_decision(decision, request.action))
 
         # If approved, run the action now through the Core (which re-runs the
         # tool through the ToolExecutor with the decision). Declined actions do
