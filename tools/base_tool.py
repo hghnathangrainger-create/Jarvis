@@ -56,8 +56,10 @@ class ToolResult:
         output: The tool's output text on success, or an empty string.
         error: A human-readable error or status message when not successful.
         requires_confirmation: True when the action was withheld because it
-            needs user confirmation (a YELLOW action in Phase 1).
+            needs user confirmation (a YELLOW action).
         blocked: True when the action was blocked outright (a RED action).
+        metadata: Optional extra string details about the result, such as the
+            id of the approval that authorised the run.
     """
 
     tool_name: str
@@ -66,6 +68,7 @@ class ToolResult:
     error: str | None = None
     requires_confirmation: bool = False
     blocked: bool = False
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class BaseTool(ABC):
