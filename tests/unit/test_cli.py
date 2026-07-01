@@ -24,6 +24,7 @@ from memory.episodic_memory import MemoryRecord
 from planner.planner import Planner
 from security.security_manager import SecurityManager
 from tools.builtin import EchoTool, InfoTool, MemoryTool
+from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import (
@@ -112,12 +113,12 @@ def test_format_ok_response() -> None:
     assert "Here is the info" in rendered
 
 
-def test_format_confirmation_response() -> None:
+def test_format_approval_response() -> None:
     response = JarvisResponse(
         success=False, message="needs your ok", requires_confirmation=True
     )
-    assert status_for(response) == "NEEDS CONFIRMATION"
-    assert "[NEEDS CONFIRMATION]" in format_response(response)
+    assert status_for(response) == "NEEDS APPROVAL"
+    assert "[NEEDS APPROVAL]" in format_response(response)
 
 
 def test_format_blocked_response() -> None:
@@ -130,6 +131,66 @@ def test_format_not_handled_response() -> None:
     response = JarvisResponse(success=False, message="cannot do that yet")
     assert status_for(response) == "NOT HANDLED"
     assert "[NOT HANDLED]" in format_response(response)
+
+
+def test_format_failed_response() -> None:
+    """A tool that ran but errored is reported as FAILED, not NOT HANDLED."""
+    result = ToolResult(
+        tool_name="file_read", success=False, error="Path does not exist"
+    )
+    response = JarvisResponse(
+        success=False, message="Path does not exist", tool_result=result
+    )
+    assert status_for(response) == "FAILED"
+    assert "[FAILED]" in format_response(response)
+
+
+def test_blocked_wins_over_failed() -> None:
+    """A blocked response stays BLOCKED even if it carries a tool result."""
+    result = ToolResult(
+        tool_name="danger", success=False, error="blocked", blocked=True
+    )
+    response = JarvisResponse(
+        success=False, message="blocked", blocked=True, tool_result=result
+    )
+    assert status_for(response) == "BLOCKED"
+
+
+def test_needs_approval_wins_over_failed() -> None:
+    """A needs-approval response stays NEEDS APPROVAL even with a tool result."""
+    result = ToolResult(
+        tool_name="send",
+        success=False,
+        error="confirm",
+        requires_confirmation=True,
+    )
+    response = JarvisResponse(
+        success=False,
+        message="confirm",
+        requires_confirmation=True,
+        tool_result=result,
+    )
+    assert status_for(response) == "NEEDS APPROVAL"
+
+
+def test_all_five_status_labels_are_distinct() -> None:
+    """The five outcome labels are all different, so they are unambiguous."""
+    labels = {
+        status_for(JarvisResponse(success=True, message="x")),
+        status_for(
+            JarvisResponse(success=False, message="x", requires_confirmation=True)
+        ),
+        status_for(JarvisResponse(success=False, message="x", blocked=True)),
+        status_for(
+            JarvisResponse(
+                success=False,
+                message="x",
+                tool_result=ToolResult(tool_name="t", success=False, error="e"),
+            )
+        ),
+        status_for(JarvisResponse(success=False, message="x")),
+    }
+    assert labels == {"OK", "NEEDS APPROVAL", "BLOCKED", "FAILED", "NOT HANDLED"}
 
 
 # --- Interactive loop with injected I/O --------------------------------------
@@ -265,4 +326,4 @@ def test_main_entry_point_imports() -> None:
     import main
 
     assert callable(main.main)
-    assert callable(main.build_orchestrator)
+    assert callable(main.build_orchestrator)   

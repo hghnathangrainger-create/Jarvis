@@ -40,8 +40,9 @@ _EXIT_COMMANDS: frozenset[str] = frozenset({"exit", "quit", "bye"})
 
 #: Status labels shown to the user for each kind of response.
 _STATUS_OK = "OK"
-_STATUS_CONFIRM = "NEEDS CONFIRMATION"
+_STATUS_APPROVAL = "NEEDS APPROVAL"
 _STATUS_BLOCKED = "BLOCKED"
+_STATUS_FAILED = "FAILED"
 _STATUS_NOT_HANDLED = "NOT HANDLED"
 
 _PROMPT = "you> "
@@ -90,8 +91,10 @@ def is_exit_command(text: str) -> bool:
 def status_for(response: JarvisResponse) -> str:
     """Return the status label that describes a response.
 
-    The checks are ordered by severity so the most important status is shown:
-    blocked first, then needs-confirmation, then success, then not-handled.
+    The checks are ordered by severity and specificity so the clearest status
+    is shown: blocked first (RED), then needs-approval (YELLOW), then success
+    (GREEN/OK). For an unsuccessful response, a tool that ran but errored is
+    reported as FAILED, while a request nothing could handle is NOT HANDLED.
 
     Args:
         response: The response to label.
@@ -102,9 +105,13 @@ def status_for(response: JarvisResponse) -> str:
     if response.blocked:
         return _STATUS_BLOCKED
     if response.requires_confirmation:
-        return _STATUS_CONFIRM
+        return _STATUS_APPROVAL
     if response.success:
         return _STATUS_OK
+    # Unsuccessful: distinguish a tool that ran and failed from a request that
+    # nothing could handle. A present tool_result means a tool actually ran.
+    if response.tool_result is not None:
+        return _STATUS_FAILED
     return _STATUS_NOT_HANDLED
 
 
