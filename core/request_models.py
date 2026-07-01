@@ -17,7 +17,7 @@ what goes in and what comes out, independent of how a request is handled.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from approval.approval_models import ApprovalRequest
 from planner.plan_models import Plan
@@ -55,6 +55,11 @@ class JarvisResponse:
         approval_request: The pending approval request created for a YELLOW
             action, if any. Present only when requires_confirmation is True and
             the action was routed into the approval flow.
+        tool_name: The name of the tool that should run once the action is
+            approved, if this request is a tool-backed YELLOW action. Empty for
+            GREEN, RED, and plan-only (non-tool) responses.
+        tool_input: The input the tool should run with once approved. Empty
+            unless tool_name is set.
     """
 
     success: bool
@@ -64,3 +69,5 @@ class JarvisResponse:
     requires_confirmation: bool = False
     blocked: bool = False
     approval_request: ApprovalRequest | None = None
+    tool_name: str | None = None
+    tool_input: dict[str, object] = field(default_factory=dict)

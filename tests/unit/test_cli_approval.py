@@ -21,9 +21,11 @@ import pytest
 from approval.approval_models import ApprovalRequest
 from config.constants import SecurityTier
 from core.orchestrator import JarvisOrchestrator
+from core.request_models import JarvisResponse
 from memory.episodic_memory import MemoryRecord
 from planner.planner import Planner
 from security.security_manager import SecurityManager
+from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.builtin import EchoTool, InfoTool, MemoryTool
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
@@ -94,6 +96,87 @@ def _run_cli(inputs: list[str]) -> tuple[JarvisOrchestrator, str]:
     )
     cli.run()
     return orchestrator, "\n".join(outputs)
+
+
+# --- A YELLOW tool used to test approved execution ---------------------------
+
+
+class _SendTool(BaseTool):
+    """A tool whose action classifies YELLOW; records whether it ran."""
+
+    def __init__(self) -> None:
+        self.ran = False
+
+    @property
+    def name(self) -> str:
+        return "send"
+
+    @property
+    def description(self) -> str:
+        return "A sensitive (YELLOW) tool that pretends to send a message."
+
+    def action_for(self, request: ToolRequest) -> str:
+        return "send email"
+
+    def run(self, request: ToolRequest) -> ToolResult:
+        self.ran = True
+        return ToolResult(tool_name=self.name, success=True, output="Message sent!")
+
+
+class _WipeTool(BaseTool):
+    """A tool whose action classifies RED; its run must never be reached."""
+
+    def __init__(self) -> None:
+        self.ran = False
+
+    @property
+    def name(self) -> str:
+        return "wipe"
+
+    @property
+    def description(self) -> str:
+        return "A dangerous (RED) tool that must never run."
+
+    def action_for(self, request: ToolRequest) -> str:
+        return "format drive"
+
+    def run(self, request: ToolRequest) -> ToolResult:
+        self.ran = True
+        raise AssertionError("A RED action must never run.")
+
+
+def _build_with_tool(tool: BaseTool) -> JarvisOrchestrator:
+    security = SecurityManager()
+    registry = ToolRegistry()
+    registry.register_tool(EchoTool())
+    registry.register_tool(tool)
+    executor = ToolExecutor(
+        registry=registry,
+        security_manager=security,
+        logger=_SpyLogger(),  # type: ignore[arg-type]
+    )
+    return JarvisOrchestrator(
+        planner=Planner(security), executor=executor, registry=registry
+    )
+
+
+def _yellow_tool_response(
+    orchestrator: JarvisOrchestrator, tool_name: str
+) -> JarvisResponse:
+    """Build the kind of response the Core returns for a YELLOW tool action."""
+    request = orchestrator.approvals.create_request(
+        action="send email to Alex",
+        reason="Sending an email communicates on your behalf.",
+        security_tier=SecurityTier.YELLOW,
+    )
+    return JarvisResponse(
+        success=False,
+        message="This action requires your confirmation.",
+        requires_confirmation=True,
+        approval_request=request,
+        tool_name=tool_name,
+        tool_input={},
+    )
 
 
 # --- Approval prompt is triggered for YELLOW ---------------------------------
@@ -179,3 +262,110 @@ def test_format_decision_declined() -> None:
     text = format_decision(decision)
     assert "[DECLINED]" in text
     assert "cancelled" in text.lower()
+
+
+# --- Approved execution (Step 3) ---------------------------------------------
+
+
+def test_execute_approved_runs_the_tool() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    response = _yellow_tool_response(orchestrator, "send")
+    decision = orchestrator.approvals.approve(
+        response.approval_request.request_id, decided_by="user"
+    )
+
+    executed = orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert executed.message == "Message sent!"
+    assert tool.ran is True
+
+
+def test_declined_decision_does_not_execute() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    response = _yellow_tool_response(orchestrator, "send")
+    decision = orchestrator.approvals.decline(
+        response.approval_request.request_id, decided_by="user"
+    )
+
+    executed = orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert tool.ran is False
+
+
+def test_red_tool_stays_blocked_even_when_approved() -> None:
+    tool = _WipeTool()
+    orchestrator = _build_with_tool(tool)
+    response = _yellow_tool_response(orchestrator, "wipe")
+    decision = orchestrator.approvals.approve(
+        response.approval_request.request_id, decided_by="user"
+    )
+
+    executed = orchestrator.execute_approved(response, decision)
+
+    assert executed.blocked is True
+    assert tool.ran is False
+
+
+# --- Full CLI journey with execution -----------------------------------------
+
+
+def _run_cli_with_crafted_yellow(
+    orchestrator: JarvisOrchestrator, crafted: JarvisResponse, inputs: list[str]
+) -> str:
+    """Drive the CLI so a 'send' request returns a crafted YELLOW response.
+
+    The built-in tool matcher does not route to the test's YELLOW tool, so the
+    orchestrator's handle_request is wrapped to return the crafted response for
+    a 'send' request while leaving everything else unchanged.
+    """
+    original = orchestrator.handle_request
+
+    def _handle(text: str) -> JarvisResponse:
+        if "send" in text.lower():
+            return crafted
+        return original(text)
+
+    orchestrator.handle_request = _handle  # type: ignore[method-assign]
+
+    scripted = iter(inputs)
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    return "\n".join(outputs)
+
+
+def test_cli_approve_executes_and_displays_result() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    crafted = _yellow_tool_response(orchestrator, "send")
+
+    output = _run_cli_with_crafted_yellow(
+        orchestrator, crafted, ["send a message", "yes", "exit"]
+    )
+
+    assert "Approval required" in output
+    assert "[APPROVED]" in output
+    assert "Message sent!" in output
+    assert tool.ran is True
+
+
+def test_cli_decline_does_not_execute() -> None:
+    tool = _SendTool()
+    orchestrator = _build_with_tool(tool)
+    crafted = _yellow_tool_response(orchestrator, "send")
+
+    output = _run_cli_with_crafted_yellow(
+        orchestrator, crafted, ["send a message", "no", "exit"]
+    )
+
+    assert "[DECLINED]" in output
+    assert "Message sent!" not in output
+    assert tool.ran is False

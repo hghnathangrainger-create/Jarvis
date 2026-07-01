@@ -26,6 +26,7 @@ a way around them.
 from __future__ import annotations
 
 from approval.approval_manager import ApprovalManager
+from approval.approval_models import ApprovalDecision
 from config.constants import SecurityTier
 from core.request_models import JarvisRequest, JarvisResponse
 from planner.plan_models import Plan
@@ -90,6 +91,91 @@ class JarvisOrchestrator:
         """
         return self._approvals
 
+    def execute_approved(
+        self, response: JarvisResponse, decision: ApprovalDecision
+    ) -> JarvisResponse:
+        """Run a previously-approved tool action through the security gate.
+
+        This is used after the user approves a YELLOW action in the CLI. It
+        re-runs the exact tool and input carried on the original response,
+        passing the approval decision to the ToolExecutor. The executor still
+        classifies the action, so a RED action can never be run this way even
+        if a decision is supplied.
+
+        Args:
+            response: The original response that carried the approval request,
+                including the tool name and input to run.
+            decision: The approval decision authorising the run. Must be
+                approved for anything to execute.
+
+        Returns:
+            A JarvisResponse describing the executed result. If the response
+            has no tool to run, or the decision is not approved, a response is
+            returned that explains that nothing was executed.
+        """
+        if not decision.is_approved:
+            return JarvisResponse(
+                success=False,
+                message="The action was declined and was not run.",
+                plan=response.plan,
+            )
+
+        if not response.tool_name:
+            # A plan-only YELLOW action with no backing tool: there is nothing
+            # to execute. The approval is still recorded by the caller.
+            return JarvisResponse(
+                success=True,
+                message="Approved. There is no runnable tool for this action yet.",
+                plan=response.plan,
+            )
+
+        result = self._executor.execute(
+            response.tool_name,
+            response.tool_input,
+            session_id=(
+                response.approval_request.session_id
+                if response.approval_request is not None
+                else None
+            ),
+            approval_decision=decision,
+        )
+        return self._tool_result_to_response(response.plan, result)
+
+    @staticmethod
+    def _tool_result_to_response(
+        plan: Plan | None, result: ToolResult
+    ) -> JarvisResponse:
+        """Convert a post-approval tool result into a response.
+
+        Args:
+            plan: The plan from the original request, carried through.
+            result: The result of running the approved tool.
+
+        Returns:
+            A JarvisResponse reflecting the executed result.
+        """
+        if result.blocked:
+            return JarvisResponse(
+                success=False,
+                message=result.error or "The action was blocked for safety.",
+                plan=plan,
+                tool_result=result,
+                blocked=True,
+            )
+        if not result.success:
+            return JarvisResponse(
+                success=False,
+                message=result.error or "The tool could not complete the request.",
+                plan=plan,
+                tool_result=result,
+            )
+        return JarvisResponse(
+            success=True,
+            message=result.output,
+            plan=plan,
+            tool_result=result,
+        )
+
     def handle_request(
         self, user_request: str, *, session_id: int | None = None
     ) -> JarvisResponse:
@@ -133,7 +219,9 @@ class JarvisOrchestrator:
             result = self._executor.execute(
                 tool_name, tool_input, session_id=request.session_id
             )
-            return self._tool_response(plan, result, text, request.session_id)
+            return self._tool_response(
+                plan, result, text, request.session_id, tool_name, tool_input
+            )
 
         # No tool matched. Fall back to the plan's own classification so the
         # request is still handled safely: blocked if RED, withheld if YELLOW,
@@ -229,6 +317,8 @@ class JarvisOrchestrator:
         result: ToolResult,
         action: str,
         session_id: int | None,
+        tool_name: str,
+        tool_input: dict[str, object],
     ) -> JarvisResponse:
         """Build a response from a tool execution result.
 
@@ -236,13 +326,17 @@ class JarvisOrchestrator:
         request may still come back needing confirmation or blocked if the
         tool's own action classifies higher. Those outcomes are reflected here.
         When the tool needs confirmation (YELLOW), a pending approval request
-        is created and returned; the action is not executed in this step.
+        is created and returned, along with the tool name and input needed to
+        run it once approved; the action is not executed in this step.
 
         Args:
             plan: The plan that led to this execution.
             result: The result returned by the ToolExecutor.
             action: The request text to record as the action needing approval.
             session_id: Optional session identifier for the approval request.
+            tool_name: The tool that was attempted, carried so an approved
+                action can be re-run through the executor.
+            tool_input: The input the tool was attempted with.
 
         Returns:
             A JarvisResponse reflecting the tool result, with the plan.
@@ -270,6 +364,8 @@ class JarvisOrchestrator:
                 tool_result=result,
                 requires_confirmation=True,
                 approval_request=approval,
+                tool_name=tool_name,
+                tool_input=dict(tool_input),
             )
 
         if not result.success:

@@ -213,12 +213,14 @@ class JarvisCLI:
                 self._handle_approval(response)
 
     def _handle_approval(self, response: JarvisResponse) -> None:
-        """Present the approval prompt for a YELLOW action and record the answer.
+        """Present the approval prompt for a YELLOW action and act on the answer.
 
         The pending request carried on the response is shown to the user via the
         existing approval prompt. The decision is recorded through the Core's
-        ApprovalManager so it is stored and audited. The approved action is not
-        executed here; running it is handled in a later step.
+        ApprovalManager so it is stored and audited. If the user approves, the
+        action is then executed through the Core, which re-runs the original
+        tool through the ToolExecutor with the approval decision. If the user
+        declines, nothing is executed.
 
         Args:
             response: The response carrying a pending approval_request.
@@ -235,7 +237,7 @@ class JarvisCLI:
 
         # Record the decision through the Core's ApprovalManager so it is stored
         # and written to the audit log. The manager returns the authoritative
-        # decision, which is what we report back to the user.
+        # decision.
         try:
             if answer.is_approved:
                 decision = self._orchestrator.approvals.approve(
@@ -252,6 +254,13 @@ class JarvisCLI:
             return
 
         self._output(format_decision(decision))
+
+        # If approved, run the action now through the Core (which re-runs the
+        # tool through the ToolExecutor with the decision). Declined actions do
+        # nothing further.
+        if decision.is_approved:
+            executed = self._orchestrator.execute_approved(response, decision)
+            self._output(format_response(executed))
 
     def _print_banner(self) -> None:
         """Print the startup banner and a short usage hint."""
