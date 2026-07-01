@@ -1,33 +1,39 @@
 """
 cli.py
 
-Terminal interface for the Jarvis AI Operating System (Phase 1).
+Terminal interface for the Jarvis AI Operating System.
 
 Responsibilities:
     - Start an interactive read-eval-print loop on the terminal.
     - Pass each typed request to JarvisOrchestrator.handle_request().
     - Format and print the response, clearly distinguishing OK, NEEDS
       CONFIRMATION, BLOCKED, and NOT HANDLED outcomes.
+    - When a response carries an approval request (a YELLOW action), present
+      the approval prompt and record the user's approve/decline decision.
     - Recognise exit commands and end the session cleanly.
 
 Does NOT:
     - Call the Claude API, add voice, or add phone support.
-    - Execute anything itself or bypass the Core or ToolExecutor.
+    - Execute approved actions itself (that is handled in a later step) or
+      bypass the Core or ToolExecutor.
     - Implement orchestration, planning, or security logic.
 
-The CLI is a thin presentation layer. All decisions are made by the Core; the
-CLI only reads input, forwards it, and prints what comes back. The formatting
-and exit-detection logic is kept as pure functions so it can be tested without
-a terminal.
+The CLI is a thin presentation layer. All decisions about risk are made by the
+Core and Security Manager; the CLI only reads input, forwards it, prints what
+comes back, and - for sensitive actions - asks the user to approve or decline.
+The formatting and exit-detection logic is kept as pure functions so it can be
+tested without a terminal, and input/output are injected for the same reason.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
+from approval.approval_models import ApprovalDecision
 from config.constants import APP_NAME, STARTUP_BANNER
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
+from ui.approval_prompt import prompt_for_approval
 
 #: Commands that end the session, matched case-insensitively.
 _EXIT_COMMANDS: frozenset[str] = frozenset({"exit", "quit", "bye"})
@@ -130,6 +136,21 @@ def format_response(response: JarvisResponse) -> str:
     return "\n".join(lines)
 
 
+def format_decision(decision: ApprovalDecision) -> str:
+    """Format the feedback shown after the user approves or declines.
+
+    Args:
+        decision: The recorded approval decision.
+
+    Returns:
+        A single line clearly stating the outcome. An approval notes that the
+        action will run in a later step; a decline notes it was cancelled.
+    """
+    if decision.is_approved:
+        return "jarvis> [APPROVED] You approved this action."
+    return "jarvis> [DECLINED] You declined this action. It has been cancelled."
+
+
 class JarvisCLI:
     """Drives an interactive terminal session backed by the Core.
 
@@ -188,10 +209,54 @@ class JarvisCLI:
             response = self._orchestrator.handle_request(text)
             self._output(format_response(response))
 
+            if response.approval_request is not None:
+                self._handle_approval(response)
+
+    def _handle_approval(self, response: JarvisResponse) -> None:
+        """Present the approval prompt for a YELLOW action and record the answer.
+
+        The pending request carried on the response is shown to the user via the
+        existing approval prompt. The decision is recorded through the Core's
+        ApprovalManager so it is stored and audited. The approved action is not
+        executed here; running it is handled in a later step.
+
+        Args:
+            response: The response carrying a pending approval_request.
+        """
+        request = response.approval_request
+        if request is None:  # Defensive: caller checks, but keep this safe.
+            return
+
+        answer = prompt_for_approval(
+            request,
+            input_func=self._input,
+            output_func=self._output,
+        )
+
+        # Record the decision through the Core's ApprovalManager so it is stored
+        # and written to the audit log. The manager returns the authoritative
+        # decision, which is what we report back to the user.
+        try:
+            if answer.is_approved:
+                decision = self._orchestrator.approvals.approve(
+                    request.request_id, decided_by=answer.decided_by
+                )
+            else:
+                decision = self._orchestrator.approvals.decline(
+                    request.request_id, decided_by=answer.decided_by
+                )
+        except Exception:  # noqa: BLE001 - never let recording crash the loop
+            self._output(
+                "jarvis> [ERROR] Could not record the approval decision."
+            )
+            return
+
+        self._output(format_decision(decision))
+
     def _print_banner(self) -> None:
         """Print the startup banner and a short usage hint."""
         self._output(STARTUP_BANNER)
-        self._output(f"{APP_NAME} Phase 1 CLI.")
+        self._output(f"{APP_NAME} interactive CLI.")
         self._output("Type only your request after the prompt.")
         self._output("Do not type the 'you>' prompt text itself.")
         self._output("Type 'exit', 'quit', or 'bye' to leave.")
