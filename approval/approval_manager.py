@@ -9,27 +9,59 @@ Responsibilities:
     - Approve or decline a pending request, producing a decision.
     - Move a request from pending to completed once it is decided.
     - Store and retrieve completed decisions.
+    - Optionally record every approve/decline decision in the audit log.
 
 Does NOT:
-    - Use the database (this component is purely in-memory for now).
-    - Connect to audit logging, the CLI, or the Core.
+    - Use the database directly (persistence goes through the audit logger).
+    - Connect to the CLI or the Core.
     - Call the Claude API or any AI provider.
     - Ask the user anything or run any action.
 
 The manager owns the lifecycle of an approval: a request starts pending, and
 exactly one decision moves it to completed. Because a decided request is no
-longer pending, it cannot be decided a second time. Keeping this in memory and
-free of side effects makes the lifecycle simple to reason about and to test.
+longer pending, it cannot be decided a second time. An audit logger may be
+supplied to record each decision permanently; when it is omitted, the manager
+works purely in memory, exactly as before.
 """
 
 from __future__ import annotations
+
+from typing import Protocol
 
 from approval.approval_models import (
     ApprovalDecision,
     ApprovalError,
     ApprovalRequest,
 )
-from config.constants import SecurityTier
+from config.constants import EventOutcome, SecurityTier
+
+
+class _ApprovalAuditLogger(Protocol):
+    """The minimal logging interface the ApprovalManager depends on.
+
+    This matches the emit method of observability.logger.EventLogger. Declaring
+    it as a Protocol keeps the manager decoupled from the concrete logger, so it
+    can be tested with a simple stand-in and works with the real EventLogger
+    without importing it directly.
+    """
+
+    def emit(
+        self,
+        *,
+        source: str,
+        action_type: str,
+        outcome: EventOutcome,
+        detail: str | None = ...,
+        duration_ms: int | None = ...,
+        security_tier: SecurityTier | None = ...,
+        session_id: int | None = ...,
+    ) -> str:
+        """Emit a structured event. See EventLogger.emit for details."""
+        ...
+
+
+_SOURCE = "approval_manager"
+_ACTION_TYPE = "approval_decision"
 
 
 class ApprovalManager:
@@ -41,12 +73,23 @@ class ApprovalManager:
     Attributes:
         _pending: Mapping of request_id to a pending ApprovalRequest.
         _decisions: Mapping of request_id to a completed ApprovalDecision.
+        _audit_logger: Optional logger used to record each decision. When None,
+            the manager works purely in memory.
     """
 
-    def __init__(self) -> None:
-        """Initialise an empty approval manager."""
+    def __init__(
+        self, *, audit_logger: _ApprovalAuditLogger | None = None
+    ) -> None:
+        """Initialise an empty approval manager.
+
+        Args:
+            audit_logger: Optional logger (such as an EventLogger) used to
+                record every approve/decline decision in the audit log. When
+                omitted, the manager works purely in memory as before.
+        """
         self._pending: dict[str, ApprovalRequest] = {}
         self._decisions: dict[str, ApprovalDecision] = {}
+        self._audit_logger = audit_logger
 
     def create_request(
         self,
@@ -235,4 +278,64 @@ class ApprovalManager:
         )
         del self._pending[request_id]
         self._decisions[request_id] = decision
+
+        self._audit(request, decision)
         return decision
+
+    def _audit(
+        self, request: ApprovalRequest, decision: ApprovalDecision
+    ) -> None:
+        """Record a decision in the audit log, if a logger was supplied.
+
+        When no audit logger is configured, this is a no-op and the manager
+        behaves purely in memory. When a logger is present, one event is
+        emitted describing the decision.
+
+        The event outcome is SUCCESS for an approval (the action was allowed)
+        and BLOCKED for a decline (the action was prevented). The detail
+        captures the request_id, the action, the outcome, who decided, and the
+        reason when one was supplied.
+
+        Args:
+            request: The request that was decided.
+            decision: The recorded decision.
+        """
+        if self._audit_logger is None:
+            return
+
+        outcome = (
+            EventOutcome.SUCCESS if decision.is_approved else EventOutcome.BLOCKED
+        )
+        self._audit_logger.emit(
+            source=_SOURCE,
+            action_type=_ACTION_TYPE,
+            outcome=outcome,
+            detail=self._build_detail(request, decision),
+            security_tier=request.security_tier,
+            session_id=request.session_id,
+        )
+
+    @staticmethod
+    def _build_detail(
+        request: ApprovalRequest, decision: ApprovalDecision
+    ) -> str:
+        """Build the human-readable detail string for an approval event.
+
+        Args:
+            request: The request that was decided.
+            decision: The recorded decision.
+
+        Returns:
+            A detail string containing the request_id, action, outcome,
+            decider, and reason (when supplied).
+        """
+        verdict = "approved" if decision.is_approved else "declined"
+        parts = [
+            f"request_id={request.request_id}",
+            f"action={request.action}",
+            f"outcome={verdict}",
+            f"decided_by={decision.decided_by}",
+        ]
+        if decision.reason:
+            parts.append(f"reason={decision.reason}")
+        return " ".join(parts)
