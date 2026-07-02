@@ -119,7 +119,9 @@ def format_response(response: JarvisResponse) -> str:
     """Format a response for display in the terminal.
 
     The first line shows the status and the response message. If the response
-    includes a plan, each step is listed beneath it with its security tier.
+    includes a plan, each step is listed beneath it with its security tier. If
+    the response carries an advisory AI suggestion, it is shown last, clearly
+    labelled as advisory - it is informational only and never changes what runs.
 
     Args:
         response: The response to format.
@@ -139,6 +141,11 @@ def format_response(response: JarvisResponse) -> str:
             lines.append(
                 f"          {step.number}. [{step.tier.name}] {step.description}"
             )
+
+    # Advisory only: the AI suggestion is shown for the user's information. It
+    # is produced after the outcome is already decided and never affects it.
+    if response.ai_suggestion:
+        lines.append(f"        {response.ai_suggestion}")
 
     return "\n".join(lines)
 
