@@ -8,9 +8,9 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 
 ## Current Status
 
-**Phase 2 complete: Controlled Intelligence & Approval Flow.**
+**Phase 3 complete: Live CLI Approval Execution and Practical Workflow Tools.**
 
-Phase 1 built the foundation. Phase 2 adds a real approval flow: sensitive actions are now held for explicit approval, run only once approved, and every approval decision is recorded permanently. The complete approval lifecycle is covered by end-to-end integration tests.
+The approval flow built in Phase 2 is now fully usable in everyday interaction. You can type a request, see a clear approval prompt for anything sensitive, and approve or decline it on the spot — approved actions run, declined actions are cancelled. Jarvis can also browse and read your project files with safe, read-only commands. The whole live experience is covered by end-to-end tests.
 
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. The Claude provider layer exists in the codebase, but the current interface uses safe, local tools and does not make live Claude calls. You do not need to add API credits to run or test Jarvis.
 
@@ -29,13 +29,13 @@ Automation should always enhance control, never replace it. Jarvis does the repe
 Safety is enforced by the **Security Manager** and applied at a single gate — the **Tool Executor** — that the rest of the system cannot bypass. Every action is classified into one of three tiers:
 
 - **GREEN — safe.** Read-only actions (searching memories, listing a folder, reading a file) run automatically.
-- **YELLOW — sensitive.** Actions that change something (such as sending a message) are held and require explicit approval before they run.
+- **YELLOW — sensitive.** Actions that change something are held and require explicit approval before they run.
 - **RED — dangerous.** Actions such as formatting a drive, disabling antivirus, or stealing passwords are blocked and never run.
 
 Two rules never change:
 
-- **Approval never overrides RED.** An approval can only permit a YELLOW action; it can never unlock a RED one. RED is blocked before an approval is even considered.
-- **Every action is logged.** Actions and approval decisions are recorded in an append-only audit log.
+- **Approval never overrides RED.** An approval can only permit a YELLOW action; it can never unlock a RED one.
+- **Every action is logged**, including every approval decision, in the append-only audit log.
 
 The core promise: **automation never comes at the cost of user control.**
 
@@ -43,51 +43,66 @@ The core promise: **automation never comes at the cost of user control.**
 
 ## Phase 1 — Foundation (complete)
 
-Phase 1 built the core of Jarvis and a command-line interface to use it:
-
-- **Configuration** loaded from a `.env` file, with shared constants including the security tiers.
-- **Storage** — a local SQLite database with tables for sessions, memories, and the audit log.
-- **Observability** — structured event logging and an append-only audit log.
-- **Memory Engine** — save, list, and search memories, with a "do not remember" option.
-- **Security Manager** — GREEN / YELLOW / RED classification with a clear reason for each decision.
-- **Planner** — turns a request into a simple, structured plan.
-- **Tool Manager** — a registry and a safe executor, plus read-only built-in tools (`echo`, `info`, `memory`).
-- **Jarvis Core** — the orchestrator that wires the subsystems into one request lifecycle.
-- **CLI** — a terminal interface that prints `Jarvis Online.` and takes typed requests.
-
-Phase 1 is tagged `phase-1-foundation`.
+Phase 1 built the core of Jarvis and a command-line interface to use it: configuration, a local SQLite database, structured event logging and an append-only audit log, a Memory Engine, the Security Manager, a Planner, a Tool Manager with safe read-only built-in tools (`echo`, `info`, `memory`), the Core orchestrator, and the CLI. Tagged `phase-1-foundation`.
 
 ---
 
 ## Phase 2 — Controlled Intelligence & Approval Flow (complete)
 
-Phase 2 gives Jarvis the ability to do more than read-only work, while keeping the user in control of every sensitive decision.
+Phase 2 added a real approval flow: approval models, an Approval Manager, a CLI approval prompt, Core integration that creates an approval request for YELLOW actions, a Tool Executor path that runs an approved YELLOW action through the security gate, two read-only file tools (`file_list` and `file_read`), approval audit logging, and end-to-end tests of the whole lifecycle. Tagged `phase-2-approval-flow`.
 
-### The approval flow
+---
 
-When Jarvis meets a sensitive (YELLOW) action, it no longer simply stops — it now runs a real approval flow:
+## Phase 3 — Live CLI Approval Execution and Practical Workflow Tools (complete)
 
-- **GREEN actions run automatically.** No approval is needed for safe, read-only work.
-- **YELLOW actions create an approval request.** The action is described and held. It does **not** run yet.
-- **Approved YELLOW actions may execute.** Once the user approves, the action runs through the Tool Executor's security gate.
-- **Declined YELLOW actions are cancelled.** A declined action never runs.
-- **RED actions are always blocked** — even if an approval decision is supplied.
+Phase 3 makes the approval flow usable in real, everyday interaction, and adds safe read-only file commands.
 
-### New in Phase 2
+### The live approval flow
 
-- **Approval models** — `ApprovalRequest`, `ApprovalDecision`, and `ApprovalStatus` describe every approval.
-- **Approval Manager** — creates requests, records approve/decline decisions, and keeps a history. It cannot decide the same request twice.
-- **CLI approval prompt** — displays a request clearly and reads the user's yes/no answer.
-- **Core approval integration** — the orchestrator creates an approval request whenever it meets a YELLOW action.
-- **Tool Executor approved-YELLOW path** — an explicitly approved YELLOW action is allowed to run through the gate; RED can never be unlocked this way.
-- **Read-only file tools:**
-  - **`file_list`** — lists the files and folders in a directory. It does not read file contents or recurse into subfolders.
-  - **`file_read`** — reads the contents of a single text file, up to a character limit, refusing binary files and marking truncated output clearly.
-  - Both are read-only, classify as GREEN, and never modify anything.
-- **Approval audit logging** — every approve and decline is recorded in the audit log, capturing the request id, action, outcome, who decided, and the reason.
-- **End-to-end approval tests** — integration tests trace the complete lifecycle: request → decision → execution or cancellation.
+When you type a request into the live CLI:
 
-Phase 2 lives on the branch `phase-2-approval-flow`.
+- **GREEN actions run automatically** — no prompt, just the result.
+- **YELLOW actions show an approval prompt** with the request's action, reason, and risk tier.
+- **Approved YELLOW actions execute** through the Tool Executor.
+- **Declined YELLOW actions are cancelled** — nothing runs.
+- **RED actions are blocked** — refused with no prompt.
+
+### Read-only file commands
+
+Jarvis can list folders and read text files directly from the CLI. Natural commands:
+
+```
+list files in .
+list files in docs
+read file README.md
+```
+
+Plus friendly workflow shortcuts:
+
+```
+show project files
+show docs
+read readme
+show phase 3 plan
+```
+
+**All file tools are strictly read-only.** They do not write, delete, move, rename, or edit anything. Reading is bounded (large files are truncated, binary files are refused), and listing does not descend into subfolders.
+
+### Clearer CLI output
+
+Every response is labelled so its outcome is obvious at a glance:
+
+- `[OK]` — a safe action ran successfully.
+- `[NEEDS APPROVAL]` — a sensitive action is waiting for your decision.
+- `[BLOCKED]` — a dangerous action was refused.
+- `[FAILED]` — a tool ran but could not complete (for example, a missing file).
+- `[NOT HANDLED]` — Jarvis has no capability for this request yet.
+
+### Tested end to end
+
+The complete live experience is covered by end-to-end tests that drive the real CLI with scripted input: GREEN runs, YELLOW approve-and-run, YELLOW decline-and-cancel, RED blocked, and clean exit — all without a real terminal and without any Claude API calls.
+
+Phase 3 lives on the branch `phase-3-live-cli`.
 
 ---
 
@@ -100,34 +115,30 @@ poetry install
 poetry run python main.py
 ```
 
-On startup Jarvis prints:
+On startup Jarvis prints `Jarvis Online.` You can then type requests. Type `exit`, `quit`, or `bye` to leave.
+
+Try these in a live session:
 
 ```
-Jarvis Online.
+show project files
+read readme
+send email to Alex      (sensitive - you'll be asked to approve)
+format drive C          (dangerous - always blocked)
 ```
-
-You can then type requests. Type `exit`, `quit`, or `bye` to leave.
 
 ---
 
 ## How to Test
 
-Run the full test suite:
-
 ```powershell
+# The full test suite
 poetry run pytest -v
-```
 
-Run just the end-to-end approval lifecycle tests:
+# All integration tests (approval flow + live CLI journeys)
+poetry run pytest tests/integration/ -v
 
-```powershell
-poetry run pytest tests/integration/test_approval_end_to_end.py -v
-```
-
-Watch the whole approval flow against the real database (approve, decline, and a blocked RED action):
-
-```powershell
-poetry run python approval_end_to_end_smoke_test.py
+# Just the live CLI end-to-end tests
+poetry run pytest tests/integration/test_cli_end_to_end.py -v
 ```
 
 ---
@@ -150,7 +161,7 @@ jarvis/
 ├── ui/             Command-line interface and approval prompts
 ├── tests/          Unit tests and integration tests
 │   ├── unit/       One test file per module
-│   └── integration/ Full approval-lifecycle tests
+│   └── integration/ Approval-flow and live-CLI end-to-end tests
 ├── docs/           Specifications, implementation plans, and reports
 └── main.py         Entry point — starts Jarvis
 ```
@@ -161,10 +172,10 @@ jarvis/
 
 Jarvis is a foundation under active development. It is deliberately **not** yet:
 
-- **Fully autonomous** — it does not act on its own initiative.
+- **Fully autonomous** — it acts only in response to the user.
 - **Connected to live AI decision-making** — the Claude provider exists but is not used to drive decisions yet.
 - **Controlling the computer** — it cannot click, type, or run programs on the machine.
-- **Installing software** — it performs no installations.
+- **Writing, deleting, or changing files** — all file access is read-only.
 - **Connected to a phone** — there is no mobile control.
 
 These limitations are intentional. Each is a candidate for a future phase, added only behind the existing safety model.
@@ -173,10 +184,8 @@ These limitations are intentional. Each is a candidate for a future phase, added
 
 ## Next Phase
 
-**Phase 3 — planning.**
-
-With controlled intelligence and a working approval flow in place, Phase 3 will focus on expanding what Jarvis can safely do while preserving the same control guarantees — likely connecting live AI reasoning (once API credits are available), completing the approval flow inside the interactive interface, and carefully broadening the toolset, always behind the Security Manager. Detailed goals will be captured in a dedicated Phase 3 implementation plan.
+**Phase 4 — planning.** With a usable live approval flow and safe read-only tools in place, the natural next steps are connecting live AI reasoning (once API credits are available, as a deliberate step) and introducing the first guarded write actions behind a stronger approval design — always behind the Security Manager, and always with the user in control. Detailed goals will be captured in a dedicated Phase 4 implementation plan.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 2 is a working, safe milestone, not a finished product.*
+*Jarvis is a personal project under active development. Phase 3 is a working, safe milestone, not a finished product.*
