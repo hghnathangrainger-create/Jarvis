@@ -37,6 +37,8 @@ from storage.database import (
 )
 from tools.builtin import (
     EchoTool,
+    FileAppendTool,
+    FileCreateTool,
     FileListTool,
     FileReadTool,
     InfoTool,
@@ -80,6 +82,8 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(MemoryTool(memory))
     registry.register_tool(FileListTool())
     registry.register_tool(FileReadTool())
+    registry.register_tool(FileCreateTool())
+    registry.register_tool(FileAppendTool())
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,

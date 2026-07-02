@@ -81,6 +81,28 @@ _WORKFLOW_ALIASES: dict[str, tuple[str, str]] = {
     "show phase 3 plan": ("file_read", "docs/phase_3_implementation_plan.md"),
     "read phase 3 plan": ("file_read", "docs/phase_3_implementation_plan.md"),
 }
+
+#: Leading phrases that indicate a create-file request. The text after the
+#: phrase is the path, optionally followed by " with <content>". Creating a
+#: file is a WRITE action (YELLOW) and always requires approval.
+_FILE_CREATE_PREFIXES: tuple[str, ...] = (
+    "create text file",
+    "create file",
+    "create a file",
+    "new file",
+    "make file",
+)
+
+#: Leading phrases that indicate an append-file request. Appending is a WRITE
+#: action (YELLOW) and always requires approval. Two shapes are supported:
+#:   "append <content> to file <path>"
+#:   "append to file <path> <content>"
+_FILE_APPEND_PREFIXES: tuple[str, ...] = (
+    "append text file",
+    "append to file",
+    "append to",
+    "append",
+)
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 
 
@@ -536,6 +558,19 @@ class JarvisOrchestrator:
         ):
             return "file_read"
 
+        # Write commands (create, append) are YELLOW and require approval. They
+        # are matched here but the safety gate is enforced by the Tool Executor,
+        # exactly as for any other YELLOW action.
+        if self._file_prefix(lowered, _FILE_CREATE_PREFIXES) is not None and (
+            self._registry.has_tool("file_create")
+        ):
+            return "file_create"
+
+        if self._file_prefix(lowered, _FILE_APPEND_PREFIXES) is not None and (
+            self._registry.has_tool("file_append")
+        ):
+            return "file_append"
+
         if self._contains(lowered, _MEMORY_KEYWORDS) and self._registry.has_tool(
             "memory"
         ):
@@ -582,6 +617,14 @@ class JarvisOrchestrator:
                 return {"path": alias[1]}
             path = self._extract_path(text, _FILE_READ_PREFIXES)
             return {"path": path}
+
+        if tool_name == "file_create":
+            path, content = self._extract_create_input(text)
+            return {"path": path, "content": content}
+
+        if tool_name == "file_append":
+            path, content = self._extract_append_input(text)
+            return {"path": path, "content": content}
 
         # info takes no input
         return {}
@@ -643,3 +686,116 @@ class JarvisOrchestrator:
             remainder = remainder[4:].strip()
         # Strip surrounding quotes if the user quoted the path.
         return remainder.strip("'\"").strip()
+
+    @classmethod
+    def _extract_create_input(cls, text: str) -> tuple[str, str]:
+        """Extract (path, content) from a create-file command.
+
+        The recognised shape is: "<create-prefix> <path> with <content>". The
+        "with <content>" part is optional; when absent, the content is empty and
+        an empty file is created.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (path, content). Either may be empty, in which case the
+            tool itself reports the problem (empty path is rejected).
+        """
+        remainder = cls._strip_write_prefix(text, _FILE_CREATE_PREFIXES)
+        path_part, content = cls._split_on_keyword(remainder, " with ")
+        return cls._clean_path(path_part), content
+
+    @classmethod
+    def _extract_append_input(cls, text: str) -> tuple[str, str]:
+        """Extract (path, content) from an append-file command.
+
+        Two shapes are recognised:
+            "append <content> to file <path>"
+            "append to file <path> <content>"
+        The first shape is preferred: if the phrase contains " to file " or
+        " to ", the text before it is the content and the text after it is the
+        path.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (path, content). Either may be empty, in which case the
+            tool itself reports the problem.
+        """
+        remainder = cls._strip_write_prefix(text, _FILE_APPEND_PREFIXES)
+
+        for separator in (" to file ", " to "):
+            if separator in remainder.casefold():
+                idx = remainder.casefold().index(separator)
+                content = remainder[:idx].strip()
+                path_part = remainder[idx + len(separator) :].strip()
+                return cls._clean_path(path_part), cls._clean_content(content)
+
+        # No separator: treat the whole remainder as the path, no content. The
+        # append tool will then reject the empty content, which is correct.
+        return cls._clean_path(remainder), ""
+
+    @classmethod
+    def _strip_write_prefix(cls, text: str, prefixes: tuple[str, ...]) -> str:
+        """Remove the matching write-command prefix from the text.
+
+        Args:
+            text: The original request text.
+            prefixes: The write-command prefixes to check.
+
+        Returns:
+            The text after the prefix, stripped, or the original text if no
+            prefix matched.
+        """
+        prefix = cls._file_prefix(text.casefold(), prefixes)
+        if prefix is None:
+            return text.strip()
+        return text[len(prefix) :].strip()
+
+    @staticmethod
+    def _split_on_keyword(text: str, keyword: str) -> tuple[str, str]:
+        """Split text once on a keyword, case-insensitively.
+
+        Args:
+            text: The text to split.
+            keyword: The separator to split on (for example, " with ").
+
+        Returns:
+            A tuple of (before, after). If the keyword is absent, after is
+            empty and before is the whole text.
+        """
+        lowered = text.casefold()
+        if keyword in lowered:
+            idx = lowered.index(keyword)
+            return text[:idx].strip(), text[idx + len(keyword) :].strip()
+        return text.strip(), ""
+
+    @staticmethod
+    def _clean_path(path_part: str) -> str:
+        """Clean an extracted path fragment.
+
+        Args:
+            path_part: The raw path fragment.
+
+        Returns:
+            The path with a leading "the ", surrounding quotes, and whitespace
+            removed.
+        """
+        cleaned = path_part.strip()
+        if cleaned.casefold().startswith("the "):
+            cleaned = cleaned[4:].strip()
+        return cleaned.strip("'\"").strip()
+
+    @staticmethod
+    def _clean_content(content: str) -> str:
+        """Clean an extracted content fragment.
+
+        Args:
+            content: The raw content fragment.
+
+        Returns:
+            The content with surrounding quotes and whitespace removed.
+        """
+        return content.strip().strip("'\"")
