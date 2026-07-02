@@ -35,7 +35,13 @@ from storage.database import (
     create_session_factory,
     initialize_database,
 )
-from tools.builtin import EchoTool, InfoTool, MemoryTool
+from tools.builtin import (
+    EchoTool,
+    FileListTool,
+    FileReadTool,
+    InfoTool,
+    MemoryTool,
+)
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
@@ -72,6 +78,8 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(EchoTool())
     registry.register_tool(InfoTool())
     registry.register_tool(MemoryTool(memory))
+    registry.register_tool(FileListTool())
+    registry.register_tool(FileReadTool())
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,

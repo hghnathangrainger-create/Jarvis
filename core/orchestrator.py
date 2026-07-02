@@ -40,6 +40,28 @@ from tools.registry import ToolRegistry
 _ECHO_KEYWORDS: tuple[str, ...] = ("echo", "repeat", "say")
 _INFO_KEYWORDS: tuple[str, ...] = ("system info", "version", "about", "who are you")
 _MEMORY_KEYWORDS: tuple[str, ...] = ("memory", "memories", "remember", "recall")
+
+#: Leading phrases that indicate a file-listing request. The text after the
+#: phrase is treated as the directory path.
+_FILE_LIST_PREFIXES: tuple[str, ...] = (
+    "list files in",
+    "show files in",
+    "list files",
+    "show files",
+    "list directory",
+    "list dir",
+)
+
+#: Leading phrases that indicate a file-reading request. The text after the
+#: phrase is treated as the file path. All of these are read-only; "open" here
+#: means "open to read", never to modify.
+_FILE_READ_PREFIXES: tuple[str, ...] = (
+    "read file",
+    "show file",
+    "open file",
+    "read the file",
+    "cat file",
+)
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 
 
@@ -399,6 +421,18 @@ class JarvisOrchestrator:
         """
         lowered = text.casefold()
 
+        # File commands are checked first because their phrasing is specific.
+        # Only route to a file tool if it is actually registered.
+        if self._file_prefix(lowered, _FILE_LIST_PREFIXES) is not None and (
+            self._registry.has_tool("file_list")
+        ):
+            return "file_list"
+
+        if self._file_prefix(lowered, _FILE_READ_PREFIXES) is not None and (
+            self._registry.has_tool("file_read")
+        ):
+            return "file_read"
+
         if self._contains(lowered, _MEMORY_KEYWORDS) and self._registry.has_tool(
             "memory"
         ):
@@ -431,6 +465,15 @@ class JarvisOrchestrator:
         if tool_name == "echo":
             return {"text": text}
 
+        if tool_name == "file_list":
+            path = self._extract_path(text, _FILE_LIST_PREFIXES)
+            # Default to the current directory when no path is given.
+            return {"path": path or "."}
+
+        if tool_name == "file_read":
+            path = self._extract_path(text, _FILE_READ_PREFIXES)
+            return {"path": path}
+
         # info takes no input
         return {}
 
@@ -446,3 +489,48 @@ class JarvisOrchestrator:
             True if any keyword is present, False otherwise.
         """
         return any(keyword in text for keyword in keywords)
+
+    @staticmethod
+    def _file_prefix(lowered: str, prefixes: tuple[str, ...]) -> str | None:
+        """Return the first file-command prefix the text starts with.
+
+        Prefixes are checked longest-first so that a more specific phrase (for
+        example "list files in") is preferred over a shorter one ("list files").
+
+        Args:
+            lowered: The already-lowercased request text.
+            prefixes: The candidate prefixes to check.
+
+        Returns:
+            The matching prefix, or None if the text starts with none of them.
+        """
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            if lowered.startswith(prefix):
+                return prefix
+        return None
+
+    @classmethod
+    def _extract_path(cls, text: str, prefixes: tuple[str, ...]) -> str:
+        """Extract the path portion of a file command.
+
+        The matching prefix is removed from the start of the request, and the
+        remainder is treated as the path. A leading filler word ("the") and
+        surrounding quotes or whitespace are stripped.
+
+        Args:
+            text: The original (unlowered) request text.
+            prefixes: The prefixes for this file command.
+
+        Returns:
+            The extracted path, or an empty string if none was given.
+        """
+        prefix = cls._file_prefix(text.casefold(), prefixes)
+        if prefix is None:
+            return ""
+
+        remainder = text[len(prefix) :].strip()
+        # Drop a leading filler word such as "the" ("read the file the notes").
+        if remainder.casefold().startswith("the "):
+            remainder = remainder[4:].strip()
+        # Strip surrounding quotes if the user quoted the path.
+        return remainder.strip("'\"").strip()
