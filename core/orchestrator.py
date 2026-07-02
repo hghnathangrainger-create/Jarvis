@@ -25,8 +25,12 @@ a way around them.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision
+from ai.reasoning_engine import AIReasoningEngine
+from ai.reasoning_models import AIReasoningRequest
 from config.constants import SecurityTier
 from core.request_models import JarvisRequest, JarvisResponse
 from planner.plan_models import Plan
@@ -101,6 +105,7 @@ class JarvisOrchestrator:
         executor: ToolExecutor,
         registry: ToolRegistry,
         approval_manager: ApprovalManager | None = None,
+        reasoning_engine: AIReasoningEngine | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -110,11 +115,17 @@ class JarvisOrchestrator:
             registry: The ToolRegistry used to check tool availability.
             approval_manager: The ApprovalManager used to create approval
                 requests for YELLOW actions. A new one is created if omitted.
+            reasoning_engine: An optional advisory AI reasoning engine. When
+                omitted or inactive, behaviour is exactly as before: no AI is
+                consulted and responses are unchanged. When active, an advisory
+                suggestion is attached to the response, but it never affects
+                routing, classification, approval, or execution.
         """
         self._planner = planner
         self._executor = executor
         self._registry = registry
         self._approvals = approval_manager or ApprovalManager()
+        self._reasoning = reasoning_engine
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -217,6 +228,77 @@ class JarvisOrchestrator:
         self, user_request: str, *, session_id: int | None = None
     ) -> JarvisResponse:
         """Handle a user request and return a structured response.
+
+        This is a thin wrapper around the rule-based request handler. The
+        response is produced entirely by the existing Planner, SecurityManager,
+        ToolExecutor, and ApprovalManager path. Only after that authoritative
+        response is built is an *advisory* AI suggestion optionally attached,
+        and only when a reasoning engine is active. The AI never changes the
+        outcome: routing, classification, approval, and execution are all
+        already decided before the AI is consulted.
+
+        Args:
+            user_request: The user's request in natural language.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse describing the outcome, with an advisory
+            ai_suggestion attached only when AI reasoning is active.
+        """
+        response = self._handle_request_core(user_request, session_id=session_id)
+        return self._attach_ai_suggestion(response, user_request, session_id)
+
+    def _attach_ai_suggestion(
+        self,
+        response: JarvisResponse,
+        user_request: str,
+        session_id: int | None,
+    ) -> JarvisResponse:
+        """Attach an advisory AI suggestion to an already-decided response.
+
+        The AI reasoning engine, if active, is consulted purely for advice. Its
+        result is placed in the response's ai_suggestion field and nowhere else.
+        It cannot execute anything, and it cannot change the response's success,
+        blocked, requires_confirmation, plan, or tool fields. If the engine is
+        inactive or returns nothing, the response is returned unchanged.
+
+        Args:
+            response: The authoritative response already produced by the
+                rule-based path.
+            user_request: The original user request text.
+            session_id: Optional session identifier.
+
+        Returns:
+            The response, possibly with an advisory ai_suggestion attached.
+        """
+        if self._reasoning is None:
+            return response
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request, session_id=session_id
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return response
+
+        # Build a short, clearly-advisory suggestion string. This is the ONLY
+        # field the AI can influence; every safety-relevant field is untouched.
+        suggestion = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            suggestion = f"{result.summary} Suggested steps: {steps}"
+
+        # JarvisResponse is frozen, so return a copy with only ai_suggestion
+        # changed. Every other field is preserved exactly as decided.
+        return replace(
+            response,
+            ai_suggestion=f"[AI suggestion - advisory only] {suggestion}",
+        )
+
+    def _handle_request_core(
+        self, user_request: str, *, session_id: int | None = None
+    ) -> JarvisResponse:
+        """Handle a user request using the rule-based path only.
 
         A plan is generated first and is always included in the response. If
         the request maps to a known safe tool, that tool is run through the

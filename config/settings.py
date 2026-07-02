@@ -53,6 +53,9 @@ class Settings:
         anthropic_api_key: API key used to authenticate with the Claude API.
         ai_model: Identifier of the Claude model to use for requests.
         ai_max_tokens: Maximum number of tokens to request in a single AI call.
+        ai_reasoning_enabled: Whether live AI reasoning is switched on. When
+            False (the default), Jarvis runs entirely rule-based and never calls
+            a provider, so no API key or credits are required.
         database_path: Filesystem path to the SQLite database file.
         log_level: Logging verbosity level (e.g. "DEBUG", "INFO", "WARNING").
         approval_timeout_seconds: Seconds to wait for a YELLOW-tier approval
@@ -67,6 +70,7 @@ class Settings:
     log_level: str
     approval_timeout_seconds: int
     debug: bool
+    ai_reasoning_enabled: bool = False
 
 
 def _get_required(name: str) -> str:
@@ -215,6 +219,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         anthropic_api_key=_get_required("ANTHROPIC_API_KEY"),
         ai_model=_get_optional("AI_MODEL", "claude-sonnet-4-6"),
         ai_max_tokens=_get_int("AI_MAX_TOKENS", 4096),
+        ai_reasoning_enabled=_get_bool("AI_REASONING_ENABLED", False),
         database_path=Path(_get_optional("DATABASE_PATH", "data/jarvis.db")),
         log_level=_get_optional("LOG_LEVEL", "INFO").upper(),
         approval_timeout_seconds=_get_int("APPROVAL_TIMEOUT_SECONDS", 60),

@@ -60,6 +60,11 @@ class JarvisResponse:
             GREEN, RED, and plan-only (non-tool) responses.
         tool_input: The input the tool should run with once approved. Empty
             unless tool_name is set.
+        ai_suggestion: An optional, advisory AI reasoning summary attached to
+            the response. Present only when AI reasoning is enabled and produced
+            a result. It is informational only: it never affects routing,
+            classification, approval, or execution, all of which are decided by
+            the Planner, SecurityManager, ToolExecutor, and ApprovalManager.
     """
 
     success: bool
@@ -71,3 +76,4 @@ class JarvisResponse:
     approval_request: ApprovalRequest | None = None
     tool_name: str | None = None
     tool_input: dict[str, object] = field(default_factory=dict)
+    ai_suggestion: str | None = None
