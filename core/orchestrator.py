@@ -62,6 +62,21 @@ _FILE_READ_PREFIXES: tuple[str, ...] = (
     "read the file",
     "cat file",
 )
+
+#: Practical read-only workflow aliases. Each maps an exact phrase (matched
+#: case-insensitively, after stripping surrounding whitespace) to a fixed tool
+#: and path, so a beginner can use a friendly command instead of typing a path.
+#: Every alias here is read-only: it routes only to file_list or file_read.
+_WORKFLOW_ALIASES: dict[str, tuple[str, str]] = {
+    "show project files": ("file_list", "."),
+    "list project files": ("file_list", "."),
+    "show docs": ("file_list", "docs"),
+    "list docs": ("file_list", "docs"),
+    "read readme": ("file_read", "README.md"),
+    "show readme": ("file_read", "README.md"),
+    "show phase 3 plan": ("file_read", "docs/phase_3_implementation_plan.md"),
+    "read phase 3 plan": ("file_read", "docs/phase_3_implementation_plan.md"),
+}
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 
 
@@ -421,7 +436,13 @@ class JarvisOrchestrator:
         """
         lowered = text.casefold()
 
-        # File commands are checked first because their phrasing is specific.
+        # Practical workflow aliases are checked first: an exact friendly phrase
+        # maps to a fixed read-only tool. Only route if that tool is registered.
+        alias = _WORKFLOW_ALIASES.get(lowered.strip())
+        if alias is not None and self._registry.has_tool(alias[0]):
+            return alias[0]
+
+        # File commands are checked next because their phrasing is specific.
         # Only route to a file tool if it is actually registered.
         if self._file_prefix(lowered, _FILE_LIST_PREFIXES) is not None and (
             self._registry.has_tool("file_list")
@@ -466,11 +487,17 @@ class JarvisOrchestrator:
             return {"text": text}
 
         if tool_name == "file_list":
+            alias = _WORKFLOW_ALIASES.get(text.casefold().strip())
+            if alias is not None:
+                return {"path": alias[1]}
             path = self._extract_path(text, _FILE_LIST_PREFIXES)
             # Default to the current directory when no path is given.
             return {"path": path or "."}
 
         if tool_name == "file_read":
+            alias = _WORKFLOW_ALIASES.get(text.casefold().strip())
+            if alias is not None:
+                return {"path": alias[1]}
             path = self._extract_path(text, _FILE_READ_PREFIXES)
             return {"path": path}
 
