@@ -14,6 +14,8 @@ Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - FileCreateTool: creates a NEW text file; never overwrites.
     - FileAppendTool: appends text to an EXISTING text file; never overwrites.
+    - MemoryUpdateTool: updates a memory's content or category by id.
+    - MemoryForgetTool: forgets one specific memory by id; no bulk delete.
 
 No built-in tool deletes, moves, renames, edits in place, installs software,
 runs commands, or controls the computer.
@@ -27,7 +29,9 @@ from tools.builtin.file_create_tool import FileCreateTool
 from tools.builtin.file_list_tool import FileListTool
 from tools.builtin.file_read_tool import FileReadTool
 from tools.builtin.info_tool import InfoTool
+from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
+from tools.builtin.memory_update_tool import MemoryUpdateTool
 
 __all__ = [
     "EchoTool",
@@ -37,4 +41,6 @@ __all__ = [
     "FileReadTool",
     "FileCreateTool",
     "FileAppendTool",
+    "MemoryUpdateTool",
+    "MemoryForgetTool",
 ]

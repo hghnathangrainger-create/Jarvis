@@ -571,6 +571,28 @@ class JarvisOrchestrator:
         ):
             return "file_append"
 
+        # Bulk forget is dangerous (RED). Route it to the forget tool so its
+        # action string ("forget all memories") is classified RED by the
+        # Security Manager and blocked by the Tool Executor - never to the
+        # read-only memory tool, which would misclassify it as a safe list.
+        if lowered.startswith("forget all") and self._registry.has_tool(
+            "memory_forget"
+        ):
+            return "memory_forget"
+
+        # Memory change commands (update, move, forget) are YELLOW and must be
+        # matched before the generic read-only memory tool. The safety gate is
+        # still enforced by the Tool Executor; this only selects the tool.
+        if lowered.startswith("forget memory") and self._registry.has_tool(
+            "memory_forget"
+        ):
+            return "memory_forget"
+
+        if (
+            lowered.startswith("update memory") or lowered.startswith("move memory")
+        ) and self._registry.has_tool("memory_update"):
+            return "memory_update"
+
         if self._contains(lowered, _MEMORY_KEYWORDS) and self._registry.has_tool(
             "memory"
         ):
@@ -596,6 +618,16 @@ class JarvisOrchestrator:
         """
         if tool_name == "memory":
             return self._build_memory_input(text)
+
+        if tool_name == "memory_update":
+            return self._build_memory_update_input(text)
+
+        if tool_name == "memory_forget":
+            if text.strip().casefold().startswith("forget all"):
+                # Bulk forget: no id. The tool's action classifies RED and the
+                # executor blocks it; nothing is ever forgotten in bulk.
+                return {"all": True}
+            return {"memory_id": self._extract_memory_id(text, "forget memory")}
 
         if tool_name == "echo":
             return {"text": text}
@@ -821,6 +853,13 @@ class JarvisOrchestrator:
         stripped = text.strip()
         lowered = stripped.casefold()
 
+        # --- Show one by id: "show memory <id>" ---
+        if lowered.startswith("show memory") or lowered.startswith("view memory"):
+            memory_id = cls._extract_trailing_id(stripped)
+            if memory_id is not None:
+                return {"operation": "get", "memory_id": memory_id}
+            # "show memories" (no id) falls through to the list handling below.
+
         # --- Save: "remember this[ as <category>]: <content>" ---
         if lowered.startswith("remember this"):
             after = stripped[len("remember this"):]
@@ -905,3 +944,77 @@ class JarvisOrchestrator:
         if end_idx == -1:
             return ""
         return text[after_start:end_idx].strip().strip("'\"")
+
+    @classmethod
+    def _build_memory_update_input(cls, text: str) -> dict[str, object]:
+        """Parse an update or move command into memory_update tool input.
+
+        Recognised shapes:
+            update memory <id>: <new text>   -> operation "update"
+            move memory <id> to <category>   -> operation "move"
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the memory_update tool. Missing pieces are
+            left absent so the tool reports the problem clearly.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        if lowered.startswith("move memory"):
+            memory_id = cls._extract_memory_id(stripped, "move memory")
+            category = cls._extract_after(stripped, " to ")
+            result: dict[str, object] = {"operation": "move"}
+            if memory_id is not None:
+                result["memory_id"] = memory_id
+            if category:
+                result["category"] = category
+            return result
+
+        # Default: update content. "update memory <id>: <new text>"
+        memory_id = cls._extract_memory_id(stripped, "update memory")
+        content = ""
+        if ":" in stripped:
+            content = stripped.split(":", 1)[1].strip()
+        result = {"operation": "update"}
+        if memory_id is not None:
+            result["memory_id"] = memory_id
+        if content:
+            result["content"] = content
+        return result
+
+    @staticmethod
+    def _extract_memory_id(text: str, prefix: str) -> int | None:
+        """Extract the first integer id following a command prefix.
+
+        Args:
+            text: The original request text.
+            prefix: The command prefix (e.g. "forget memory") to strip first.
+
+        Returns:
+            The id as an int, or None if none was found.
+        """
+        lowered = text.casefold()
+        idx = lowered.find(prefix.casefold())
+        remainder = text[idx + len(prefix):] if idx != -1 else text
+        for token in remainder.replace(":", " ").split():
+            if token.isdigit():
+                return int(token)
+        return None
+
+    @staticmethod
+    def _extract_trailing_id(text: str) -> int | None:
+        """Extract a numeric id from a 'show memory <id>' style command.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The id as an int, or None if no numeric token is present.
+        """
+        for token in text.replace(":", " ").split():
+            if token.isdigit():
+                return int(token)
+        return None

@@ -87,6 +87,8 @@ class MemoryTool(BaseTool):
             return "save memory"
         if operation == "search":
             return "search memories"
+        if operation == "get":
+            return "show memory"
         return "list memories"
 
     def run(self, request: ToolRequest) -> ToolResult:
@@ -112,6 +114,19 @@ class MemoryTool(BaseTool):
 
         if operation == "save":
             return self._run_save(request, category)
+
+        if operation == "get":
+            memory_id = self._parse_id(request.input_data.get("memory_id"))
+            if memory_id is None:
+                return self.fail(
+                    "Showing a memory requires a valid numeric 'memory_id'."
+                )
+            record = self._memory.get(memory_id)
+            if record is None:
+                return self.fail(f"No memory found with id {memory_id}.")
+            return self.ok(
+                f"[{record.id}] ({record.category}) {record.content}"
+            )
 
         if operation == "list":
             records = self._list_recent(limit=limit, category=category)
@@ -178,6 +193,24 @@ class MemoryTool(BaseTool):
         )
 
     @staticmethod
+    def _parse_id(raw: object) -> int | None:
+        """Parse a memory id from raw input.
+
+        Args:
+            raw: The raw id value, an int or numeric string.
+
+        Returns:
+            The id as an int, or None if it cannot be parsed.
+        """
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.strip().isdigit():
+            return int(raw.strip())
+        return None
+
+    @staticmethod
     def _clamp_limit(value: object) -> int:
         """Coerce and clamp a limit input into a safe range.
 
@@ -239,6 +272,3 @@ class MemoryTool(BaseTool):
         for record in records:
             lines.append(f"  [{record.id}] ({record.category}) {record.content}")
         return "\n".join(lines)
-
-
-

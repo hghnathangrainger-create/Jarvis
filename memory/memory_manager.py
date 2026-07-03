@@ -134,6 +134,56 @@ class MemoryManager:
         """
         return self._store.count()
 
+    def get(self, memory_id: int) -> MemoryRecord | None:
+        """Return a single memory by id, or None if it does not exist.
+
+        Args:
+            memory_id: The id of the memory to fetch.
+
+        Returns:
+            The matching MemoryRecord, or None.
+        """
+        return self._store.get_by_id(memory_id)
+
+    def update_content(
+        self, memory_id: int, new_content: str
+    ) -> MemoryRecord | None:
+        """Replace the content of an existing memory.
+
+        Args:
+            memory_id: The id of the memory to update.
+            new_content: The new content text.
+
+        Returns:
+            The updated MemoryRecord, or None if no memory has that id.
+        """
+        return self._store.update_content(memory_id, new_content)
+
+    def move_category(
+        self, memory_id: int, new_category: str
+    ) -> MemoryRecord | None:
+        """Change the category of an existing memory.
+
+        Args:
+            memory_id: The id of the memory to move.
+            new_category: The new category (normalised by the store).
+
+        Returns:
+            The updated MemoryRecord, or None if no memory has that id.
+        """
+        return self._store.update_category(memory_id, new_category)
+
+    def forget(self, memory_id: int) -> bool:
+        """Delete a single memory by id.
+
+        Args:
+            memory_id: The id of the memory to forget.
+
+        Returns:
+            True if a memory was deleted, False if no memory had that id.
+        """
+        return self._store.delete(memory_id)
+
     @staticmethod
     def should_skip(content: str) -> bool:
         """Report whether content should be excluded from storage.

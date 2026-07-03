@@ -104,11 +104,22 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("ransomware", SecurityTier.RED, "Ransomware is malicious software and prohibited."),
     _Rule("keylogger", SecurityTier.RED, "Keyloggers capture private input and are prohibited."),
     _Rule("delete all", SecurityTier.RED, "Bulk deletion is irreversible and high risk."),
+    _Rule("forget all memories", SecurityTier.RED, "Forgetting all memories is an irreversible bulk wipe and is not allowed."),
+    _Rule("forget all", SecurityTier.RED, "Bulk forgetting is irreversible and high risk."),
     _Rule("rm -rf", SecurityTier.RED, "Recursive force-delete is irreversible and high risk."),
     _Rule("drop database", SecurityTier.RED, "Dropping a database destroys all of its data."),
     _Rule("modify registry", SecurityTier.RED, "Editing the registry can break the operating system."),
     _Rule("edit registry", SecurityTier.RED, "Editing the registry can break the operating system."),
     # ----- YELLOW: sensitive, requires confirmation -----
+    # ----- YELLOW: sensitive, requires approval -----
+    # Memory changes are state-changing and must be confirmed. These are listed
+    # first so they are matched before any read-only GREEN rule. In particular
+    # they must win over the GREEN "get" rule, because the word "forget"
+    # contains the substring "get"; without these, "forget memory" would be
+    # misclassified as a safe retrieval.
+    _Rule("forget memory", SecurityTier.YELLOW, "Forgetting a memory removes it and must be confirmed."),
+    _Rule("update memory", SecurityTier.YELLOW, "Updating a memory changes stored content and must be confirmed."),
+    _Rule("move memory", SecurityTier.YELLOW, "Moving a memory to another category changes it and must be confirmed."),
     _Rule("delete file", SecurityTier.YELLOW, "Deleting a file changes state and should be confirmed."),
     _Rule("delete folder", SecurityTier.YELLOW, "Deleting a folder changes state and should be confirmed."),
     _Rule("delete", SecurityTier.YELLOW, "Deletion changes state and should be confirmed."),

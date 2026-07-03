@@ -42,7 +42,9 @@ from tools.builtin import (
     FileListTool,
     FileReadTool,
     InfoTool,
+    MemoryForgetTool,
     MemoryTool,
+    MemoryUpdateTool,
 )
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
@@ -80,6 +82,8 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(EchoTool())
     registry.register_tool(InfoTool())
     registry.register_tool(MemoryTool(memory))
+    registry.register_tool(MemoryUpdateTool(memory))
+    registry.register_tool(MemoryForgetTool(memory))
     registry.register_tool(FileListTool())
     registry.register_tool(FileReadTool())
     registry.register_tool(FileCreateTool())

@@ -203,6 +203,81 @@ class EpisodicMemoryStore:
                 .count()
             )
 
+    def get_by_id(self, memory_id: int) -> MemoryRecord | None:
+        """Return a single memory by its id, or None if it does not exist.
+
+        Args:
+            memory_id: The primary key of the memory to fetch.
+
+        Returns:
+            The matching MemoryRecord, or None when no memory has that id.
+        """
+        with session_scope(self._session_factory) as db:
+            entry = db.get(EpisodicMemory, memory_id)
+            if entry is None:
+                return None
+            return self._to_record(entry)
+
+    def update_content(
+        self, memory_id: int, new_content: str
+    ) -> MemoryRecord | None:
+        """Replace the content of an existing memory.
+
+        Args:
+            memory_id: The id of the memory to update.
+            new_content: The new content text. Leading and trailing whitespace
+                is stripped.
+
+        Returns:
+            The updated MemoryRecord, or None if no memory has that id.
+        """
+        text = new_content.strip()
+        with session_scope(self._session_factory) as db:
+            entry = db.get(EpisodicMemory, memory_id)
+            if entry is None:
+                return None
+            entry.content = text
+            db.flush()
+            return self._to_record(entry)
+
+    def update_category(
+        self, memory_id: int, new_category: str
+    ) -> MemoryRecord | None:
+        """Change the category of an existing memory.
+
+        Args:
+            memory_id: The id of the memory to move.
+            new_category: The new category. Unknown or blank values normalise to
+                "general".
+
+        Returns:
+            The updated MemoryRecord, or None if no memory has that id.
+        """
+        safe_category = normalize_category(new_category)
+        with session_scope(self._session_factory) as db:
+            entry = db.get(EpisodicMemory, memory_id)
+            if entry is None:
+                return None
+            entry.category = safe_category
+            db.flush()
+            return self._to_record(entry)
+
+    def delete(self, memory_id: int) -> bool:
+        """Delete a single memory by its id.
+
+        Args:
+            memory_id: The id of the memory to delete.
+
+        Returns:
+            True if a memory was deleted, False if no memory had that id.
+        """
+        with session_scope(self._session_factory) as db:
+            entry = db.get(EpisodicMemory, memory_id)
+            if entry is None:
+                return False
+            db.delete(entry)
+            return True
+
     @staticmethod
     def _to_record(entry: EpisodicMemory) -> MemoryRecord:
         """Convert an ORM entry into a detached MemoryRecord.
@@ -221,4 +296,3 @@ class EpisodicMemoryStore:
             category=entry.category,
             created_at=entry.created_at,
         )
-
