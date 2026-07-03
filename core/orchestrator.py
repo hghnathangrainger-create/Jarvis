@@ -595,10 +595,7 @@ class JarvisOrchestrator:
             The input dictionary the tool expects.
         """
         if tool_name == "memory":
-            lowered = text.casefold()
-            if self._contains(lowered, _SEARCH_KEYWORDS):
-                return {"operation": "search", "query": text}
-            return {"operation": "list"}
+            return self._build_memory_input(text)
 
         if tool_name == "echo":
             return {"text": text}
@@ -799,3 +796,112 @@ class JarvisOrchestrator:
             The content with surrounding quotes and whitespace removed.
         """
         return content.strip().strip("'\"")
+
+    @classmethod
+    def _build_memory_input(cls, text: str) -> dict[str, object]:
+        """Parse a memory command into a memory-tool input dictionary.
+
+        Six command shapes are recognised (case-insensitively):
+            remember this: <text>                     -> save (general)
+            remember this as <category>: <text>       -> save (<category>)
+            show memories                             -> list
+            show memories in <category>               -> list (<category>)
+            search memories for <query>               -> search
+            search memories in <category> for <query> -> search (<category>)
+
+        Anything unrecognised falls back to a plain list, so the command is
+        always safe and read-only by default.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the memory tool.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        # --- Save: "remember this[ as <category>]: <content>" ---
+        if lowered.startswith("remember this"):
+            after = stripped[len("remember this"):]
+            category: str | None = None
+            # Optional "as <category>" before the colon.
+            if after.casefold().lstrip().startswith("as "):
+                as_part = after.lstrip()[3:]
+                if ":" in as_part:
+                    cat_text, content = as_part.split(":", 1)
+                    category = cat_text.strip()
+                    return {
+                        "operation": "save",
+                        "content": content.strip(),
+                        "category": category,
+                    }
+            # Plain "remember this: <content>".
+            if ":" in after:
+                _, content = after.split(":", 1)
+                return {"operation": "save", "content": content.strip()}
+            # "remember this <content>" with no colon: treat the rest as content.
+            return {"operation": "save", "content": after.strip()}
+
+        # --- Search: "search memories [in <category>] for <query>" ---
+        if "search" in lowered and (
+            "memor" in lowered
+        ):
+            category = cls._extract_between(lowered, stripped, " in ", " for ")
+            query = cls._extract_after(stripped, " for ")
+            result: dict[str, object] = {"operation": "search"}
+            if query:
+                result["query"] = query
+            if category:
+                result["category"] = category
+            return result
+
+        # --- List: "show memories [in <category>]" ---
+        if ("show" in lowered or "list" in lowered) and "memor" in lowered:
+            category = cls._extract_after(stripped, " in ")
+            result = {"operation": "list"}
+            if category:
+                result["category"] = category
+            return result
+
+        # Fallback: safe read-only list.
+        return {"operation": "list"}
+
+    @staticmethod
+    def _extract_after(text: str, marker: str) -> str:
+        """Return the text after a marker phrase, cleaned. Empty if absent.
+
+        Args:
+            text: The original text.
+            marker: The marker phrase to search for (case-insensitive).
+
+        Returns:
+            The trimmed, unquoted text after the marker, or "" if not present.
+        """
+        lowered = text.casefold()
+        idx = lowered.find(marker)
+        if idx == -1:
+            return ""
+        return text[idx + len(marker):].strip().strip("'\"")
+
+    @staticmethod
+    def _extract_between(text: str, lowered: str, start: str, end: str) -> str:
+        """Return the text between two markers, cleaned. Empty if absent.
+
+        Args:
+            text: The original text.
+            lowered: The lower-cased original text (for index finding).
+            start: The starting marker phrase.
+            end: The ending marker phrase.
+
+        Returns:
+            The trimmed text between the markers, or "" if the pair is absent.
+        """
+        start_idx = lowered.find(start)
+        if start_idx == -1:
+            return ""
+        after_start = start_idx + len(start)
+        end_idx = lowered.find(end, after_start)
+        if end_idx == -1:
+            return ""
+        return text[after_start:end_idx].strip().strip("'\"")

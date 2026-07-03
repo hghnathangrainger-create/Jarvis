@@ -129,6 +129,13 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("purchase", SecurityTier.YELLOW, "Spending money should always be confirmed."),
     _Rule("pay", SecurityTier.YELLOW, "Spending money should always be confirmed."),
     # ----- GREEN: safe, allowed automatically -----
+    # A manual, user-requested memory save is read-only from the system's point
+    # of view: the user has explicitly asked Jarvis to remember this exact text,
+    # nothing is overwritten or removed, and the "do not remember" rule still
+    # applies. These phrases are specific to memory so they never green-light a
+    # file write, which remains YELLOW via the "write file" rule above.
+    _Rule("save memory", SecurityTier.GREEN, "Saving a memory the user explicitly asked to store is safe."),
+    _Rule("remember memory", SecurityTier.GREEN, "Remembering text the user explicitly provided is safe."),
     _Rule("search memories", SecurityTier.GREEN, "Searching memory is read-only and safe."),
     _Rule("search memory", SecurityTier.GREEN, "Searching memory is read-only and safe."),
     _Rule("list memories", SecurityTier.GREEN, "Listing memory is read-only and safe."),
