@@ -49,6 +49,7 @@ class MemoryManager:
         *,
         source: str = "conversation",
         session_id: int | None = None,
+        category: str | None = None,
     ) -> MemoryRecord | None:
         """Save a memory unless it is empty or marked not to be remembered.
 
@@ -60,6 +61,8 @@ class MemoryManager:
             content: The memory text to store.
             source: Where the memory originated. Defaults to "conversation".
             session_id: Optional session the memory belongs to.
+            category: Optional organisational label. Unknown or blank values
+                fall back to "general".
 
         Returns:
             The stored MemoryRecord, or None if the content was not stored.
@@ -75,30 +78,53 @@ class MemoryManager:
             content=text,
             source=source,
             session_id=session_id,
+            category=category,
         )
 
-    def list_recent(self, limit: int = 20) -> list[MemoryRecord]:
+    def list_recent(
+        self, limit: int = 20, *, category: str | None = None
+    ) -> list[MemoryRecord]:
         """Return the most recent memories, newest first.
 
         Args:
             limit: Maximum number of memories to return. Defaults to 20.
+            category: Optional category to filter by. When None, all categories
+                are returned.
 
         Returns:
             A list of MemoryRecord objects ordered from newest to oldest.
         """
-        return self._store.list_recent(limit=limit)
+        return self._store.list_recent(limit=limit, category=category)
 
-    def search(self, query: str, limit: int = 20) -> list[MemoryRecord]:
+    def list_by_category(
+        self, category: str, limit: int = 20
+    ) -> list[MemoryRecord]:
+        """Return the most recent memories in a single category.
+
+        Args:
+            category: The category to filter by. Unknown or blank values fall
+                back to "general".
+            limit: Maximum number of memories to return. Defaults to 20.
+
+        Returns:
+            A list of MemoryRecord objects in that category, newest first.
+        """
+        return self._store.list_recent(limit=limit, category=category)
+
+    def search(
+        self, query: str, limit: int = 20, *, category: str | None = None
+    ) -> list[MemoryRecord]:
         """Return memories whose content matches the query text.
 
         Args:
             query: The text to search for within memory content.
             limit: Maximum number of memories to return. Defaults to 20.
+            category: Optional category to further filter matches by.
 
         Returns:
             A list of matching MemoryRecord objects, newest first.
         """
-        return self._store.search(query, limit=limit)
+        return self._store.search(query, limit=limit, category=category)
 
     def count(self) -> int:
         """Return the total number of stored memories.

@@ -28,7 +28,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
@@ -138,10 +138,49 @@ def initialize_database(engine: Engine) -> None:
     the corresponding tables. Existing tables are left untouched, so this is
     safe to call on every startup.
 
+    After creating tables, a small, idempotent backward-compatibility step
+    ensures older databases (created before the memory "category" column
+    existed) gain that column with a safe default. This lets memory rows from
+    earlier phases keep working.
+
     Args:
         engine: The engine to create the tables against.
     """
     Base.metadata.create_all(bind=engine)
+    _ensure_memory_category_column(engine)
+
+
+def _ensure_memory_category_column(engine: Engine) -> None:
+    """Add the episodic_memories.category column if an old database lacks it.
+
+    On a fresh database, create_all already builds the column, so this does
+    nothing. On a database created before Phase 5, the column is missing;
+    create_all does not alter existing tables, so this step adds it via a
+    single ALTER TABLE with a default of "general", backfilling every existing
+    row. The operation is guarded by a column check, so it is idempotent and
+    safe to run on every startup.
+
+    Args:
+        engine: The engine whose database should be checked and, if needed,
+            updated.
+    """
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if "episodic_memories" not in table_names:
+        return  # No table yet (unexpected here), nothing to migrate.
+
+    columns = {col["name"] for col in inspector.get_columns("episodic_memories")}
+    if "category" in columns:
+        return  # Already present: fresh DB or already migrated.
+
+    # Add the column with a safe default so existing rows become "general".
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE episodic_memories "
+                "ADD COLUMN category VARCHAR(32) NOT NULL DEFAULT 'general'"
+            )
+        )
 
 
 @contextmanager
@@ -173,4 +212,3 @@ def session_scope(
         raise
     finally:
         session.close()
- 

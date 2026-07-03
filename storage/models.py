@@ -103,6 +103,9 @@ class EpisodicMemory(Base):
             None for memories not tied to a specific session.
         content: The memory text itself.
         source: Where the memory originated (e.g. "conversation", "tool").
+        category: An organisational label for the memory (e.g. "general",
+            "personal", "project"). Defaults to "general". Purely for
+            organisation; it never affects safety classification.
         created_at: Timestamp marking when the memory was stored (UTC).
         session: The session this memory belongs to, if any.
     """
@@ -115,6 +118,9 @@ class EpisodicMemory(Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="conversation")
+    category: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="general", server_default="general", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False, index=True
     )
@@ -180,4 +186,4 @@ class AuditLogEntry(Base):
         return (
             f"<AuditLogEntry id={self.id} action_type={self.action_type!r} "
             f"outcome={self.outcome!r}>"
-        ) 
+        )

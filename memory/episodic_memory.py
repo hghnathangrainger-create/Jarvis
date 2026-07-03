@@ -29,6 +29,7 @@ from sqlalchemy.orm import sessionmaker
 
 from storage.database import session_scope
 from storage.models import EpisodicMemory
+from memory.memory_models import DEFAULT_CATEGORY, normalize_category
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class MemoryRecord:
         content: The memory text.
         source: Where the memory originated (e.g. "conversation").
         session_id: The session the memory belongs to, if any.
+        category: The organisational label for the memory (e.g. "general").
         created_at: UTC timestamp marking when the memory was stored.
     """
 
@@ -52,6 +54,7 @@ class MemoryRecord:
     source: str
     session_id: int | None
     created_at: datetime
+    category: str = DEFAULT_CATEGORY
 
 
 class EpisodicMemoryStore:
@@ -77,6 +80,7 @@ class EpisodicMemoryStore:
         content: str,
         source: str = "conversation",
         session_id: int | None = None,
+        category: str | None = None,
     ) -> MemoryRecord:
         """Persist a single memory entry.
 
@@ -84,33 +88,46 @@ class EpisodicMemoryStore:
             content: The memory text to store.
             source: Where the memory originated. Defaults to "conversation".
             session_id: Optional session the memory belongs to.
+            category: Optional organisational label. Unknown or blank values
+                fall back to "general".
 
         Returns:
             A detached MemoryRecord describing the stored entry.
         """
+        safe_category = normalize_category(category)
         with session_scope(self._session_factory) as db:
             entry = EpisodicMemory(
                 content=content,
                 source=source,
                 session_id=session_id,
+                category=safe_category,
             )
             db.add(entry)
             db.flush()  # populate id and created_at before the scope commits
             return self._to_record(entry)
 
-    def list_recent(self, limit: int = 20) -> list[MemoryRecord]:
+    def list_recent(
+        self, limit: int = 20, *, category: str | None = None
+    ) -> list[MemoryRecord]:
         """Return the most recent memories, newest first.
 
         Args:
             limit: Maximum number of memories to return. Defaults to 20.
+            category: Optional category to filter by. When given, only memories
+                in that (normalised) category are returned. When None, all
+                categories are returned.
 
         Returns:
             A list of MemoryRecord objects ordered from newest to oldest.
         """
         with session_scope(self._session_factory) as db:
+            query = db.query(EpisodicMemory)
+            if category is not None:
+                query = query.filter(
+                    EpisodicMemory.category == normalize_category(category)
+                )
             rows = (
-                db.query(EpisodicMemory)
-                .order_by(
+                query.order_by(
                     EpisodicMemory.created_at.desc(),
                     EpisodicMemory.id.desc(),
                 )
@@ -119,15 +136,18 @@ class EpisodicMemoryStore:
             )
             return [self._to_record(row) for row in rows]
 
-    def search(self, query: str, limit: int = 20) -> list[MemoryRecord]:
+    def search(
+        self, query: str, limit: int = 20, *, category: str | None = None
+    ) -> list[MemoryRecord]:
         """Return memories whose content contains the query text.
 
         The match is a simple case-insensitive substring match. No embeddings
-        or semantic search are used in Phase 1.
+        or semantic search are used.
 
         Args:
             query: The text to search for within memory content.
             limit: Maximum number of memories to return. Defaults to 20.
+            category: Optional category to further filter matches by.
 
         Returns:
             A list of matching MemoryRecord objects, newest first. An empty or
@@ -139,10 +159,15 @@ class EpisodicMemoryStore:
 
         pattern = f"%{term}%"
         with session_scope(self._session_factory) as db:
+            db_query = db.query(EpisodicMemory).filter(
+                EpisodicMemory.content.ilike(pattern)
+            )
+            if category is not None:
+                db_query = db_query.filter(
+                    EpisodicMemory.category == normalize_category(category)
+                )
             rows = (
-                db.query(EpisodicMemory)
-                .filter(EpisodicMemory.content.ilike(pattern))
-                .order_by(
+                db_query.order_by(
                     EpisodicMemory.created_at.desc(),
                     EpisodicMemory.id.desc(),
                 )
@@ -160,6 +185,24 @@ class EpisodicMemoryStore:
         with session_scope(self._session_factory) as db:
             return db.query(EpisodicMemory).count()
 
+    def count_by_category(self, category: str) -> int:
+        """Return the number of stored memories in a category.
+
+        Args:
+            category: The category to count. It is normalised before counting,
+                so unknown or blank values count the "general" category.
+
+        Returns:
+            The number of memories in the (normalised) category.
+        """
+        safe_category = normalize_category(category)
+        with session_scope(self._session_factory) as db:
+            return (
+                db.query(EpisodicMemory)
+                .filter(EpisodicMemory.category == safe_category)
+                .count()
+            )
+
     @staticmethod
     def _to_record(entry: EpisodicMemory) -> MemoryRecord:
         """Convert an ORM entry into a detached MemoryRecord.
@@ -175,5 +218,7 @@ class EpisodicMemoryStore:
             content=entry.content,
             source=entry.source,
             session_id=entry.session_id,
+            category=entry.category,
             created_at=entry.created_at,
         )
+
