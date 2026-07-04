@@ -179,25 +179,49 @@ class ApprovalHistoryTool(BaseTool):
             return f"{header}: none found."
         lines = [f"{header}:"]
         for record in records:
-            lines.append(ApprovalHistoryTool._format_line(record))
+            lines.append(ApprovalHistoryTool._format_entry(record))
         return "\n".join(lines)
 
     @staticmethod
-    def _format_line(record: ApprovalHistoryRecord) -> str:
-        """Format a single history record as one summary line.
+    def _format_entry(record: ApprovalHistoryRecord) -> str:
+        """Format a single history record as a compact, complete two-line block.
+
+        The first line names the record and what happened - id, status, and
+        action, matching the format used since Batch 1. The second line
+        carries the remaining required detail: security tier and created
+        time always appear; decided time, decided by, and decision reason
+        are appended only when the record actually has them.
+
+        A pending record therefore shows only tier and created time - the
+        decision fields are omitted entirely rather than shown as blank or
+        "N/A", so the output never implies a decision has been made when it
+        has not.
 
         Args:
             record: The history record to format.
 
         Returns:
-            A one-line summary of the record.
+            A two-line string: a summary line and a detail line.
         """
         status = record.status.upper()
-        when = record.decided_at or record.created_at
-        return (
-            f"  [{record.request_id}] {status} - {record.action} "
-            f"({when.isoformat(timespec='seconds')})"
-        )
+        summary = f"  [{record.request_id}] {status} - {record.action}"
+
+        detail_parts = [
+            f"tier: {record.security_tier}",
+            f"created: {record.created_at.isoformat(timespec='seconds')}",
+        ]
+        if record.decided_at is not None:
+            decided_part = (
+                f"decided: {record.decided_at.isoformat(timespec='seconds')}"
+            )
+            if record.decided_by is not None:
+                decided_part += f" by {record.decided_by}"
+            detail_parts.append(decided_part)
+        if record.decision_reason:
+            detail_parts.append(f"reason: {record.decision_reason}")
+
+        detail = "      " + " | ".join(detail_parts)
+        return f"{summary}\n{detail}"
 
     @staticmethod
     def _format_one(record: ApprovalHistoryRecord) -> str:

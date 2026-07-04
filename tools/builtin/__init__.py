@@ -22,6 +22,7 @@ runs commands, or controls the computer.
 """
 
 from __future__ import annotations
+from tools.builtin.approval_history_tool import ApprovalHistoryTool
 
 from tools.builtin.echo_tool import EchoTool
 from tools.builtin.file_append_tool import FileAppendTool
@@ -34,6 +35,7 @@ from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
 
 __all__ = [
+    "ApprovalHistoryTool",
     "EchoTool",
     "InfoTool",
     "MemoryTool",

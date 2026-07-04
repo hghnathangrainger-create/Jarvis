@@ -9,10 +9,15 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 ## Current Status
 
 **Phase 5 complete: Better Memory and Personal Knowledge System.**
+**Phase 6 in progress: Durable Approvals (Batches 1–2 complete).**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
+Phase 6 adds a durable, read-only record of every approval decision, so it survives a restart — without making any past decision resumable or replayable. See the Phase 6 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
+
+> **Verified (Phase 5):** `poetry run pytest -v` — **477 passed, 0 failed** in 1.81s (Python 3.14.6, pytest 9.1.1). Phase 6 Batches 1–2 add further tests on top of this baseline; see the Phase 6 progress report for the up-to-date count once the full suite has been re-run.
 
 ---
 
@@ -95,6 +100,51 @@ The "do not remember" rule still applies to saving: if you say *do not remember*
 ### What is deliberately NOT included
 
 Jarvis still cannot, by design: delete, move, rename, or edit-in-place **files**; install software; control the computer; connect to a phone; use voice; act autonomously; **bulk-delete memories**; or let the **AI store, change, or forget memories on its own**. Each remains a candidate for a future phase, added only behind the safety model.
+
+---
+
+## Phase 6 — Durable Approvals (in progress)
+
+Phase 6 makes approval decisions durable: every approval request and its eventual outcome is recorded in SQLite, so the record survives a restart. This is a **read-only history**, not a queue of actions waiting to run — see the safety note below for exactly why that distinction is enforced structurally, not just by convention.
+
+- **Batch 1 — Durable approval history.** Every created request and every approve/decline decision is written to a new `approval_history` table. A restart no longer loses the record of what was asked and how it was decided. As part of this batch, a pre-existing gap was also closed: `main.py` now actually connects the audit logger to the Approval Manager, so approval decisions reach the audit log as they always should have.
+- **Batch 2 — CLI polish and documentation.** The five read-only commands below now show every field — request id, status, action, security tier, created time, and, once decided, decided time, decided by, and decision reason — cleanly, with fields that don't apply yet (a pending request has no decision) simply omitted rather than shown blank.
+
+### Durable approval history commands
+
+**All GREEN, all read-only:**
+
+| Command | What it does |
+|---|---|
+| `show approval history` | Lists the most recent approval requests, any status, newest first. |
+| `show recent approvals` | Lists the last 10 requests, any status. |
+| `show approved actions` | Lists only requests that were approved. |
+| `show declined actions` | Lists only requests that were declined. |
+| `show approval <id>` | Shows full detail for one specific request by its id. |
+
+Example output for `show approval history`:
+
+```
+jarvis> [OK] Approval history:
+        [a1b2c3d4-...] APPROVED - update memory 3: corrected address
+            tier: yellow | created: 2026-07-04T10:22:00 | decided: 2026-07-04T10:23:05 by user | reason: looks right
+        [e5f6g7h8-...] PENDING - forget memory 9
+            tier: yellow | created: 2026-07-04T10:25:11
+```
+
+### Safety note: read-only, and it stays that way
+
+The `approval_history` table has **no `tool_name` column and no `tool_input` column** — not a rule that could be forgotten, a structural fact about the schema. A history entry can tell you *what* was asked and *how* it was decided; it can never be used to *re-run* the original action, because the data needed to run anything was never written there in the first place.
+
+Concretely, in this phase:
+
+- There is **no `approve <id>` for an old request.** A restart clears in-memory pending state exactly as it always did — the Approval Manager never reads history back into memory to repopulate it.
+- **No automatic execution from history**, ever.
+- **No resumable approvals.** Making a past pending request resumable is an explicit, separate decision, deliberately deferred to a future batch with its own safety review, its own reclassification analysis, and its own expiry rules — not something this phase enables by accident.
+
+### What is deliberately NOT included (Phase 6 so far)
+
+Resumable approvals, an `approve <id>` command for anything not currently pending in memory, automatic execution of any kind, and any change to what gets classified GREEN/YELLOW/RED. All remain candidates for a clearly separate, future batch.
 
 ---
 
@@ -196,8 +246,8 @@ jarvis/
 
 ## Next Phase
 
-**Phase 6 — Durable Approvals and Deeper AI Assistance (proposed).** Likely next steps are durable storage for pending approvals (so an approval can outlive a single session), deeper but still-advisory AI assistance (richer summaries and suggestions across memories), and optional smarter search over memory — each added only behind the Security Manager, and always with the user in control.
+**Phase 6 — Durable Approvals and Deeper AI Assistance (in progress).** Batches 1–2 are complete: durable, read-only approval history, and a polished CLI experience for it. Deliberately not yet included, each requiring its own safety review before it is scoped as a batch: resumable approvals (replaying a past pending request after a restart, with its own reclassification and expiry rules), deeper but still-advisory AI assistance (richer summaries and suggestions across memories), and optional smarter search over memory. Every addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a working, safe milestone, not a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 is in progress. Neither is a finished product.*
