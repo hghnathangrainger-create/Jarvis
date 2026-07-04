@@ -22,6 +22,8 @@ module free of wiring concerns and easy to test in isolation.
 
 from __future__ import annotations
 
+from approval.approval_history_store import ApprovalHistoryStore
+from approval.approval_manager import ApprovalManager
 from config.settings import load_settings
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import EpisodicMemoryStore
@@ -36,6 +38,7 @@ from storage.database import (
     initialize_database,
 )
 from tools.builtin import (
+    ApprovalHistoryTool,
     EchoTool,
     FileAppendTool,
     FileCreateTool,
@@ -74,6 +77,16 @@ def build_orchestrator() -> JarvisOrchestrator:
     # Memory.
     memory = MemoryManager(EpisodicMemoryStore(session_factory))
 
+    # Durable, read-only approval history (Phase 6, Batch 1). This store only
+    # ever records what already happened; it has no tool_name or tool_input
+    # columns, so nothing here can be replayed. The ApprovalManager built from
+    # it is passed into the orchestrator below - previously the orchestrator
+    # silently built its own disconnected default, so approve/decline
+    # decisions were reaching neither the audit log nor any durable history.
+    # That gap is fixed here, and only here: no approval behaviour changes.
+    approval_history = ApprovalHistoryStore(session_factory)
+    approvals = ApprovalManager(audit_logger=logger, history_store=approval_history)
+
     # Planning.
     planner = Planner(security)
 
@@ -88,13 +101,19 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileReadTool())
     registry.register_tool(FileCreateTool())
     registry.register_tool(FileAppendTool())
+    registry.register_tool(ApprovalHistoryTool(approval_history))
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,
         logger=logger,
     )
 
-    return JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    return JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        approval_manager=approvals,
+    )
 
 
 def main() -> None:

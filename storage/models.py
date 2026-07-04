@@ -187,3 +187,77 @@ class AuditLogEntry(Base):
             f"<AuditLogEntry id={self.id} action_type={self.action_type!r} "
             f"outcome={self.outcome!r}>"
         )
+
+
+class ApprovalHistoryEntry(Base):
+    """A durable, read-only record of one approval request and its outcome.
+
+    Phase 6, Batch 1. This table exists purely so approval history survives a
+    restart and can be reviewed later; it does not make anything resumable.
+
+    Deliberately excluded, by design, not oversight: there is no tool_name
+    column and no tool_input column anywhere in this table. An approval
+    request's actual executable payload (which tool, with what input) lives
+    only in the in-memory JarvisResponse produced during the request that is
+    currently pending, and is never written here. That means a row in this
+    table can describe what was asked and how it was decided, but it can
+    never be used to re-run or replay the original action - there is nothing
+    in the schema that a future "resume" feature could read to do so by
+    accident. Making approvals resumable is an explicit, separate decision
+    deferred to a later phase, with its own safety review.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        request_id: The unique id of the approval request this entry
+            describes (matches ApprovalRequest.request_id).
+        session_id: The session the request belonged to; may be None.
+        action: The action string that required approval.
+        reason: A human-readable explanation of why approval was needed.
+        security_tier: The tier of the action, as a string (e.g. "yellow").
+            Only YELLOW actions ever have an approval request, so this is
+            expected to always be "yellow", but it is stored as text rather
+            than assumed.
+        status: The lifecycle state - "pending", "approved", or "declined".
+        created_at: Timestamp marking when the request was created (UTC).
+        decided_at: Timestamp marking when the request was decided (UTC), or
+            None while still pending.
+        decided_by: Who decided it (for example, "user"), or None while
+            pending.
+        decision_reason: An optional explanation supplied with the decision.
+        session: The session this entry belongs to, if any.
+    """
+
+    __tablename__ = "approval_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    session_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    security_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending",
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the entry by request_id and status.
+        """
+        return (
+            f"<ApprovalHistoryEntry request_id={self.request_id!r} "
+            f"status={self.status!r}>"
+        )

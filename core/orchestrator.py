@@ -82,6 +82,25 @@ _WORKFLOW_ALIASES: dict[str, tuple[str, str]] = {
     "read phase 3 plan": ("file_read", "docs/phase_3_implementation_plan.md"),
 }
 
+#: Exact, read-only approval-history commands (matched case-insensitively,
+#: after stripping surrounding whitespace). Every one of these routes to the
+#: read-only ApprovalHistoryTool. All five are GREEN: none of them can
+#: approve, decline, or execute anything, because the history store they read
+#: from carries no tool_name or tool_input for any past request (Phase 6,
+#: Batch 1).
+_APPROVAL_HISTORY_EXACT: dict[str, str] = {
+    "show approval history": "history",
+    "show recent approvals": "recent",
+    "show approved actions": "approved",
+    "show declined actions": "declined",
+}
+
+#: Leading phrases for showing a single approval by id, e.g.
+#: "show approval <request_id>". Checked only after the exact phrases above,
+#: so "show approval history" is never mistaken for a lookup of an approval
+#: literally named "history".
+_APPROVAL_DETAIL_PREFIXES: tuple[str, ...] = ("show approval", "view approval")
+
 #: Leading phrases that indicate a create-file request. The text after the
 #: phrase is the path, optionally followed by " with <content>". Creating a
 #: file is a WRITE action (YELLOW) and always requires approval.
@@ -546,6 +565,21 @@ class JarvisOrchestrator:
         if alias is not None and self._registry.has_tool(alias[0]):
             return alias[0]
 
+        # Approval history commands are read-only and GREEN. The four fixed
+        # views are matched as exact phrases first; only if the text is not
+        # one of those does "show approval <id>" / "view approval <id>" get
+        # treated as a lookup of a single entry. None of these commands can
+        # approve, decline, or execute anything (Phase 6, Batch 1).
+        if lowered.strip() in _APPROVAL_HISTORY_EXACT and self._registry.has_tool(
+            "approval_history"
+        ):
+            return "approval_history"
+
+        if any(
+            lowered.startswith(prefix) for prefix in _APPROVAL_DETAIL_PREFIXES
+        ) and self._registry.has_tool("approval_history"):
+            return "approval_history"
+
         # File commands are checked next because their phrasing is specific.
         # Only route to a file tool if it is actually registered.
         if self._file_prefix(lowered, _FILE_LIST_PREFIXES) is not None and (
@@ -621,6 +655,9 @@ class JarvisOrchestrator:
 
         if tool_name == "memory_update":
             return self._build_memory_update_input(text)
+
+        if tool_name == "approval_history":
+            return self._build_approval_history_input(text)
 
         if tool_name == "memory_forget":
             if text.strip().casefold().startswith("forget all"):
@@ -984,6 +1021,46 @@ class JarvisOrchestrator:
         if content:
             result["content"] = content
         return result
+
+    @classmethod
+    def _build_approval_history_input(cls, text: str) -> dict[str, object]:
+        """Parse an approval-history command into a tool input dictionary.
+
+        Five command shapes are recognised (case-insensitively):
+            show approval history   -> history (most recent, any status)
+            show recent approvals   -> recent (last 10, any status)
+            show approved actions   -> approved
+            show declined actions   -> declined
+            show approval <id>      -> get (a single entry by request_id)
+            view approval <id>      -> get (a single entry by request_id)
+
+        The <id> for "get" is an approval request_id (a UUID string, not a
+        numeric memory id), so it is taken as the raw trailing text rather
+        than parsed as an integer.
+
+        Anything unrecognised falls back to "history", so the command is
+        always read-only by default.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the approval_history tool.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        operation = _APPROVAL_HISTORY_EXACT.get(lowered)
+        if operation is not None:
+            return {"operation": operation}
+
+        for prefix in _APPROVAL_DETAIL_PREFIXES:
+            if lowered.startswith(prefix):
+                request_id = stripped[len(prefix):].strip().strip(":").strip()
+                if request_id:
+                    return {"operation": "get", "request_id": request_id}
+
+        return {"operation": "history"}
 
     @staticmethod
     def _extract_memory_id(text: str, prefix: str) -> int | None:

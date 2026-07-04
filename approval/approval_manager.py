@@ -26,6 +26,7 @@ works purely in memory, exactly as before.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from approval.approval_models import (
@@ -60,6 +61,46 @@ class _ApprovalAuditLogger(Protocol):
         ...
 
 
+class _ApprovalHistoryRecorder(Protocol):
+    """The minimal history-recording interface the ApprovalManager depends on.
+
+    This matches the write-side methods of
+    approval.approval_history_store.ApprovalHistoryStore. Declaring it as a
+    Protocol keeps the manager decoupled from the concrete store, so it can be
+    tested with a simple stand-in (Phase 6, Batch 1).
+
+    Deliberately absent from this interface: anything that stores or returns a
+    tool name or tool input, and anything that lists "pending" requests for
+    later resumption. ApprovalManager's in-memory pending state is always
+    rebuilt from nothing on startup; only the historical record of requests
+    and their decisions is written here, never read back into _pending.
+    """
+
+    def record_request(
+        self,
+        *,
+        request_id: str,
+        action: str,
+        reason: str,
+        security_tier: str,
+        session_id: int | None = ...,
+    ) -> object:
+        """Record a newly created request as a pending history row."""
+        ...
+
+    def record_decision(
+        self,
+        *,
+        request_id: str,
+        approved: bool,
+        decided_by: str,
+        decided_at: datetime,
+        reason: str | None = ...,
+    ) -> object:
+        """Record the final decision for a previously recorded request."""
+        ...
+
+
 _SOURCE = "approval_manager"
 _ACTION_TYPE = "approval_decision"
 
@@ -71,14 +112,27 @@ class ApprovalManager:
     decision made so far. Requests are keyed by their request_id.
 
     Attributes:
-        _pending: Mapping of request_id to a pending ApprovalRequest.
+        _pending: Mapping of request_id to a pending ApprovalRequest. This is
+            always empty when a manager is first constructed - see
+            history_store below for why that never changes.
         _decisions: Mapping of request_id to a completed ApprovalDecision.
         _audit_logger: Optional logger used to record each decision. When None,
             the manager works purely in memory.
+        _history: Optional durable history recorder. When provided, every
+            created request and every decision is also written there, so it
+            can be reviewed later - including after a restart. Crucially,
+            __init__ never reads from this store: a freshly constructed
+            manager always starts with empty _pending and _decisions, exactly
+            as it did before history recording existed. Making a past pending
+            request resumable after a restart is an explicit, separate
+            decision for a later phase, not something this store enables.
     """
 
     def __init__(
-        self, *, audit_logger: _ApprovalAuditLogger | None = None
+        self,
+        *,
+        audit_logger: _ApprovalAuditLogger | None = None,
+        history_store: _ApprovalHistoryRecorder | None = None,
     ) -> None:
         """Initialise an empty approval manager.
 
@@ -86,10 +140,18 @@ class ApprovalManager:
             audit_logger: Optional logger (such as an EventLogger) used to
                 record every approve/decline decision in the audit log. When
                 omitted, the manager works purely in memory as before.
+            history_store: Optional durable history recorder (such as an
+                ApprovalHistoryStore) used to persist every created request
+                and every decision so they remain visible after a restart.
+                When omitted, the manager works purely in memory as before.
+                This parameter only ever causes writes; it is never read from
+                during construction, so pending requests never survive a
+                restart even when a history_store is supplied.
         """
         self._pending: dict[str, ApprovalRequest] = {}
         self._decisions: dict[str, ApprovalDecision] = {}
         self._audit_logger = audit_logger
+        self._history = history_store
 
     def create_request(
         self,
@@ -127,6 +189,7 @@ class ApprovalManager:
             metadata=dict(metadata) if metadata is not None else {},
         )
         self._pending[request.request_id] = request
+        self._record_history_request(request)
         return request
 
     def get_pending(self, request_id: str) -> ApprovalRequest:
@@ -280,6 +343,7 @@ class ApprovalManager:
         self._decisions[request_id] = decision
 
         self._audit(request, decision)
+        self._record_history_decision(decision)
         return decision
 
     def _audit(
@@ -339,3 +403,48 @@ class ApprovalManager:
         if decision.reason:
             parts.append(f"reason={decision.reason}")
         return " ".join(parts)
+
+    def _record_history_request(self, request: ApprovalRequest) -> None:
+        """Record a newly created request in durable history, if configured.
+
+        When no history_store is configured, this is a no-op and the manager
+        behaves purely in memory, exactly as before. No tool name or tool
+        input is ever passed here - ApprovalRequest does not carry either, so
+        there is nothing to persist beyond what the request itself is: an
+        action, a reason, and a tier.
+
+        Args:
+            request: The request that was just created and is now pending.
+        """
+        if self._history is None:
+            return
+
+        self._history.record_request(
+            request_id=request.request_id,
+            action=request.action,
+            reason=request.reason,
+            security_tier=request.security_tier.value,
+            session_id=request.session_id,
+        )
+
+    def _record_history_decision(self, decision: ApprovalDecision) -> None:
+        """Record a decision in durable history, if configured.
+
+        When no history_store is configured, this is a no-op and the manager
+        behaves purely in memory, exactly as before. This only ever updates
+        the outcome of a row already written by _record_history_request; it
+        never creates a new pending row and never causes anything to execute.
+
+        Args:
+            decision: The decision that was just recorded.
+        """
+        if self._history is None:
+            return
+
+        self._history.record_decision(
+            request_id=decision.request_id,
+            approved=decision.approved,
+            decided_by=decision.decided_by,
+            decided_at=decision.decided_at,
+            reason=decision.reason,
+        )
