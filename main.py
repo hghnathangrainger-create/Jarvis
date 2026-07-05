@@ -84,8 +84,16 @@ def build_orchestrator() -> JarvisOrchestrator:
     # silently built its own disconnected default, so approve/decline
     # decisions were reaching neither the audit log nor any durable history.
     # That gap is fixed here, and only here: no approval behaviour changes.
+    #
+    # timeout_seconds enables YELLOW approval-window expiry (Phase 6,
+    # Batch 3): a pending YELLOW request unanswered for this many seconds
+    # expires (ApprovalStatus.EXPIRED), never RED, and never as a decision.
     approval_history = ApprovalHistoryStore(session_factory)
-    approvals = ApprovalManager(audit_logger=logger, history_store=approval_history)
+    approvals = ApprovalManager(
+        audit_logger=logger,
+        history_store=approval_history,
+        timeout_seconds=settings.approval_timeout_seconds,
+    )
 
     # Planning.
     planner = Planner(security)

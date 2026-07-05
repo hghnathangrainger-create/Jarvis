@@ -148,6 +148,82 @@ def test_record_decision_unknown_request_id_returns_none(
     assert result is None
 
 
+# --- record_timeout (Phase 6, Batch 3) --------------------------------------
+
+
+def test_record_timeout_updates_row_to_expired(store: ApprovalHistoryStore) -> None:
+    store.record_request(
+        request_id="req-1",
+        action="send email to Alex",
+        reason="Sending an email communicates on your behalf.",
+        security_tier="yellow",
+    )
+    timed_out_at = datetime.now(timezone.utc)
+    updated = store.record_timeout(
+        request_id="req-1",
+        timed_out_at=timed_out_at,
+        reason="No response within 60 seconds.",
+    )
+    assert updated is not None
+    assert updated.status == "expired"
+    assert updated.decided_by == "timeout"
+    assert updated.decided_at == timed_out_at
+    assert updated.decision_reason == "No response within 60 seconds."
+
+
+def test_record_timeout_is_not_approved_or_declined(
+    store: ApprovalHistoryStore,
+) -> None:
+    """A timeout must never be confused with a real decision's outcome."""
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    updated = store.record_timeout(
+        request_id="req-1", timed_out_at=datetime.now(timezone.utc)
+    )
+    assert updated is not None
+    assert updated.status not in {"approved", "declined"}
+
+
+def test_record_timeout_unknown_request_id_returns_none(
+    store: ApprovalHistoryStore,
+) -> None:
+    result = store.record_timeout(
+        request_id="does-not-exist", timed_out_at=datetime.now(timezone.utc)
+    )
+    assert result is None
+
+
+def test_record_timeout_row_still_has_no_tool_fields(
+    store: ApprovalHistoryStore,
+) -> None:
+    """The structural no-replay guarantee holds for expired rows too."""
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    updated = store.record_timeout(
+        request_id="req-1", timed_out_at=datetime.now(timezone.utc)
+    )
+    assert not hasattr(updated, "tool_name")
+    assert not hasattr(updated, "tool_input")
+
+
+def test_list_by_status_filters_expired(store: ApprovalHistoryStore) -> None:
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    store.record_request(
+        request_id="req-2", action="b", reason="r", security_tier="yellow"
+    )
+    store.record_timeout(
+        request_id="req-1", timed_out_at=datetime.now(timezone.utc)
+    )
+    expired = store.list_by_status("expired")
+    pending = store.list_by_status("pending")
+    assert [r.request_id for r in expired] == ["req-1"]
+    assert [r.request_id for r in pending] == ["req-2"]
+
+
 # --- list_recent -----------------------------------------------------------
 
 

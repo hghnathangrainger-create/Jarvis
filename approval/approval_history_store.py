@@ -6,6 +6,9 @@ Data-access layer for durable, read-only approval history (Phase 6, Batch 1).
 Responsibilities:
     - Record a newly created approval request as a pending history row.
     - Update a history row with its final outcome once a decision is made.
+    - Update a history row to "expired" when its approval window elapses
+      unanswered (Phase 6, Batch 3), via record_timeout - never via
+      record_decision, so a timeout is never mistaken for a decline.
     - Query history: most recent, most recent N, filtered by status, or a
       single entry by request id.
 
@@ -172,6 +175,49 @@ class ApprovalHistoryStore:
             entry.status = "approved" if approved else "declined"
             entry.decided_by = decided_by
             entry.decided_at = decided_at
+            entry.decision_reason = reason
+            db.flush()
+            return self._to_record(entry)
+
+    def record_timeout(
+        self,
+        *,
+        request_id: str,
+        timed_out_at: datetime,
+        reason: str | None = None,
+    ) -> ApprovalHistoryRecord | None:
+        """Update a history row to reflect that its approval window expired.
+
+        This is deliberately distinct from record_decision: nobody approved or
+        declined the request - its approval window simply elapsed before
+        anyone answered. Using this method (rather than record_decision) keeps
+        that outcome honest in the schema: decided_by is recorded as
+        "timeout", never as a real approve/decline actor, and status becomes
+        "expired" rather than "approved" or "declined".
+
+        Args:
+            request_id: The id of the request that expired.
+            timed_out_at: UTC timestamp of when the request was found to have
+                expired.
+            reason: Optional explanation (for example, the configured timeout
+                duration that elapsed).
+
+        Returns:
+            The updated ApprovalHistoryRecord, or None if no history row
+            exists for that request_id (for example, a request created before
+            history recording existed).
+        """
+        with session_scope(self._session_factory) as db:
+            entry = (
+                db.query(ApprovalHistoryEntry)
+                .filter(ApprovalHistoryEntry.request_id == request_id)
+                .one_or_none()
+            )
+            if entry is None:
+                return None
+            entry.status = "expired"
+            entry.decided_by = "timeout"
+            entry.decided_at = timed_out_at
             entry.decision_reason = reason
             db.flush()
             return self._to_record(entry)

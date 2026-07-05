@@ -37,6 +37,7 @@ class _FakeHistory:
     def __init__(self) -> None:
         self.requests: list[dict[str, object]] = []
         self.decisions: list[dict[str, object]] = []
+        self.timeouts: list[dict[str, object]] = []
 
     def record_request(
         self,
@@ -72,6 +73,21 @@ class _FakeHistory:
                 "approved": approved,
                 "decided_by": decided_by,
                 "decided_at": decided_at,
+                "reason": reason,
+            }
+        )
+
+    def record_timeout(
+        self,
+        *,
+        request_id: str,
+        timed_out_at: datetime,
+        reason: str | None = None,
+    ) -> None:
+        self.timeouts.append(
+            {
+                "request_id": request_id,
+                "timed_out_at": timed_out_at,
                 "reason": reason,
             }
         )

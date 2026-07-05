@@ -19,6 +19,14 @@ Covered here:
     - History - and only history - survives a simulated restart; a fresh
       CLI/orchestrator built on the same database still shows past entries,
       while a request left pending is not restorable as an action.
+    - A YELLOW request whose approval window elapses (Phase 6, Batch 3) shows
+      as EXPIRED in durable history, through the real orchestrator and
+      database, and can no longer be approved or declined.
+
+These tests use the real FileCreateTool to exercise real YELLOW write
+actions, but every file it creates is pointed at pytest's per-test tmp_path
+fixture (an isolated temporary directory), never at the repository working
+directory - so running this suite never leaves stray files in the repo.
 
 These tests use a real database, so they are skipped automatically if
 SQLAlchemy is not importable.
@@ -28,6 +36,8 @@ Run with:
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -80,7 +90,13 @@ class _System:
     persisted rows.
     """
 
-    def __init__(self, engine: object) -> None:
+    def __init__(
+        self,
+        engine: object,
+        *,
+        timeout_seconds: int | None = None,
+        clock: object | None = None,
+    ) -> None:
         from approval.approval_history_store import ApprovalHistoryStore
         from approval.approval_manager import ApprovalManager
         from core.orchestrator import JarvisOrchestrator
@@ -109,7 +125,10 @@ class _System:
             logger=self.logger,
         )
         self.approvals = ApprovalManager(
-            audit_logger=self.logger, history_store=self.history
+            audit_logger=self.logger,
+            history_store=self.history,
+            timeout_seconds=timeout_seconds,
+            clock=clock,
         )
         self.orchestrator = JarvisOrchestrator(
             planner=Planner(self.security),
@@ -154,36 +173,75 @@ def engine() -> object:
     return eng
 
 
+def _create_file_command(tmp_path: Path, filename: str, content: str) -> str:
+    """Build a "create file <path> with <content>" command under tmp_path.
+
+    Using an absolute path inside pytest's per-test tmp_path fixture (rather
+    than a bare filename) means these tests still exercise the real
+    FileCreateTool end to end, but nothing they create ever lands in the
+    repository working directory.
+
+    Args:
+        tmp_path: The per-test temporary directory fixture.
+        filename: The bare filename to create inside tmp_path.
+        content: The content to write into the file.
+
+    Returns:
+        The natural-language command string routed to file_create.
+    """
+    return f"create file {tmp_path / filename} with {content}"
+
+
 # --- All five commands, run through the real CLI loop -----------------------
 
 
-def test_show_approval_history_prints_ok_status(engine: object) -> None:
+def test_show_approval_history_prints_ok_status(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "y", "show approval history"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "y", "show approval history"]
+    )
     assert "[OK] Approval history:" in io.transcript
 
 
-def test_show_recent_approvals_prints_ok_status(engine: object) -> None:
+def test_show_recent_approvals_prints_ok_status(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "y", "show recent approvals"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "y", "show recent approvals"]
+    )
     assert "[OK] Recent approvals:" in io.transcript
 
 
-def test_show_approved_actions_prints_ok_status(engine: object) -> None:
+def test_show_approved_actions_prints_ok_status(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "y", "show approved actions"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "y", "show approved actions"]
+    )
     assert "[OK] Approved actions:" in io.transcript
 
 
-def test_show_declined_actions_prints_ok_status(engine: object) -> None:
+def test_show_declined_actions_prints_ok_status(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "n", "show declined actions"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "n", "show declined actions"]
+    )
     assert "[OK] Declined actions:" in io.transcript
 
 
-def test_show_approval_by_id_prints_ok_status_and_detail(engine: object) -> None:
+def test_show_approval_by_id_prints_ok_status_and_detail(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    response = system.orchestrator.handle_request("create file a.txt with x")
+    response = system.orchestrator.handle_request(
+        _create_file_command(tmp_path, "a.txt", "x")
+    )
     request_id = response.approval_request.request_id
     system.approvals.approve(request_id)
 
@@ -196,10 +254,12 @@ def test_show_approval_by_id_prints_ok_status_and_detail(engine: object) -> None
 
 
 def test_approved_entry_shows_all_required_fields_through_cli(
-    engine: object,
+    engine: object, tmp_path: Path
 ) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "y", "show approval history"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "y", "show approval history"]
+    )
     transcript = io.transcript
 
     assert "APPROVED" in transcript
@@ -210,9 +270,13 @@ def test_approved_entry_shows_all_required_fields_through_cli(
     assert "by user" in transcript
 
 
-def test_pending_entry_omits_decision_fields_through_cli(engine: object) -> None:
+def test_pending_entry_omits_decision_fields_through_cli(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file a.txt with x", "y", "show approval history"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "a.txt", "x"), "y", "show approval history"]
+    )
     # The approved entry from above should show decided fields...
     assert "decided:" in io.transcript
 
@@ -222,7 +286,7 @@ def test_pending_entry_omits_decision_fields_through_cli(engine: object) -> None
     # entry's own detail line (the line directly after its summary line).
     second = _System(engine)
     pending_response = second.orchestrator.handle_request(
-        "create file pending.txt with y"
+        _create_file_command(tmp_path, "pending.txt", "y")
     )
     pending_id = pending_response.approval_request.request_id
 
@@ -243,16 +307,24 @@ def test_pending_entry_omits_decision_fields_through_cli(engine: object) -> None
 # --- Existing approval flow, unchanged, through the CLI ---------------------
 
 
-def test_existing_approve_flow_still_works_through_cli(engine: object) -> None:
+def test_existing_approve_flow_still_works_through_cli(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file report.txt with numbers", "y"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "report.txt", "numbers"), "y"]
+    )
     assert "[NEEDS APPROVAL]" in io.transcript
     assert "[APPROVED]" in io.transcript
 
 
-def test_existing_decline_flow_still_works_through_cli(engine: object) -> None:
+def test_existing_decline_flow_still_works_through_cli(
+    engine: object, tmp_path: Path
+) -> None:
     system = _System(engine)
-    io = system.cli(["create file report.txt with numbers", "n"])
+    io = system.cli(
+        [_create_file_command(tmp_path, "report.txt", "numbers"), "n"]
+    )
     assert "[NEEDS APPROVAL]" in io.transcript
     assert "[DECLINED]" in io.transcript
 
@@ -261,10 +333,12 @@ def test_existing_decline_flow_still_works_through_cli(engine: object) -> None:
 
 
 def test_history_visible_through_cli_after_simulated_restart(
-    engine: object,
+    engine: object, tmp_path: Path
 ) -> None:
     first_run = _System(engine)
-    response = first_run.orchestrator.handle_request("create file a.txt with x")
+    response = first_run.orchestrator.handle_request(
+        _create_file_command(tmp_path, "a.txt", "x")
+    )
     first_run.approvals.approve(response.approval_request.request_id)
 
     second_run = _System(engine)
@@ -274,11 +348,72 @@ def test_history_visible_through_cli_after_simulated_restart(
 
 
 def test_pending_request_not_approvable_after_simulated_restart_via_cli(
-    engine: object,
+    engine: object, tmp_path: Path
 ) -> None:
     first_run = _System(engine)
-    first_run.orchestrator.handle_request("create file b.txt with y")
+    first_run.orchestrator.handle_request(
+        _create_file_command(tmp_path, "b.txt", "y")
+    )
     # Deliberately left pending across the simulated restart below.
 
     second_run = _System(engine)
     assert second_run.approvals.list_pending() == []
+
+
+# --- YELLOW approval timeout, through the real stack (Phase 6, Batch 3) ----
+
+
+class _FakeClock:
+    """A settable clock so this integration test can simulate elapsed time
+    against the real orchestrator, ApprovalManager, and database - not just
+    the in-memory unit tests in test_approval_manager_timeout.py."""
+
+    def __init__(self, start: object) -> None:
+        self.now = start
+
+    def __call__(self) -> object:
+        return self.now
+
+
+def test_timed_out_request_shows_expired_in_history_through_cli(
+    engine: object, tmp_path: Path
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from approval.approval_models import ApprovalError
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    clock = _FakeClock(start)
+    system = _System(engine, timeout_seconds=60, clock=clock)
+
+    # Created directly through the orchestrator (not system.cli(...)), so the
+    # request becomes pending without the CLI immediately blocking on an
+    # approval prompt - the same pattern already used above for a request
+    # left deliberately pending across a simulated restart.
+    response = system.orchestrator.handle_request(
+        _create_file_command(tmp_path, "a.txt", "x")
+    )
+    request_id = response.approval_request.request_id
+
+    clock.now = start + timedelta(seconds=60)  # exactly at the boundary
+
+    # The sweep is lazy: it fires when ApprovalManager's own pending state is
+    # next touched (get_pending/list_pending/has_pending, or approve/decline
+    # via get_pending) - not merely by reading durable history, which the
+    # read-only "show approval..." commands do directly against the store and
+    # never touch the manager at all. Attempting to approve is what a real
+    # late decision would do, and it is what triggers the sweep here.
+    with pytest.raises(ApprovalError):
+        system.approvals.approve(request_id)
+    with pytest.raises(ApprovalError):
+        system.approvals.decline(request_id)
+
+    # Durable history now reflects the expiry, through the real CLI/tool path.
+    io = system.cli(["show approval history"])
+    assert f"[{request_id}] EXPIRED" in io.transcript
+
+    # Never recorded as, or mistaken for, an approved or declined outcome.
+    approved_io = system.cli(["show approved actions"])
+    assert request_id not in approved_io.transcript
+    declined_io = system.cli(["show declined actions"])
+    assert request_id not in declined_io.transcript
