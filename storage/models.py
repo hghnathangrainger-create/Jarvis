@@ -251,7 +251,8 @@ class ApprovalHistoryEntry(Base):
     )
     decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-def __repr__(self) -> str:
+
+    def __repr__(self) -> str:
         """Return an unambiguous representation for debugging.
 
         Returns:
