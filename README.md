@@ -9,15 +9,15 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 ## Current Status
 
 **Phase 5 complete: Better Memory and Personal Knowledge System.**
-**Phase 6 in progress: Durable Approvals (Batches 1–2 complete).**
+**Phase 6 complete: Durable Approvals and Approval-Lifecycle Timeout Enforcement.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
-Phase 6 adds a durable, read-only record of every approval decision, so it survives a restart — without making any past decision resumable or replayable. See the Phase 6 section below.
+Phase 6 adds a durable, read-only record of every approval decision, so it survives a restart — without making any past decision resumable or replayable — and a bounded lifecycle for pending approvals: a YELLOW request left unanswered now expires automatically instead of waiting forever. See the Phase 6 section below.
 
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified (Phase 5):** `poetry run pytest -v` — **477 passed, 0 failed** in 1.81s (Python 3.14.6, pytest 9.1.1). Phase 6 Batches 1–2 add further tests on top of this baseline; see the Phase 6 progress report for the up-to-date count once the full suite has been re-run.
+> **Verified:** `poetry run pytest -v` — **559 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–6 test, including Phase 6's durable approval history and YELLOW approval-timeout enforcement.
 
 ---
 
@@ -103,12 +103,13 @@ Jarvis still cannot, by design: delete, move, rename, or edit-in-place **files**
 
 ---
 
-## Phase 6 — Durable Approvals (in progress)
+## Phase 6 — Durable Approvals and Approval-Lifecycle Timeout Enforcement (complete)
 
-Phase 6 makes approval decisions durable: every approval request and its eventual outcome is recorded in SQLite, so the record survives a restart. This is a **read-only history**, not a queue of actions waiting to run — see the safety note below for exactly why that distinction is enforced structurally, not just by convention.
+Phase 6 makes approval decisions durable: every approval request and its eventual outcome is recorded in SQLite, so the record survives a restart. This is a **read-only history**, not a queue of actions waiting to run — see the safety note below for exactly why that distinction is enforced structurally, not just by convention. Phase 6 also gives a pending approval a bounded lifecycle: it no longer waits forever for an answer.
 
 - **Batch 1 — Durable approval history.** Every created request and every approve/decline decision is written to a new `approval_history` table. A restart no longer loses the record of what was asked and how it was decided. As part of this batch, a pre-existing gap was also closed: `main.py` now actually connects the audit logger to the Approval Manager, so approval decisions reach the audit log as they always should have.
 - **Batch 2 — CLI polish and documentation.** The five read-only commands below now show every field — request id, status, action, security tier, created time, and, once decided, decided time, decided by, and decision reason — cleanly, with fields that don't apply yet (a pending request has no decision) simply omitted rather than shown blank.
+- **Batch 3 — YELLOW approval-window timeout enforcement.** A pending YELLOW request that goes unanswered for a configurable window (**default 60 seconds**, `APPROVAL_TIMEOUT_SECONDS`) now **expires automatically**. An expired request becomes a distinct `EXPIRED` outcome — recorded in durable history as `expired`, never as declined — and can never afterward be approved or declined. **RED remains completely outside this lifecycle**: it can never become a pending, timeable approval in the first place, so there is nothing for a timeout to apply to.
 
 ### Durable approval history commands
 
@@ -140,11 +141,20 @@ Concretely, in this phase:
 
 - There is **no `approve <id>` for an old request.** A restart clears in-memory pending state exactly as it always did — the Approval Manager never reads history back into memory to repopulate it.
 - **No automatic execution from history**, ever.
-- **No resumable approvals.** Making a past pending request resumable is an explicit, separate decision, deliberately deferred to a future batch with its own safety review, its own reclassification analysis, and its own expiry rules — not something this phase enables by accident.
+- **No resumable approvals.** Making a past pending request resumable is an explicit, separate decision, deliberately deferred with its own safety review, its own reclassification analysis, and its own expiry-interaction rules — not something this phase enables by accident. An **expired** approval is no exception: it produces a terminal `EXPIRED` outcome, not a reactivatable one.
 
-### What is deliberately NOT included (Phase 6 so far)
+### Approval timeouts (Batch 3)
 
-Resumable approvals, an `approve <id>` command for anything not currently pending in memory, automatic execution of any kind, and any change to what gets classified GREEN/YELLOW/RED. All remain candidates for a clearly separate, future batch.
+A pending YELLOW request that nobody answers within `APPROVAL_TIMEOUT_SECONDS` (default **60 seconds**) expires automatically:
+
+- The boundary is exact: a request **59.999 seconds old is still pending**; a request **exactly 60.000 seconds old has expired**.
+- Expiry is checked lazily, only when the approval system is next asked about pending requests — there is no background timer or polling loop.
+- An expired request is recorded in durable history as `expired`, decided by `"timeout"` — never as `declined`, and never as a result anyone actually decided.
+- **RED never enters this lifecycle.** It is rejected before it can ever become a pending approval, so there is nothing for a timeout to reach.
+
+### What is deliberately NOT included in Phase 6
+
+Resumable approvals, an `approve <id>` command for anything not currently pending in memory, automatic execution of any kind, and any change to what gets classified GREEN/YELLOW/RED. Resumable approvals in particular remain a deliberately separate future decision, requiring its own safety review and architecture decision before it can even be scoped.
 
 ---
 
@@ -246,8 +256,8 @@ jarvis/
 
 ## Next Phase
 
-**Phase 6 — Durable Approvals and Deeper AI Assistance (in progress).** Batches 1–2 are complete: durable, read-only approval history, and a polished CLI experience for it. Deliberately not yet included, each requiring its own safety review before it is scoped as a batch: resumable approvals (replaying a past pending request after a restart, with its own reclassification and expiry rules), deeper but still-advisory AI assistance (richer summaries and suggestions across memories), and optional smarter search over memory. Every addition continues to go only behind the Security Manager, with the user in control.
+**Phase 6 is complete**: durable, read-only approval history, a polished CLI experience for it, and a bounded YELLOW approval lifecycle that expires an unanswered request instead of waiting forever. Deliberately not included, each requiring its own safety review and architecture decision before it could even be scoped: resumable approvals (replaying a past pending or expired request after a restart, with its own reclassification and expiry-interaction rules), deeper but still-advisory AI assistance (richer summaries and suggestions across memories), and optional smarter search over memory. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 is in progress. Neither is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 is complete for its defined scope, not yet tagged. Neither is a finished product.*
