@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import time
 
+from ai.context_models import AIContextBlock
 from ai.prompt_builder import PromptBuilder
 from ai.providers.base import AIProvider, AIProviderError, AIResponse
 from ai.response_validator import ResponseValidationError, ResponseValidator
@@ -79,7 +80,7 @@ class AIRouter:
         *,
         system_instruction: str,
         user_message: str,
-        context: str | None = None,
+        context: AIContextBlock | None = None,
         session_id: int | None = None,
     ) -> AIResponse:
         """Route a request to the provider and return a validated response.
@@ -91,7 +92,9 @@ class AIRouter:
         Args:
             system_instruction: The trusted instruction framing the model.
             user_message: The user's request.
-            context: Optional untrusted reference context. Defaults to None.
+            context: Optional typed context block (see ai/context_models.py).
+                Its trust origin determines how PromptBuilder frames it.
+                Defaults to None.
             session_id: Optional session identifier for the audit trail.
                 Defaults to None.
 
@@ -140,6 +143,22 @@ class AIRouter:
             session_id=session_id,
         )
         return validated
+
+    def is_available(self) -> bool:
+        """Report whether the routed provider is currently usable.
+
+        This is a lightweight passthrough to the underlying provider's own
+        availability check, so callers (such as AIReasoningEngine) never need
+        to hold a direct reference to a provider - only to the router.
+
+        Returns:
+            True if the provider reports itself available, False otherwise
+            (including if the availability check itself raises).
+        """
+        try:
+            return self._provider.is_available()
+        except Exception:  # noqa: BLE001 - availability checks must never raise out
+            return False
 
     @staticmethod
     def _elapsed_ms(start: float) -> int:

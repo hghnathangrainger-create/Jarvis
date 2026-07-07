@@ -19,11 +19,16 @@ Run with:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
+from ai.prompt_builder import PromptBuilder
 from ai.providers.base import AIProvider, AIRequest, AIResponse
 from ai.reasoning_engine import AIReasoningEngine
+from ai.response_validator import ResponseValidator
+from ai.router import AIRouter
+from config.settings import Settings
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
@@ -107,7 +112,23 @@ def _build(reasoning: AIReasoningEngine | None = None) -> JarvisOrchestrator:
 
 
 def _enabled_engine(text: str) -> AIReasoningEngine:
-    return AIReasoningEngine(provider=_FakeProvider(text), enabled=True, model="m")
+    router = AIRouter(
+        provider=_FakeProvider(text),
+        prompt_builder=PromptBuilder(),
+        validator=ResponseValidator(),
+        logger=_SpyLogger(),  # type: ignore[arg-type]
+        settings=Settings(
+            anthropic_api_key="test-key",
+            ai_model="test-model",
+            ai_max_tokens=1024,
+            database_path=Path("unused.db"),
+            log_level="INFO",
+            approval_timeout_seconds=60,
+            debug=False,
+            ai_reasoning_enabled=True,
+        ),
+    )
+    return AIReasoningEngine(router=router, enabled=True)
 
 
 # --- AI disabled: identical behaviour ----------------------------------------

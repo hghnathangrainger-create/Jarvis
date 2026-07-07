@@ -64,6 +64,36 @@ class SecurityTier(Enum):
 
 
 # ---------------------------------------------------------------------------
+# AI context trust (Phase 7, Batch 2)
+# ---------------------------------------------------------------------------
+
+
+class ContentTrust(Enum):
+    """The trust origin of a piece of text supplied as context to an AI call.
+
+    This is deliberately narrower than "do I trust this content" as a
+    judgement call - it is a structural fact about origin, enforced by
+    ai.context_models.AIContextBlock, not a label any caller can assign
+    freely.
+
+    Attributes:
+        JARVIS_TRUSTED: Text authored directly by Jarvis's own code (for
+            example, a system instruction), or the user's own literal,
+            current-turn typed input. Never applies to stored memory, file
+            or web content, tool output, prior AI-generated text, or any
+            other historical conversation text, regardless of who originally
+            wrote it - see AIContextBlock for the enforced construction
+            guard that keeps this true.
+        UNTRUSTED: Any other source. Structurally isolated from system
+            instructions in every AI prompt (Phase 7, Batch 2) and scanned
+            for injection patterns before use (Phase 7, Batch 3).
+    """
+
+    JARVIS_TRUSTED = "jarvis_trusted"
+    UNTRUSTED = "untrusted"
+
+
+# ---------------------------------------------------------------------------
 # Intent classification
 # ---------------------------------------------------------------------------
 

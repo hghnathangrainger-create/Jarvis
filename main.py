@@ -12,7 +12,8 @@ Responsibilities:
     - Start the terminal CLI.
 
 Does NOT:
-    - Call the Claude API, add voice, or add phone support.
+    - Call the Claude API unless AI_REASONING_ENABLED=true (Phase 7, Batch 2);
+      add voice or phone support.
     - Contain any business logic; it only assembles the system and starts it.
 
 This module is the single composition root for Phase 1. It is the one place
@@ -22,6 +23,11 @@ module free of wiring concerns and easy to test in isolation.
 
 from __future__ import annotations
 
+from ai.prompt_builder import PromptBuilder
+from ai.providers.claude import ClaudeProvider
+from ai.reasoning_engine import AIReasoningEngine
+from ai.response_validator import ResponseValidator
+from ai.router import AIRouter
 from approval.approval_history_store import ApprovalHistoryStore
 from approval.approval_manager import ApprovalManager
 from config.settings import load_settings
@@ -122,12 +128,32 @@ def build_orchestrator() -> JarvisOrchestrator:
     # so the Core coordinates rather than performing command-matching itself.
     command_router = CommandRouter(registry)
 
+    # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
+    # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and
+    # AIReasoningEngine are constructed - previously main.py never built
+    # either, so the flag had no effect on the running application no matter
+    # how it was set. With the flag false or unset (the default), reasoning
+    # stays None here exactly as it silently always has: no new behaviour,
+    # no new AI authority, nothing bypasses the Security Manager or Tool
+    # Executor - the engine remains strictly advisory either way.
+    reasoning_engine: AIReasoningEngine | None = None
+    if settings.ai_reasoning_enabled:
+        ai_router = AIRouter(
+            provider=ClaudeProvider(settings),
+            prompt_builder=PromptBuilder(),
+            validator=ResponseValidator(),
+            logger=logger,
+            settings=settings,
+        )
+        reasoning_engine = AIReasoningEngine(router=ai_router, enabled=True)
+
     return JarvisOrchestrator(
         planner=planner,
         executor=executor,
         registry=registry,
         command_router=command_router,
         approval_manager=approvals,
+        reasoning_engine=reasoning_engine,
     )
 
 
