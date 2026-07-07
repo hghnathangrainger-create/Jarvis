@@ -24,6 +24,7 @@ import pytest
 
 from ai.providers.base import AIProvider, AIRequest, AIResponse
 from ai.reasoning_engine import AIReasoningEngine
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
 from planner.planner import Planner
@@ -100,6 +101,7 @@ def _build(reasoning: AIReasoningEngine | None = None) -> JarvisOrchestrator:
         planner=Planner(security),
         executor=executor,
         registry=registry,
+        command_router=CommandRouter(registry),
         reasoning_engine=reasoning,
     )
 

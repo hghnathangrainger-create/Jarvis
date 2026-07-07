@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from memory.episodic_memory import MemoryRecord
@@ -86,7 +87,12 @@ def orchestrator() -> JarvisOrchestrator:
         security_manager=security,
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
-    return JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    return JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
 
 
 # --- Exit command detection --------------------------------------------------

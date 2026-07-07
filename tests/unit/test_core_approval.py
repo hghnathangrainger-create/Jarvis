@@ -21,6 +21,7 @@ import pytest
 
 from approval.approval_manager import ApprovalManager
 from config.constants import SecurityTier
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
 from planner.planner import Planner
@@ -84,6 +85,7 @@ def _build(approval_manager: ApprovalManager | None = None) -> JarvisOrchestrato
         planner=planner,
         executor=executor,
         registry=registry,
+        command_router=CommandRouter(registry),
         approval_manager=approval_manager,
     )
 
@@ -223,7 +225,10 @@ def test_yellow_action_is_not_executed() -> None:
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
     orchestrator = JarvisOrchestrator(
-        planner=Planner(security), executor=executor, registry=registry
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
     )
 
     response = orchestrator.handle_request("echo something")

@@ -51,6 +51,7 @@ class _System:
         from sqlalchemy import create_engine
 
         from approval.approval_manager import ApprovalManager
+        from core.command_router import CommandRouter
         from core.orchestrator import JarvisOrchestrator
         from memory.episodic_memory import EpisodicMemoryStore
         from memory.memory_manager import MemoryManager
@@ -89,6 +90,7 @@ class _System:
             planner=Planner(self.security),
             executor=self.executor,
             registry=self.registry,
+            command_router=CommandRouter(self.registry),
             approval_manager=self.approvals,
         )
 

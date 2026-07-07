@@ -21,6 +21,7 @@ import pytest
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalRequest
 from config.constants import SecurityTier
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from memory.episodic_memory import MemoryRecord
@@ -82,7 +83,12 @@ def _build() -> JarvisOrchestrator:
         security_manager=security,
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
-    return JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    return JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
 
 
 def _run_cli(inputs: list[str]) -> tuple[JarvisOrchestrator, str]:
@@ -157,7 +163,10 @@ def _build_with_tool(tool: BaseTool) -> JarvisOrchestrator:
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
     return JarvisOrchestrator(
-        planner=Planner(security), executor=executor, registry=registry
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
     )
 
 
@@ -426,6 +435,7 @@ def test_cli_decline_is_clean_and_audited() -> None:
         planner=Planner(security),
         executor=executor,
         registry=registry,
+        command_router=CommandRouter(registry),
         approval_manager=approvals,
     )
     crafted = _yellow_tool_response(orchestrator, "send")

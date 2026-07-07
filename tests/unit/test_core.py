@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
 from planner.planner import Planner
@@ -87,7 +88,12 @@ def orchestrator(memory: _FakeMemory) -> JarvisOrchestrator:
         security_manager=security,
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
-    return JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    return JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
 
 
 # --- Safe (GREEN) requests ---------------------------------------------------
@@ -217,7 +223,12 @@ def test_core_does_not_bypass_tool_executor() -> None:
         security_manager=security,
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
-    core = JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    core = JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
 
     response = core.handle_request("echo something")
     assert response.success is False

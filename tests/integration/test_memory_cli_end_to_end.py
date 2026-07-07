@@ -38,6 +38,7 @@ def cli_factory():
     """Return a factory that builds a CLI driven by a scripted input list."""
     from sqlalchemy import create_engine
 
+    from core.command_router import CommandRouter
     from core.orchestrator import JarvisOrchestrator
     from memory.episodic_memory import EpisodicMemoryStore
     from memory.memory_manager import MemoryManager
@@ -61,7 +62,10 @@ def cli_factory():
         registry=registry, security_manager=security, logger=_SpyLogger()
     )
     orchestrator = JarvisOrchestrator(
-        planner=Planner(security), executor=executor, registry=registry
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
     )
 
     def build(inputs: list[str]) -> str:

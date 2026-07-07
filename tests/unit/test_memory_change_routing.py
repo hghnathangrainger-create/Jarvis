@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import pytest
 
 from approval.approval_manager import ApprovalManager
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
 from memory.memory_models import normalize_category
@@ -122,6 +123,7 @@ def orchestrator(memory: _FakeMemory) -> JarvisOrchestrator:
         planner=Planner(security),
         executor=executor,
         registry=registry,
+        command_router=CommandRouter(registry),
         approval_manager=ApprovalManager(audit_logger=logger),  # type: ignore[arg-type]
     )
 
@@ -130,12 +132,12 @@ def orchestrator(memory: _FakeMemory) -> JarvisOrchestrator:
 
 
 def test_show_memory_routes_to_get() -> None:
-    result = JarvisOrchestrator._build_memory_input("show memory 12")
+    result = CommandRouter._build_memory_input("show memory 12")
     assert result == {"operation": "get", "memory_id": 12}
 
 
 def test_update_routes_to_update_input() -> None:
-    result = JarvisOrchestrator._build_memory_update_input(
+    result = CommandRouter._build_memory_update_input(
         "update memory 12: the new text"
     )
     assert result == {
@@ -146,7 +148,7 @@ def test_update_routes_to_update_input() -> None:
 
 
 def test_move_routes_to_move_input() -> None:
-    result = JarvisOrchestrator._build_memory_update_input(
+    result = CommandRouter._build_memory_update_input(
         "move memory 12 to personal"
     )
     assert result == {

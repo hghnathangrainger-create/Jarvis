@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from planner.planner import Planner
 from security.security_manager import SecurityManager
@@ -55,7 +56,10 @@ def orchestrator() -> JarvisOrchestrator:
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
     return JarvisOrchestrator(
-        planner=Planner(security), executor=executor, registry=registry
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
     )
 
 

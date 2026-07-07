@@ -16,6 +16,7 @@ Place this file in the project root and run it from PowerShell:
 from __future__ import annotations
 
 from config.settings import load_settings
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from memory.episodic_memory import EpisodicMemoryStore
@@ -86,7 +87,12 @@ def main() -> None:
     registry.register_tool(MemoryTool(memory))
 
     executor = ToolExecutor(registry=registry, security_manager=security, logger=logger)
-    core = JarvisOrchestrator(planner=planner, executor=executor, registry=registry)
+    core = JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
 
     print("Jarvis Core - approval integration smoke test")
     print("=" * 70)

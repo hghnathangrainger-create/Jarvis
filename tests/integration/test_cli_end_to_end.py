@@ -26,6 +26,7 @@ import pytest
 
 from approval.approval_manager import ApprovalManager
 from config.constants import SecurityTier
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from planner.planner import Planner
@@ -114,6 +115,7 @@ class _System:
             planner=Planner(self.security),
             executor=self.executor,
             registry=self.registry,
+            command_router=CommandRouter(self.registry),
             approval_manager=self.approvals,
         )
 

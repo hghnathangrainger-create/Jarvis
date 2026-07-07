@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from ai.providers.base import AIProvider, AIRequest, AIResponse
 from ai.reasoning_engine import AIReasoningEngine
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from planner.planner import Planner
 from security.security_manager import SecurityManager
@@ -65,6 +66,7 @@ def _build(reasoning: AIReasoningEngine | None) -> JarvisOrchestrator:
         planner=Planner(security),
         executor=executor,
         registry=registry,
+        command_router=CommandRouter(registry),
         reasoning_engine=reasoning,
     )
 

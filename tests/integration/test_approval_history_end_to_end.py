@@ -68,6 +68,7 @@ class _System:
     def __init__(self, engine: object) -> None:
         from approval.approval_history_store import ApprovalHistoryStore
         from approval.approval_manager import ApprovalManager
+        from core.command_router import CommandRouter
         from core.orchestrator import JarvisOrchestrator
         from memory.episodic_memory import EpisodicMemoryStore
         from memory.memory_manager import MemoryManager
@@ -100,6 +101,7 @@ class _System:
             planner=Planner(self.security),
             executor=self.executor,
             registry=self.registry,
+            command_router=CommandRouter(self.registry),
             approval_manager=self.approvals,
         )
 

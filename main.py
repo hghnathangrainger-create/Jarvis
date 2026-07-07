@@ -25,6 +25,7 @@ from __future__ import annotations
 from approval.approval_history_store import ApprovalHistoryStore
 from approval.approval_manager import ApprovalManager
 from config.settings import load_settings
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
@@ -116,10 +117,16 @@ def build_orchestrator() -> JarvisOrchestrator:
         logger=logger,
     )
 
+    # Command routing (Phase 7, Batch 1): matches request text to a
+    # registered tool and builds its input. Extracted from the orchestrator
+    # so the Core coordinates rather than performing command-matching itself.
+    command_router = CommandRouter(registry)
+
     return JarvisOrchestrator(
         planner=planner,
         executor=executor,
         registry=registry,
+        command_router=command_router,
         approval_manager=approvals,
     )
 

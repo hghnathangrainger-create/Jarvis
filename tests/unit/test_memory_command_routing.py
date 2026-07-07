@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from memory.episodic_memory import MemoryRecord
 from memory.memory_models import normalize_category
@@ -97,7 +98,10 @@ def orchestrator(memory: _FakeMemory) -> JarvisOrchestrator:
         logger=_SpyLogger(),  # type: ignore[arg-type]
     )
     return JarvisOrchestrator(
-        planner=Planner(security), executor=executor, registry=registry
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
     )
 
 
@@ -105,12 +109,12 @@ def orchestrator(memory: _FakeMemory) -> JarvisOrchestrator:
 
 
 def test_remember_this_routes_to_save_general() -> None:
-    result = JarvisOrchestrator._build_memory_input("remember this: buy milk")
+    result = CommandRouter._build_memory_input("remember this: buy milk")
     assert result == {"operation": "save", "content": "buy milk"}
 
 
 def test_remember_as_category_routes_to_save_with_category() -> None:
-    result = JarvisOrchestrator._build_memory_input(
+    result = CommandRouter._build_memory_input(
         "remember this as project: ship the release"
     )
     assert result == {
@@ -121,22 +125,22 @@ def test_remember_as_category_routes_to_save_with_category() -> None:
 
 
 def test_show_memories_routes_to_list() -> None:
-    result = JarvisOrchestrator._build_memory_input("show memories")
+    result = CommandRouter._build_memory_input("show memories")
     assert result == {"operation": "list"}
 
 
 def test_show_memories_in_category_routes_to_filtered_list() -> None:
-    result = JarvisOrchestrator._build_memory_input("show memories in personal")
+    result = CommandRouter._build_memory_input("show memories in personal")
     assert result == {"operation": "list", "category": "personal"}
 
 
 def test_search_memories_routes_to_search() -> None:
-    result = JarvisOrchestrator._build_memory_input("search memories for milk")
+    result = CommandRouter._build_memory_input("search memories for milk")
     assert result == {"operation": "search", "query": "milk"}
 
 
 def test_search_memories_in_category_routes_to_filtered_search() -> None:
-    result = JarvisOrchestrator._build_memory_input(
+    result = CommandRouter._build_memory_input(
         "search memories in project for deadline"
     )
     assert result == {
