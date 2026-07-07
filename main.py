@@ -154,6 +154,8 @@ def build_orchestrator() -> JarvisOrchestrator:
         command_router=command_router,
         approval_manager=approvals,
         reasoning_engine=reasoning_engine,
+        security_manager=security,
+        logger=logger,
     )
 
 

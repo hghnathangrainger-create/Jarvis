@@ -9,6 +9,10 @@ Responsibilities:
     - Apply a safe default (YELLOW) to actions that match no known rule.
     - Scan untrusted text for prompt-injection patterns before it reaches an
       AI provider (Phase 7, Batch 3) - detection only, never enforcement.
+    - Decide the unexpected-action verdict (FLAG/ESCALATE/BLOCK) for an
+      AI-suggested action that falls outside a plan's expected scope (Phase 7,
+      Batch 4) - policy only; it does not itself log, execute, or approve
+      anything.
 
 Does NOT:
     - Execute, approve, or block actions itself (it only classifies them).
@@ -18,19 +22,27 @@ Does NOT:
     - Decide what happens when injection is detected (Batch 4), or treat a
       scan result as any kind of user approval - scan_for_injection only
       reports what it found.
+    - Convert an unexpected-action verdict into an execution path, an
+      approval, or a Plan change - evaluate_unexpected_action only reports a
+      verdict; the caller (JarvisOrchestrator) decides what, if anything, to
+      do with it, and Batch 4 uses it purely for observability.
 
 The classification is deliberately simple and rule-based for Phase 1: an
 ordered list of keyword rules, checked most-dangerous-first, so that the most
 severe matching tier always wins. Every rule carries its own explanation, so
 the result is always understandable and auditable. The injection scanner
 added in Phase 7, Batch 3 follows the same philosophy: a small, explicit,
-inspectable pattern list, not a machine-learned or remotely-updated one.
+inspectable pattern list, not a machine-learned or remotely-updated one. The
+unexpected-action policy added in Phase 7, Batch 4 reuses classify_action's
+existing tier decision rather than duplicating or replacing it; it only adds
+a mapping from (tier, in-scope?) to a verdict.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 from config.constants import SecurityTier
 
@@ -314,6 +326,66 @@ _INJECTION_PATTERNS: tuple[_InjectionPattern, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Unexpected AI action escalation (Phase 7, Batch 4)
+#
+# Policy only: this section decides what verdict an AI-suggested action
+# outside a plan's expected scope should receive. It never executes, approves,
+# or reclassifies anything, and it reuses classify_action's existing tier
+# decision rather than duplicating it. Whether, and how, a caller acts on the
+# verdict is entirely up to that caller - JarvisOrchestrator uses it purely
+# for observability in this batch, since nothing yet lets an AI suggestion
+# execute at all.
+# ---------------------------------------------------------------------------
+
+
+class UnexpectedActionVerdict(Enum):
+    """The verdict for an AI-suggested action outside a plan's expected scope.
+
+    Mirrors the Master Specification's per-tier rule for an unexpected action:
+    GREEN is flagged but not obstructed, YELLOW is escalated to approval
+    (never granted automatically), and RED is blocked immediately.
+
+    Attributes:
+        FLAG: The action is GREEN tier; record the anomaly, do not obstruct.
+        ESCALATE: The action is YELLOW tier; require user approval, never
+            grant it automatically.
+        BLOCK: The action is RED tier; block it immediately.
+    """
+
+    FLAG = "flag"
+    ESCALATE = "escalate"
+    BLOCK = "block"
+
+
+@dataclass(frozen=True, slots=True)
+class UnexpectedActionDecision:
+    """The verdict for one AI-suggested action found outside the expected scope.
+
+    Only produced when the action is not in the caller-supplied set of
+    expected actions; classify_action is always the source of the tier.
+
+    Attributes:
+        action: The AI-suggested action text that was evaluated.
+        tier: The tier classify_action assigned to this action.
+        verdict: The unexpected-action verdict derived from that tier.
+        reason: A human-readable explanation, combining classify_action's own
+            reason with the fact that this action was unexpected.
+    """
+
+    action: str
+    tier: SecurityTier
+    verdict: UnexpectedActionVerdict
+    reason: str
+
+
+_UNEXPECTED_ACTION_VERDICT_BY_TIER: dict[SecurityTier, UnexpectedActionVerdict] = {
+    SecurityTier.GREEN: UnexpectedActionVerdict.FLAG,
+    SecurityTier.YELLOW: UnexpectedActionVerdict.ESCALATE,
+    SecurityTier.RED: UnexpectedActionVerdict.BLOCK,
+}
+
+
 class SecurityManager:
     """Classifies requested actions into security tiers using simple rules.
 
@@ -390,4 +462,51 @@ class SecurityManager:
             suspicious=bool(matches),
             matched_patterns=matches,
             text=text,
+        )
+
+    def evaluate_unexpected_action(
+        self, action: str, expected_actions: frozenset[str]
+    ) -> UnexpectedActionDecision | None:
+        """Decide the verdict for an action outside a plan's expected scope.
+
+        This reuses classify_action for the tier decision - it is never
+        duplicated or reimplemented here. A verdict is only returned when
+        action is not a member of expected_actions; an expected action is not
+        unexpected, so there is nothing to flag, escalate, or block.
+
+        This method only returns a verdict; it never executes the action,
+        never approves it, and never changes classify_action's tier or any
+        Plan. What a caller does with the verdict - if anything - is entirely
+        up to that caller.
+
+        Args:
+            action: The AI-suggested action text to evaluate (for example, an
+                AISuggestedAction's description).
+            expected_actions: The set of action strings the Planner already
+                produced for this request, e.g.
+                frozenset(step.action for step in plan.steps).
+
+        Returns:
+            None if action is a member of expected_actions. Otherwise, an
+            UnexpectedActionDecision carrying classify_action's tier and the
+            corresponding verdict: FLAG for GREEN, ESCALATE for YELLOW, BLOCK
+            for RED.
+
+        Raises:
+            ValueError: If the action text is empty or whitespace-only (the
+                same validation classify_action performs).
+        """
+        if action in expected_actions:
+            return None
+
+        classification = self.classify_action(action)
+        verdict = _UNEXPECTED_ACTION_VERDICT_BY_TIER[classification.tier]
+        return UnexpectedActionDecision(
+            action=classification.action,
+            tier=classification.tier,
+            verdict=verdict,
+            reason=(
+                "This action was not part of the plan's expected scope. "
+                f"{classification.reason}"
+            ),
         )

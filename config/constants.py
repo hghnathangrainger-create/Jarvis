@@ -231,6 +231,11 @@ class EventOutcome(Enum):
         PENDING: The action is awaiting completion or approval.
         TIMEOUT: The action was aborted because an approval window expired.
         BLOCKED: The action was prevented by the Security Manager.
+        FLAGGED: The action was recorded as an anomaly for review, without
+            being executed, blocked, or awaiting approval (Phase 7, Batch 4;
+            e.g. an AI-suggested GREEN action outside a plan's expected
+            scope). Distinct from SUCCESS, which is only ever recorded after
+            something actually ran.
     """
 
     SUCCESS = "success"
@@ -238,6 +243,7 @@ class EventOutcome(Enum):
     PENDING = "pending"
     TIMEOUT = "timeout"
     BLOCKED = "blocked"
+    FLAGGED = "flagged"
 
 
 # ---------------------------------------------------------------------------

@@ -26,19 +26,73 @@ a way around them.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Protocol
 
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision
 from ai.reasoning_engine import AIReasoningEngine
-from ai.reasoning_models import AIReasoningRequest
-from config.constants import SecurityTier
+from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
+from config.constants import EventOutcome, SecurityTier
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse
 from planner.plan_models import Plan
 from planner.planner import Planner
+from security.security_manager import (
+    SecurityManager,
+    UnexpectedActionDecision,
+    UnexpectedActionVerdict,
+)
 from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
+
+
+class _AuditLogger(Protocol):
+    """The minimal logging interface JarvisOrchestrator depends on.
+
+    This matches the emit method of observability.logger.EventLogger.
+    Declaring it as a Protocol keeps the orchestrator decoupled from the
+    concrete logger, mirroring approval.approval_manager._ApprovalAuditLogger
+    (Phase 7, Batch 4).
+    """
+
+    def emit(
+        self,
+        *,
+        source: str,
+        action_type: str,
+        outcome: EventOutcome,
+        detail: str | None = ...,
+        duration_ms: int | None = ...,
+        security_tier: SecurityTier | None = ...,
+        session_id: int | None = ...,
+    ) -> str:
+        """Emit a structured event. See EventLogger.emit for details."""
+        ...
+
+
+_SOURCE = "jarvis_orchestrator"
+_UNEXPECTED_ACTION_TYPE = "unexpected_ai_action"
+
+# The unexpected-action verdict is observability only in Batch 4 (nothing lets
+# an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
+# EventOutcome values that ToolExecutor already logs purely at
+# classification time, with no execution attempt required: PENDING for a
+# YELLOW action withheld pending confirmation, and BLOCKED for a RED action
+# stopped before it is ever run (tools/executor.py's _handle_needs_
+# confirmation / _handle_blocked). FLAG has no honest existing analogue:
+# SUCCESS is only ever recorded elsewhere in this codebase after a tool
+# actually ran and returned success, which never happens here, so reusing it
+# would misrepresent a flagged-but-untouched anomaly as a completed action.
+# FLAGGED was added to EventOutcome for exactly this shape, the same way
+# TIMEOUT was added in Phase 6 for a genuinely new outcome that no existing
+# value covered - both extend the single existing EventOutcome/EventLogger
+# machinery rather than introducing a parallel one.
+_UNEXPECTED_ACTION_OUTCOME: dict[UnexpectedActionVerdict, EventOutcome] = {
+    UnexpectedActionVerdict.FLAG: EventOutcome.FLAGGED,
+    UnexpectedActionVerdict.ESCALATE: EventOutcome.PENDING,
+    UnexpectedActionVerdict.BLOCK: EventOutcome.BLOCKED,
+}
 
 
 class JarvisOrchestrator:
@@ -56,6 +110,12 @@ class JarvisOrchestrator:
             Core coordinates rather than performing command-matching itself).
         _approvals: Creates and holds pending approval requests for YELLOW
             actions.
+        _security: Used only to evaluate whether an AI-suggested action falls
+            outside the plan's expected scope (Phase 7, Batch 4). It is never
+            used to reclassify, execute, or approve anything; the security
+            gate remains solely ToolExecutor's.
+        _logger: Optional audit logger for the unexpected-action verdict.
+            When omitted, evaluation still happens but nothing is recorded.
     """
 
     def __init__(
@@ -67,6 +127,8 @@ class JarvisOrchestrator:
         command_router: CommandRouter,
         approval_manager: ApprovalManager | None = None,
         reasoning_engine: AIReasoningEngine | None = None,
+        security_manager: SecurityManager | None = None,
+        logger: _AuditLogger | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -83,6 +145,14 @@ class JarvisOrchestrator:
                 consulted and responses are unchanged. When active, an advisory
                 suggestion is attached to the response, but it never affects
                 routing, classification, approval, or execution.
+            security_manager: Used only to evaluate the unexpected-action
+                verdict for AI-suggested actions (Phase 7, Batch 4). A new one
+                is created if omitted; it is stateless, so this is equivalent
+                to sharing the application's existing instance.
+            logger: Optional audit logger for the unexpected-action verdict.
+                The verdict is always evaluated; when logger is omitted,
+                nothing is recorded, matching how approval_manager behaves
+                without an audit_logger.
         """
         self._planner = planner
         self._executor = executor
@@ -90,6 +160,8 @@ class JarvisOrchestrator:
         self._command_router = command_router
         self._approvals = approval_manager or ApprovalManager()
         self._reasoning = reasoning_engine
+        self._security = security_manager or SecurityManager()
+        self._logger = logger
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -226,6 +298,11 @@ class JarvisOrchestrator:
         blocked, requires_confirmation, plan, or tool fields. If the engine is
         inactive or returns nothing, the response is returned unchanged.
 
+        Every suggested action is also evaluated against the response's plan
+        for the unexpected-action policy (Phase 7, Batch 4), purely for
+        observability - see _evaluate_unexpected_actions. That evaluation
+        never influences the returned response.
+
         Args:
             response: The authoritative response already produced by the
                 rule-based path.
@@ -245,6 +322,8 @@ class JarvisOrchestrator:
         if result is None:
             return response
 
+        self._evaluate_unexpected_actions(response, result, session_id)
+
         # Build a short, clearly-advisory suggestion string. This is the ONLY
         # field the AI can influence; every safety-relevant field is untouched.
         suggestion = result.summary
@@ -258,6 +337,97 @@ class JarvisOrchestrator:
             response,
             ai_suggestion=f"[AI suggestion - advisory only] {suggestion}",
         )
+
+    def _evaluate_unexpected_actions(
+        self,
+        response: JarvisResponse,
+        result: AIReasoningResult,
+        session_id: int | None,
+    ) -> None:
+        """Evaluate every AI-suggested action for the unexpected-action policy.
+
+        This is purely for policy evaluation and observability (Phase 7,
+        Batch 4). It never converts a suggestion into a ToolRequest, never
+        executes or approves anything, never changes response, and never
+        changes the Plan or a SecurityTier - it only computes a verdict and,
+        if a logger is configured, records it.
+
+        The expected scope for this request is the set of action strings the
+        Planner already produced: frozenset(step.action for step in
+        response.plan.steps). response.plan can be None (the empty-request
+        path), in which case nothing is expected and every suggestion is
+        evaluated as unexpected.
+
+        Args:
+            response: The authoritative response already produced by the
+                rule-based path, carrying the plan to compare against.
+            result: The AI reasoning result whose suggested actions are
+                evaluated.
+            session_id: Optional session identifier for the audit event.
+        """
+        if not result.has_suggestions:
+            return
+
+        expected_actions: frozenset[str] = (
+            frozenset(step.action for step in response.plan.steps)
+            if response.plan is not None
+            else frozenset()
+        )
+
+        for suggested in result.suggested_actions:
+            try:
+                decision = self._security.evaluate_unexpected_action(
+                    suggested.description, expected_actions
+                )
+            except ValueError:
+                # An AI suggestion with blank description text has nothing
+                # meaningful to evaluate; never let a malformed suggestion
+                # break response construction.
+                continue
+
+            if decision is None:
+                continue
+
+            self._audit_unexpected_action(decision, session_id)
+
+    def _audit_unexpected_action(
+        self, decision: UnexpectedActionDecision, session_id: int | None
+    ) -> None:
+        """Record an unexpected-action verdict, if a logger is configured.
+
+        When no logger is configured, this is a no-op, matching how
+        ApprovalManager behaves without an audit_logger. This evaluation and
+        audit are observability-only (Phase 7, Batch 4): a logger that raises
+        must never break response construction, change the already-decided
+        JarvisResponse, or grant the AI any new authority - the worst a
+        failing logger can do is mean this one audit event was not recorded.
+
+        Args:
+            decision: The verdict to record.
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_UNEXPECTED_ACTION_TYPE,
+                outcome=_UNEXPECTED_ACTION_OUTCOME[decision.verdict],
+                detail=(
+                    f"action={decision.action!r} verdict={decision.verdict.value} "
+                    f"tier={decision.tier.value} reason={decision.reason}"
+                ),
+                security_tier=decision.tier,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break the
+            # authoritative response that was already decided by the
+            # rule-based path. There is nothing else safe to do with the
+            # failure here - Batch 4 does not introduce a parallel logging
+            # system to record it elsewhere.
+            pass
 
     def _handle_request_core(
         self, user_request: str, *, session_id: int | None = None
