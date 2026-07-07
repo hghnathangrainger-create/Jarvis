@@ -7,21 +7,29 @@ Responsibilities:
     - Classify a requested action as GREEN, YELLOW, or RED.
     - Return a clear, human-readable reason alongside every classification.
     - Apply a safe default (YELLOW) to actions that match no known rule.
+    - Scan untrusted text for prompt-injection patterns before it reaches an
+      AI provider (Phase 7, Batch 3) - detection only, never enforcement.
 
 Does NOT:
     - Execute, approve, or block actions itself (it only classifies them).
     - Use AI calls or any external security service.
     - Connect to the Planner or Workflow Engine.
     - Implement permissions, roles, or credential handling.
+    - Decide what happens when injection is detected (Batch 4), or treat a
+      scan result as any kind of user approval - scan_for_injection only
+      reports what it found.
 
 The classification is deliberately simple and rule-based for Phase 1: an
 ordered list of keyword rules, checked most-dangerous-first, so that the most
 severe matching tier always wins. Every rule carries its own explanation, so
-the result is always understandable and auditable.
+the result is always understandable and auditable. The injection scanner
+added in Phase 7, Batch 3 follows the same philosophy: a small, explicit,
+inspectable pattern list, not a machine-learned or remotely-updated one.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from config.constants import SecurityTier
@@ -70,6 +78,30 @@ class SecurityDecision:
             True only for RED actions.
         """
         return self.tier is SecurityTier.RED
+
+
+@dataclass(frozen=True, slots=True)
+class InjectionScanResult:
+    """The result of scanning a piece of untrusted text for injection patterns.
+
+    This is a detection report only. Phase 7, Batch 3 defines no enforcement
+    behaviour: a suspicious result does not block, rewrite, or remove
+    anything, and it is never treated as any form of user approval. Whether
+    - and how - a suspicious finding changes what happens next is deferred to
+    Batch 4.
+
+    Attributes:
+        suspicious: True if at least one instruction-like pattern matched.
+        matched_patterns: The labels of every pattern that matched, in the
+            fixed order the pattern table declares them. Empty when nothing
+            matched.
+        text: The original text that was scanned, unchanged, so a caller or
+            audit record can see exactly what was evaluated.
+    """
+
+    suspicious: bool
+    matched_patterns: tuple[str, ...]
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +205,115 @@ _DEFAULT_REASON = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Prompt-injection pattern detection (Phase 7, Batch 3)
+#
+# A small, explicit, hand-maintained table - deliberately not ML-based, not
+# semantic, and not remotely updated (the Master Specification names an
+# "advanced injection pattern library" as explicit Future Expansion, not this
+# batch). Every pattern is a plain, readable regex covering one of the four
+# categories the specification requires: imperatives directed at an AI,
+# role/system-override phrasing, tool-call-like syntax embedded in prose, and
+# jailbreak phrasing. Patterns are checked in this fixed order, and every
+# match is reported - there is no most-severe-wins short-circuit here, unlike
+# _RULES, because detection is a report, not a classification decision.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _InjectionPattern:
+    """A single named prompt-injection detection pattern.
+
+    Attributes:
+        label: A short, stable identifier for this pattern, used in
+            InjectionScanResult.matched_patterns and in audit records.
+        pattern: The compiled, case-insensitive regex to search for.
+    """
+
+    label: str
+    pattern: re.Pattern[str]
+
+
+def _pattern(text: str) -> re.Pattern[str]:
+    """Compile a case-insensitive regex for the injection pattern table.
+
+    Args:
+        text: The regular expression source.
+
+    Returns:
+        The compiled, case-insensitive pattern.
+    """
+    return re.compile(text, re.IGNORECASE)
+
+
+_INJECTION_PATTERNS: tuple[_InjectionPattern, ...] = (
+    # ----- Imperatives directed at an AI -----
+    _InjectionPattern(
+        "ignore_previous_instructions",
+        _pattern(r"ignore (all |any )?(the )?previous instructions"),
+    ),
+    _InjectionPattern(
+        "ignore_above_instructions",
+        _pattern(r"ignore (all |any )?(the )?(above|prior) instructions"),
+    ),
+    _InjectionPattern(
+        "disregard_instructions",
+        _pattern(r"disregard (the )?(above|prior|previous)( instructions)?"),
+    ),
+    _InjectionPattern(
+        "forget_your_instructions",
+        _pattern(r"forget (your|all|these) (previous )?instructions"),
+    ),
+    # ----- Role / system-override phrasing -----
+    _InjectionPattern(
+        "system_instruction_override",
+        _pattern(r"system instruction\s*:"),
+    ),
+    _InjectionPattern(
+        "you_are_now_override",
+        _pattern(r"\byou are now\b"),
+    ),
+    _InjectionPattern(
+        "new_instructions_override",
+        _pattern(r"\bnew instructions\s*:"),
+    ),
+    _InjectionPattern(
+        "pretend_you_are_override",
+        _pattern(r"\bpretend (that )?you('re| are)\b"),
+    ),
+    # ----- Tool-call-like syntax embedded in prose -----
+    _InjectionPattern(
+        "tool_call_tag",
+        _pattern(r"<\s*/?\s*tool_call\s*>"),
+    ),
+    _InjectionPattern(
+        "function_call_syntax",
+        _pattern(r"\bfunction_call\s*:"),
+    ),
+    _InjectionPattern(
+        "json_tool_invocation",
+        _pattern(r'["\']?tool_name["\']?\s*:\s*["\']'),
+    ),
+    # ----- Jailbreak phrasing -----
+    _InjectionPattern(
+        "dan_mode",
+        _pattern(r"\bDAN mode\b"),
+    ),
+    _InjectionPattern(
+        "jailbreak_phrase",
+        _pattern(r"\bjailbreak\b"),
+    ),
+    _InjectionPattern(
+        "do_anything_now",
+        _pattern(r"\bdo anything now\b"),
+    ),
+    _InjectionPattern(
+        "no_restrictions_phrase",
+        _pattern(r"\bwithout any (restrictions|limitations|rules)\b"),
+    ),
+)
+
+
 class SecurityManager:
     """Classifies requested actions into security tiers using simple rules.
 
@@ -218,4 +359,35 @@ class SecurityManager:
             tier=_DEFAULT_TIER,
             reason=_DEFAULT_REASON,
             matched_keyword=None,
+        )
+
+    def scan_for_injection(self, text: str) -> InjectionScanResult:
+        """Scan untrusted text for instruction-like prompt-injection patterns.
+
+        This is detection only. It never blocks, rewrites, or removes
+        anything, and a suspicious result must never be treated as any form
+        of user approval - it is a report for audit and, from Phase 7 Batch 4
+        onward, for an escalation policy layered separately on top. Every
+        matching pattern is reported; there is no most-severe-wins
+        short-circuit, unlike classify_action.
+
+        Args:
+            text: The untrusted text to scan (for example, the contents of
+                an AIContextBlock with trust=ContentTrust.UNTRUSTED). Trusted
+                text - Jarvis's own instructions, or the user's live
+                current-turn input - should never be passed here; there is
+                nothing external in it to scan for.
+
+        Returns:
+            An InjectionScanResult recording whether anything suspicious was
+            found, which named patterns matched (in a fixed, deterministic
+            order), and the original text.
+        """
+        matches = tuple(
+            entry.label for entry in _INJECTION_PATTERNS if entry.pattern.search(text)
+        )
+        return InjectionScanResult(
+            suspicious=bool(matches),
+            matched_patterns=matches,
+            text=text,
         )
