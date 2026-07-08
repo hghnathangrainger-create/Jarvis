@@ -220,7 +220,9 @@ def test_untrusted_injection_text_is_detected_through_the_real_stack() -> None:
     result = engine.reason(
         AIReasoningRequest(
             user_input="summarise this page",
-            context=_INJECTION_TEXT,
+            context_block=AIContextBlock.from_untrusted(
+                _INJECTION_TEXT, source="conversation_history"
+            ),
         )
     )
 
@@ -245,7 +247,12 @@ def test_untrusted_injection_text_never_becomes_trusted_or_an_instruction() -> N
     engine = AIReasoningEngine(router=router, enabled=True)
 
     result = engine.reason(
-        AIReasoningRequest(user_input="summarise this page", context=_INJECTION_TEXT)
+        AIReasoningRequest(
+            user_input="summarise this page",
+            context_block=AIContextBlock.from_untrusted(
+                _INJECTION_TEXT, source="conversation_history"
+            ),
+        )
     )
     assert result is not None
 
@@ -291,7 +298,12 @@ def test_untrusted_injection_scan_is_audited_through_the_real_path() -> None:
     engine = AIReasoningEngine(router=router, enabled=True)
 
     result = engine.reason(
-        AIReasoningRequest(user_input="summarise this page", context=_INJECTION_TEXT)
+        AIReasoningRequest(
+            user_input="summarise this page",
+            context_block=AIContextBlock.from_untrusted(
+                _INJECTION_TEXT, source="conversation_history"
+            ),
+        )
     )
     assert result is not None
 
@@ -325,7 +337,10 @@ def test_clean_untrusted_context_is_not_audited_as_an_injection() -> None:
     result = engine.reason(
         AIReasoningRequest(
             user_input="summarise this page",
-            context="This page describes ordinary bicycle maintenance tips.",
+            context_block=AIContextBlock.from_untrusted(
+                "This page describes ordinary bicycle maintenance tips.",
+                source="conversation_history",
+            ),
         )
     )
     assert result is not None

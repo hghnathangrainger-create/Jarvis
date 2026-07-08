@@ -19,12 +19,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ai.context_models import AIContextBlock
 from ai.prompt_builder import PromptBuilder
 from ai.providers.base import AIProvider, AIProviderError, AIRequest, AIResponse
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest
 from ai.response_validator import ResponseValidator
 from ai.router import AIRouter
+from config.constants import ContentTrust
 from config.settings import Settings
 
 
@@ -188,3 +190,98 @@ def test_engine_has_no_execution_capability() -> None:
     # approvals, or execute/run method.
     for attribute in ("_executor", "_registry", "_approvals", "execute", "run"):
         assert not hasattr(engine, attribute)
+
+
+# --- context_block is forwarded unchanged, never reconstructed (Phase 8) ----
+
+
+class _SpyRouter:
+    """A minimal AIRouter stand-in that records exactly what route() receives,
+    so context_block forwarding can be checked by identity - something a real
+    AIRouter/PromptBuilder stack can't expose, since it renders context into
+    prompt text."""
+
+    def __init__(self, text: str = "Summary.\nStep 1: do it") -> None:
+        self._text = text
+        self.received_context: AIContextBlock | None = None
+        self.route_called = False
+
+    def is_available(self) -> bool:
+        return True
+
+    def route(
+        self,
+        *,
+        system_instruction: str,
+        user_message: str,
+        context: AIContextBlock | None = None,
+        session_id: int | None = None,
+    ) -> AIResponse:
+        self.route_called = True
+        self.received_context = context
+        return AIResponse(text=self._text, model="fake-model", provider="fake")
+
+
+def test_context_block_defaults_to_none_and_is_forwarded_as_none() -> None:
+    spy = _SpyRouter()
+    engine = AIReasoningEngine(router=spy, enabled=True)  # type: ignore[arg-type]
+
+    result = engine.reason(AIReasoningRequest(user_input="echo hello"))
+
+    assert result is not None
+    assert spy.route_called is True
+    assert spy.received_context is None
+
+
+def test_supplied_context_block_is_forwarded_unchanged_by_identity() -> None:
+    spy = _SpyRouter()
+    engine = AIReasoningEngine(router=spy, enabled=True)  # type: ignore[arg-type]
+    block = AIContextBlock.from_untrusted("file text", source="file:report.txt")
+
+    result = engine.reason(
+        AIReasoningRequest(user_input="summarise report.txt", context_block=block)
+    )
+
+    assert result is not None
+    assert spy.received_context is block
+
+
+def test_supplied_context_block_trust_and_source_are_preserved() -> None:
+    spy = _SpyRouter()
+    engine = AIReasoningEngine(router=spy, enabled=True)  # type: ignore[arg-type]
+    block = AIContextBlock.from_untrusted("file text", source="file:report.txt")
+
+    engine.reason(
+        AIReasoningRequest(user_input="summarise report.txt", context_block=block)
+    )
+
+    assert spy.received_context is not None
+    assert spy.received_context.trust is ContentTrust.UNTRUSTED
+    assert spy.received_context.source == "file:report.txt"
+
+
+def test_conversation_history_hardcoded_source_defect_is_removed() -> None:
+    """The pre-Phase-8 defect: any non-empty context was hardcoded to
+    source="conversation_history", regardless of its real origin. Since the
+    engine now only ever forwards an already-labelled AIContextBlock, a
+    caller-supplied source is never overwritten - proving the hardcoded
+    label is gone, not just harder to trigger."""
+    spy = _SpyRouter()
+    engine = AIReasoningEngine(router=spy, enabled=True)  # type: ignore[arg-type]
+    block = AIContextBlock.from_untrusted("file text", source="file:report.txt")
+
+    engine.reason(
+        AIReasoningRequest(user_input="summarise report.txt", context_block=block)
+    )
+
+    assert spy.received_context is not None
+    assert spy.received_context.source != "conversation_history"
+    assert spy.received_context.source == "file:report.txt"
+
+
+def test_engine_never_constructs_its_own_context_block() -> None:
+    """AIReasoningEngine holds no reference to AIContextBlock's constructors
+    at all - it cannot build one, only forward one it was given."""
+    import ai.reasoning_engine as reasoning_engine_module
+
+    assert not hasattr(reasoning_engine_module, "AIContextBlock")

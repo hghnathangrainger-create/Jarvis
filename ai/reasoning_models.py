@@ -2,7 +2,8 @@
 reasoning_models.py
 
 Data models for AI-assisted reasoning in the Jarvis AI Operating System
-(Phase 4, Batch 1).
+(Phase 4, Batch 1; context_block replaces the raw context string since
+Phase 8, Batch 1).
 
 These are the provider-neutral, immutable data structures that describe what
 the AI reasoning layer is *asked* and what it *suggests*. They deliberately
@@ -17,6 +18,12 @@ Responsibilities:
 Does NOT:
     - Execute tools, call providers, or touch the Security Manager, Tool
       Executor, or Approval Manager. These are plain data classes.
+    - Decide trust or provenance for any context supplied. Since Phase 8,
+      Batch 1, a caller must supply an already-constructed, already
+      trust-tagged AIContextBlock (see ai/context_models.py) - this module
+      never accepts a bare string for context, so trust and provenance
+      cannot be decided here, or drift apart from each other, by anything
+      downstream.
 
 Design note:
     The suggested tier on an AISuggestedAction is ADVISORY ONLY. It is a hint
@@ -30,6 +37,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ai.context_models import AIContextBlock
+
 
 @dataclass(frozen=True, slots=True)
 class AIReasoningRequest:
@@ -37,13 +46,20 @@ class AIReasoningRequest:
 
     Attributes:
         user_input: The user's original request text.
-        context: Optional short context to help the AI reason (for example, a
-            note about available tools). Purely informational.
+        context_block: Optional, already-constructed, already trust-tagged
+            context to help the AI reason (for example, ingested file
+            content - see ai/file_ingestion.py). Trust and provenance travel
+            together on this object; AIReasoningEngine forwards it unchanged
+            and never reconstructs or relabels it. Replaces a previous raw
+            `context: str` field (Phase 8, Batch 1) that let a caller supply
+            text with no attached trust origin, forcing AIReasoningEngine to
+            guess one - it guessed the same, increasingly inaccurate label
+            for every caller, which is exactly the defect this field closes.
         session_id: Optional session identifier for the audit trail.
     """
 
     user_input: str
-    context: str = ""
+    context_block: AIContextBlock | None = None
     session_id: int | None = None
 
 

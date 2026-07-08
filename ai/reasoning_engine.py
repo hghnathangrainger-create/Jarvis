@@ -29,6 +29,12 @@ Does NOT:
       only path in the codebase permitted to build a prompt (Phase 7,
       Batch 2) - this is what makes the router's prompt-injection defence
       apply to this engine's calls too.
+    - Construct, reconstruct, or relabel an AIContextBlock (Phase 8, Batch 1).
+      A request's context_block, if supplied, was already built - with its
+      trust and provenance already attached - by whoever legitimately
+      produced it (for example, ai/file_ingestion.py). This engine only ever
+      forwards that object, unchanged, to AIRouter.route(); it never guesses
+      or hardcodes a source label for content it did not itself originate.
 
 Safety design:
     The single most important property of this class is that it *cannot act*.
@@ -39,7 +45,6 @@ Safety design:
 
 from __future__ import annotations
 
-from ai.context_models import AIContextBlock
 from ai.providers.base import AIProviderError
 from ai.reasoning_models import (
     AIReasoningRequest,
@@ -134,20 +139,15 @@ class AIReasoningEngine:
 
         assert self._router is not None  # guaranteed by is_active()
 
-        context_block = None
-        if request.context:
-            # The reasoning request's own optional context is not the user's
-            # live current-turn input, so it is never JARVIS_TRUSTED, even
-            # though nothing populates this field in production today.
-            context_block = AIContextBlock.from_untrusted(
-                request.context, source="conversation_history"
-            )
-
         try:
             response = self._router.route(
                 system_instruction=_SYSTEM_INSTRUCTION,
                 user_message=self._build_prompt(request),
-                context=context_block,
+                # Forwarded exactly as supplied - see Does NOT above. This
+                # engine never constructs, reconstructs, or relabels an
+                # AIContextBlock; trust and provenance were already decided,
+                # together, by whoever built request.context_block.
+                context=request.context_block,
                 session_id=request.session_id,
             )
         except (AIProviderError, ResponseValidationError):

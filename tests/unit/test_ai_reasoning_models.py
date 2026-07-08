@@ -17,6 +17,7 @@ import dataclasses
 
 import pytest
 
+from ai.context_models import AIContextBlock
 from ai.reasoning_models import (
     AIReasoningRequest,
     AIReasoningResult,
@@ -28,17 +29,18 @@ from ai.reasoning_models import (
 
 
 def test_reasoning_request_holds_fields() -> None:
+    block = AIContextBlock.from_untrusted("tools available", source="file:tools.txt")
     request = AIReasoningRequest(
-        user_input="echo hello", context="tools available", session_id=7
+        user_input="echo hello", context_block=block, session_id=7
     )
     assert request.user_input == "echo hello"
-    assert request.context == "tools available"
+    assert request.context_block is block
     assert request.session_id == 7
 
 
 def test_reasoning_request_defaults() -> None:
     request = AIReasoningRequest(user_input="hi")
-    assert request.context == ""
+    assert request.context_block is None
     assert request.session_id is None
 
 
