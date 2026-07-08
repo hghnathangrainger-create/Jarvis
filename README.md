@@ -11,6 +11,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 5 complete: Better Memory and Personal Knowledge System.**
 **Phase 6 complete: Durable Approvals and Approval-Lifecycle Timeout Enforcement.**
 **Phase 7 complete: Core Simplification and AI Safety Hardening.**
+**Phase 8 complete: Real External-Content Ingestion.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -18,9 +19,11 @@ Phase 6 adds a durable, read-only record of every approval decision, so it survi
 
 Phase 7 is a **safety and structure phase, not a capability phase**: it simplifies the Core's request-routing code, and completes the Master Specification's prompt-injection defence — trusted-vs-untrusted AI context, automatic scanning of untrusted context for instruction-like patterns (audited when suspicious), and an audited policy for an AI-suggested action that falls outside a request's own plan. No new user-facing command, no new AI power, and no new execution authority were added. See the Phase 7 section below.
 
+Phase 8 is Jarvis's first real use of that trust boundary: an explicit `summarise file <path>` command reads a real file and supplies its contents to the advisory AI as typed, untrusted context — scanned, audited, and never able to gain new authority, exactly as Phase 7 already guarantees. See the Phase 8 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **733 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–7 test, including all of Phase 7's batches.
+> **Verified:** `poetry run pytest -v` — **800 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–8 test, including all of Phase 8's batches.
 
 ---
 
@@ -182,6 +185,32 @@ Any new user-facing command or tool, any new AI capability, any path that lets a
 
 ---
 
+## Phase 8 — Real External-Content Ingestion (complete)
+
+Phase 8 is the first phase in which genuine external content — a real file's contents — is intentionally read and supplied to the advisory AI, through the Phase 7 trust boundary, completely unmodified. It is deliberately narrow: one content source (local files), delivered in three controlled batches. See `docs/phase_8_completion_report.md` for the full write-up.
+
+- **Batch 1 — File content ingestion foundation.** A new, narrow module reads a file through the existing, already-secured `file_read` tool and labels it as untrusted AI context, with provenance established by construction: the module is the only thing that both reads the file and writes its label, so the two can never describe different things. A design defect found along the way was fixed at its strongest boundary rather than patched: the AI reasoning engine now receives an already-typed, already-trust-tagged context object instead of a raw string it had to guess a label for.
+- **Batch 2 — Command and orchestrator wiring.** An explicit `summarise file <path>` (or `summarize file <path>`) command, recognised by the Core's command router. The orchestrator coordinates the read, the AI reasoning call, and the same unexpected-action policy every other AI-advised response already uses — it never reads a file itself and never builds the AI's context directly.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against a real temporary file, including a real prompt-injection attempt, this README section, and `docs/phase_8_completion_report.md`.
+
+### File summary command
+
+| Command | What it does |
+|---|---|
+| `summarise file <path>` / `summarize file <path>` | Reads the file (GREEN, same as `read file`) and asks the advisory AI to summarise its contents. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI file summary - advisory only]`. If AI reasoning is off, or the file can't be read (missing, a directory, binary, or otherwise unreadable), Jarvis says so plainly — it never presents a failure as if it were a real summary.
+
+### Safety note: file content is untrusted, scanned, and audited — nothing new is trusted
+
+A file's contents are always typed as untrusted AI context, exactly like any other non-live, non-Jarvis-authored text: automatically scanned for instruction-like patterns before reaching the AI, with a suspicious finding audited through the same observability path Phase 7 already built. File content can never become the user's live authority, system authority, or an executable instruction, no matter what it contains. Reading a file is already safe (GREEN) and unchanged; asking advisory AI about content you already asked Jarvis to read adds no new approval requirement. As in Phase 7, any AI-suggested action arising from a file summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 8
+
+Stored-memory ingestion, web or browser content ingestion, a generic multi-source ingestion framework, any new AI execution authority, any new approval gate for reading or summarising a file, and token-aware size limiting (file content is truncated by a simple character limit, not a model-aware token budget).
+
+---
+
 ## Example Session
 
 ```
@@ -255,8 +284,10 @@ jarvis/
 │                   unexpected-AI-action escalation policy
 ├── memory/         Memory Engine: save, list, search, categories, update, forget
 ├── ai/             Provider interface, Claude provider, advisory reasoning
-│                   routed through one AIRouter/PromptBuilder path, and the
-│                   typed trusted/untrusted AIContextBlock model
+│                   routed through one AIRouter/PromptBuilder path, the
+│                   typed trusted/untrusted AIContextBlock model, and
+│                   file-content ingestion for the AI reasoning path
+│                   (ai/file_ingestion.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
@@ -285,10 +316,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 7 is complete**: the Core's command-routing logic is simplified, and the Master Specification's prompt-injection defence is complete at the policy, detection, escalation, and audit level — trusted-vs-untrusted AI context, automatic scanning of untrusted context (audited when suspicious), and an audited unexpected-AI-action policy. What comes next is **a future phase that introduces real external-content ingestion** (a webpage, a file, or memory fed into an AI prompt for the first time) — the reason Phase 7 exists is to make that phase start from a codebase already honest about trust boundaries, rather than retrofitting that honesty afterward. No such phase is scoped or designed yet.
+**Phase 8 is complete**: Jarvis can now read a real file and have the advisory AI summarise it, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_8_completion_report.md`, is **stored-memory ingestion** — the natural second content source, reusing the same file-ingestion pattern (a narrow, source-specific module that owns its own acquisition and establishes provenance by construction). Web/browser ingestion should follow only after that, once a dependency and tool-safety design for outbound network access has been separately scoped and reviewed. Neither is started yet.
 
 Resumable approvals, deeper but still-advisory AI assistance, and optional smarter search over memory remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 and Phase 7 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, and Phase 8 are complete for their defined scope, not yet tagged. None is a finished product.*
