@@ -463,3 +463,78 @@ def test_match_memory_summary_does_not_change_file_summary_behaviour(
     own recognition."""
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
     assert router.match_file_summary("summarise memory 42") is None
+
+
+# --- match_memory_set_summary(): multi-memory-summary command (Phase 10, Batch 2)
+
+
+def test_match_memory_set_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
+
+
+def test_match_memory_set_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_set_summary("summarize memories 3, 7, 12") == "3, 7, 12"
+
+
+def test_match_memory_set_summary_extracts_raw_unparsed_id_text(
+    router: CommandRouter,
+) -> None:
+    """The router extracts the raw trailing text only - parsing, stable
+    deduplication, and cardinality validation are the orchestrator's job."""
+    assert router.match_memory_set_summary("summarise memories 27, 12, 27, 18") == (
+        "27, 12, 27, 18"
+    )
+    assert router.match_memory_set_summary("summarise memories abc, 2") == "abc, 2"
+
+
+def test_match_memory_set_summary_with_no_ids_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_set_summary("summarise memories") == ""
+
+
+def test_match_memory_set_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_set_summary("summarise memories   3, 7   ") == "3, 7"
+
+
+def test_match_memory_set_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_set_summary("summarise the plan for me") is None
+    assert router.match_memory_set_summary("show memory 42") is None
+    assert router.match_memory_set_summary("forget memory 42") is None
+    assert router.match_memory_set_summary("summarise file report.txt") is None
+    assert router.match_memory_set_summary("do a backflip") is None
+
+
+def test_match_memory_set_summary_does_not_collide_with_singular_command(
+    router: CommandRouter,
+) -> None:
+    """Plural and singular prefixes diverge at their 5th character ("memory"
+    vs "memories") and can never match each other's text."""
+    assert router.match_memory_set_summary("summarise memory 42") is None
+    assert router.match_memory_summary("summarise memories 3, 7") is None
+
+
+def test_match_memory_set_summary_does_not_require_any_registered_tool() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match_memory_set_summary("summarise memories 3, 7") == "3, 7"
+
+
+def test_match_memory_set_summary_does_not_change_existing_routing(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_set_summary must not change match()'s own
+    routing, match_memory_summary()'s own recognition, or
+    match_file_summary()'s own recognition."""
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"

@@ -13,6 +13,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 7 complete: Core Simplification and AI Safety Hardening.**
 **Phase 8 complete: Real External-Content Ingestion.**
 **Phase 9 complete: Stored-Memory Ingestion for Advisory AI.**
+**Phase 10 complete: Multi-Memory Retrieval and Selection for Advisory AI.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -24,9 +25,11 @@ Phase 8 is Jarvis's first real use of that trust boundary: an explicit `summaris
 
 Phase 9 is the second real use of that same trust boundary: an explicit `summarise memory <id>` command reads one already-stored memory and supplies its content to the advisory AI the same way — typed, untrusted, scanned, audited, and never able to gain new authority. See the Phase 9 section below.
 
+Phase 10 extends that same trust boundary to more than one memory at once: an explicit `summarise memories <ids>` command reads a small, user-named set of already-stored memories by id and combines them into one typed, untrusted context for the advisory AI — still scanned, still audited, still never able to gain new authority. Every memory must be named explicitly; nothing is selected automatically. See the Phase 10 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **903 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–9 test, including all of Phase 9's batches and its AIRouter audit-failure-isolation closure fix.
+> **Verified:** `poetry run pytest -v` — **1007 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–10 test, including all of Phase 10's batches.
 
 ---
 
@@ -240,6 +243,32 @@ Multi-memory retrieval or selection (exactly one memory, by explicit id, per req
 
 ---
 
+## Phase 10 — Multi-Memory Retrieval and Selection for Advisory AI (complete)
+
+Phase 10 answers the question Phase 9 deliberately left open: how more than one stored memory can be safely combined into one AI-facing context. It requires **explicit, user-named memory ids for every request** — nothing is selected automatically, and no semantic search, embeddings, vector database, recency-based selection, or AI-driven memory choice exists anywhere in this codebase. It is deliberately narrow: a small, explicit set of memories, combined and reasoned about together, delivered in three controlled batches. See `docs/phase_10_completion_report.md` for the full write-up.
+
+- **Batch 1 — Multi-memory ingestion foundation.** A new function retrieves each requested memory by id, in the order given, and combines them into one untrusted AI context, reusing Phase 9's own per-record truncation unchanged. A single bad id never discards the rest of an otherwise-usable request.
+- **Batch 2 — Command and orchestrator wiring.** An explicit `summarise memories <ids>` (or `summarize memories <ids>`) command. Duplicate ids are removed while keeping the order you typed them in, and a request naming too many ids is rejected honestly, naming the limit, rather than silently trimmed.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against real, multiple saved memories, including a genuine multi-record prompt-injection attempt, this README section, and `docs/phase_10_completion_report.md`.
+
+### Multi-memory summary command
+
+| Command | What it does |
+|---|---|
+| `summarise memories <id>, <id>, ...` / `summarize memories <id>, <id>, ...` | Retrieves each named memory by id (GREEN, same as `show memory`) and asks the advisory AI to summarise them together. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI multi-memory summary - advisory only]`. Ids may be separated by commas, spaces, or both. Up to 10 distinct ids are accepted per request; naming more is rejected honestly, telling you the limit. If some ids are missing, unreadable, or too large to fit alongside the others, Jarvis says so plainly in the response — it never claims to have summarised memories it could not actually include.
+
+### Safety note: combining memories never upgrades trust
+
+Every memory in the set remains untrusted, exactly as a single memory already is — combining several untrusted memories together never makes them trusted, and nothing about how they are combined can change what Jarvis is allowed to do. The combined content is scanned for instruction-like patterns exactly as single-memory or file content already is, with a suspicious finding audited the same way. As in Phase 7, 8, and 9, any AI-suggested action arising from a multi-memory summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 10
+
+Automatic memory selection of any kind (recency-based, category-based, or search-based), semantic or vector memory retrieval, AI-selected or AI-ranked memory ids, autonomous memory discovery, memory ranking by an LLM, any change to `MemoryManager`, `MemoryTool`, or `EpisodicMemoryStore`, any new AI execution authority, and any new approval gate for reading or summarising memories. Every memory in a request must still be named explicitly, by id, by you.
+
+---
+
 ## Example Session
 
 ```
@@ -315,8 +344,8 @@ jarvis/
 ├── ai/             Provider interface, Claude provider, advisory reasoning
 │                   routed through one AIRouter/PromptBuilder path, the
 │                   typed trusted/untrusted AIContextBlock model, and
-│                   file-content and stored-memory ingestion for the AI
-│                   reasoning path (ai/file_ingestion.py,
+│                   file-content and single/multi-memory ingestion for the
+│                   AI reasoning path (ai/file_ingestion.py,
 │                   ai/memory_ingestion.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
@@ -346,10 +375,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 9 is complete**: Jarvis can now retrieve a real stored memory by id and have the advisory AI summarise it, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_9_completion_report.md`, is **multi-memory retrieval and selection** — the first capability that requires a real answer to "which memories, how many, and how are they combined," now that single-record ingestion has been proven twice (file, memory). A separately-scoped, pre-existing observability finding (Phase 7's `AIRouter` not guarding its own audit-logging calls) is also recommended for its own independent review — see `docs/phase_9_completion_report.md` for the full account. Web/browser ingestion, and any Semantic/Entity Memory work, remain explicitly further out, each requiring its own separately-scoped design review before being started.
+**Phase 10 is complete**: Jarvis can now retrieve a small, explicitly-named set of real stored memories by id and have the advisory AI summarise them together, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_10_completion_report.md`, is **recency-based, category-based, or search-based automatic memory selection** — the first capability that requires a real answer to "which memories should be selected automatically," now that safe combination of multiple memories has been proven. Any such work must reuse this phase's combination architecture, not reinvent it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
 
 Resumable approvals, deeper but still-advisory AI assistance, and optional smarter search over memory remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, and Phase 9 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, and Phase 10 are complete for their defined scope, not yet tagged. None is a finished product.*

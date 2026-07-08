@@ -140,6 +140,18 @@ _MEMORY_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memory",
 )
 
+#: Leading phrases that indicate an explicit multi-memory-summary request
+#: (Phase 10, Batch 2). The text after the phrase is treated as the raw,
+#: unparsed trailing id-list text. Deliberately a separate, narrow match from
+#: _MEMORY_SUMMARY_PREFIXES: "memory" and "memories" diverge at their 5th
+#: character, so the two can never collide as prefixes of one another in
+#: either direction - verified directly, not merely assumed - so checking
+#: order between the singular and plural matchers does not matter.
+_MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise memories",
+    "summarize memories",
+)
+
 
 class CommandRouter:
     """Matches request text to a registered tool and builds its input.
@@ -325,6 +337,39 @@ class CommandRouter:
         """
         lowered = text.casefold()
         prefix = self._file_prefix(lowered, _MEMORY_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
+
+    def match_memory_set_summary(self, text: str) -> str | None:
+        """Match an explicit multi-memory-summary request and extract its
+        raw id-list text.
+
+        Recognises "summarise memories <ids>" and "summarize memories <ids>"
+        (Phase 10, Batch 2) - the plural sibling of match_memory_summary().
+        Only the raw trailing text is extracted here, exactly as
+        match_memory_summary() already does for a single id: parsing
+        individual tokens, stable deduplication, and cardinality validation
+        are the orchestrator's responsibility
+        (docs/phase_10_implementation_plan.md, Section 10.1/17), not this
+        router's. This method requires only an explicit id list; it never
+        performs natural-language search, recency-based selection,
+        category-based selection, or any form of automatic or AI-driven
+        memory selection - the only input it ever recognises is the literal
+        digits the user typed.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing text if the text matches a
+            multi-memory-summary command - possibly empty or malformed, if
+            the phrase was used with no ids or an invalid list - or None if
+            the text does not match this command at all.
+        """
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _MEMORY_SET_SUMMARY_PREFIXES)
         if prefix is None:
             return None
 
