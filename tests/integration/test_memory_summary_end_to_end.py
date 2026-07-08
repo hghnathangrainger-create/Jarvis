@@ -31,10 +31,21 @@ These prove, using a real saved memory record rather than a synthetic string:
       approval, execute a tool, or change a SecurityTier - the AI output
       remains advisory only.
     - Invalid id and not-found each produce an honest response and never
-      reach the AI provider at all.
+      reach the AI provider at all; not-found also emits the intended
+      failure acquisition event.
     - Exactly one memory-acquisition audit event fires per request, and no
       generic tool_call event is produced by this path, since it never goes
       through ToolExecutor.
+    - The AI never receives MemoryTool's own "[id] (category) content"
+      display string - only the record's raw content - and a record's
+      capture-origin `source` field ("user", "conversation") never produces
+      ContentTrust.JARVIS_TRUSTED.
+    - An oversized memory is truncated honestly: only the retained content
+      portion is limited, the AI receives an explicit truncation notice, and
+      the final response discloses that only part of the memory was
+      available - never claiming complete-memory analysis.
+    - A failure in Phase 9's own new memory-acquisition audit call never
+      breaks an otherwise-valid workflow (success or not-found).
     - A multi-line AI summary produces multiple AISuggestedAction entries,
       each evaluated and audited through the existing, unmodified Batch 4
       _evaluate_unexpected_actions/_audit_unexpected_action methods.
@@ -316,6 +327,77 @@ def test_memory_metadata_is_not_flattened_into_ai_context() -> None:
     assert "project" not in recorder.received_context.text
 
 
+def test_ai_context_never_contains_the_memory_tool_display_format() -> None:
+    """MemoryTool's own "get" operation formats successful output as
+    f"[{id}] ({category}) {content}" for CLI display - this is a
+    human-facing presentation string, never the memory's actual content.
+    The real stack must never let that formatted string reach the AI as
+    context, proving Batch 1's architecture review (bypassing MemoryTool in
+    favour of MemoryManager.get() directly) actually holds end to end."""
+    memory = _memory_manager()
+    record = memory.save(content="Quarterly results improved.", category="personal")
+    assert record is not None
+    logger = _RecordingLogger()
+    orchestrator, _, recorder = _build_orchestrator(
+        "Summary.\nStep 1: note the key points",
+        logger,
+        memory,
+        record_context=True,
+    )
+
+    orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert recorder is not None
+    assert recorder.received_context is not None
+    # The MemoryTool display convention is f"[{id}] ({category}) {content}" -
+    # none of that bracket/parenthesis framing is present in the AI payload.
+    assert f"[{record.id}]" not in recorder.received_context.text
+    assert f"({record.category})" not in recorder.received_context.text
+    assert recorder.received_context.text == record.content
+
+
+def test_record_source_user_does_not_produce_jarvis_trusted_end_to_end() -> None:
+    memory = _memory_manager()
+    record = memory.save(content="a note about preferences", source="user")
+    assert record is not None
+    assert record.source == "user"
+    logger = _RecordingLogger()
+    orchestrator, _, recorder = _build_orchestrator(
+        "Summary.\nStep 1: note the key points",
+        logger,
+        memory,
+        record_context=True,
+    )
+
+    orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert recorder is not None
+    assert recorder.received_context is not None
+    assert recorder.received_context.trust is ContentTrust.UNTRUSTED
+    assert recorder.received_context.trust is not ContentTrust.JARVIS_TRUSTED
+
+
+def test_record_source_conversation_does_not_produce_jarvis_trusted_end_to_end() -> None:
+    memory = _memory_manager()
+    record = memory.save(content="a note from a conversation", source="conversation")
+    assert record is not None
+    assert record.source == "conversation"
+    logger = _RecordingLogger()
+    orchestrator, _, recorder = _build_orchestrator(
+        "Summary.\nStep 1: note the key points",
+        logger,
+        memory,
+        record_context=True,
+    )
+
+    orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert recorder is not None
+    assert recorder.received_context is not None
+    assert recorder.received_context.trust is ContentTrust.UNTRUSTED
+    assert recorder.received_context.trust is not ContentTrust.JARVIS_TRUSTED
+
+
 # --- Real injection content stays UNTRUSTED, scanned, and audited --------------
 
 
@@ -418,6 +500,21 @@ def test_summarise_memory_not_found_end_to_end() -> None:
     assert provider.received_requests == []
 
 
+def test_not_found_emits_the_intended_failure_acquisition_event() -> None:
+    memory = _memory_manager()
+    logger = _RecordingLogger()
+    orchestrator, _, _ = _build_orchestrator("unused", logger, memory)
+
+    orchestrator.handle_request("summarise memory 999999")
+
+    events = _memory_acquisition_events(logger)
+    assert len(events) == 1
+    assert events[0]["outcome"] is EventOutcome.FAILURE
+    assert "999999" in str(events[0]["detail"])
+    # Never claims session isolation or authorization enforcement.
+    assert "session" not in str(events[0]["detail"]).lower()
+
+
 def test_summarise_memory_ai_disabled_end_to_end() -> None:
     memory = _memory_manager()
     record = memory.save(content="Some content.")
@@ -482,6 +579,164 @@ def test_summarise_memory_empty_ai_response_end_to_end() -> None:
 
     assert response.success is False
     assert "[AI memory summary" not in response.message
+    assert len(provider.received_requests) == 1
+
+
+# --- Truncation is represented honestly, real stack -----------------------------
+
+
+def test_oversized_memory_is_truncated_honestly_end_to_end() -> None:
+    """A genuine stored memory exceeding the Phase 9 ingestion character
+    limit (4000, a plain character count - never token-aware model
+    budgeting) reaches the AI as a truncated, honestly-labelled excerpt, and
+    the final user-facing response discloses that only part of the memory
+    was available - never claiming complete-memory analysis."""
+    memory = _memory_manager()
+    record = memory.save(content="A" * 10_000)
+    assert record is not None
+    logger = _RecordingLogger()
+    orchestrator, _, recorder = _build_orchestrator(
+        "A short summary.\nStep 1: note the key points",
+        logger,
+        memory,
+        record_context=True,
+    )
+
+    response = orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert response.success is True
+    assert recorder is not None
+    assert recorder.received_context is not None
+    # Only the retained content portion is limited to 4000 characters; the
+    # honest truncation notice is appended after it, so the total text
+    # exceeds 4000 - the limit bounds the retained memory-content portion,
+    # never the complete decorated AIContextBlock.text.
+    body = recorder.received_context.text.split("\n\n[")[0]
+    assert len(body) == 4000
+    assert "truncated" in recorder.received_context.text.lower()
+    assert recorder.received_context.source == f"memory:{record.id}"
+    assert recorder.received_context.trust is ContentTrust.UNTRUSTED
+
+    # The final response is honest about incompleteness, never claiming the
+    # full memory was analysed.
+    assert "only part of this memory's content was available" in response.message
+
+
+def test_acquisition_audit_records_truncation_without_leaking_the_notice() -> None:
+    memory = _memory_manager()
+    record = memory.save(content="B" * 10_000)
+    assert record is not None
+    logger = _RecordingLogger()
+    orchestrator, _, _ = _build_orchestrator(
+        "Summary.\nStep 1: note the key points", logger, memory
+    )
+
+    orchestrator.handle_request(f"summarise memory {record.id}")
+
+    events = _memory_acquisition_events(logger)
+    assert len(events) == 1
+    assert "truncated=True" in str(events[0]["detail"])
+    # The AI-facing truncation notice text is never embedded in the audit
+    # detail, only the boolean fact that truncation occurred.
+    assert "Increase max_chars" not in str(events[0]["detail"])
+    assert "B" * 100 not in str(events[0]["detail"])
+
+
+# --- Audit failure is non-authoritative, real stack -----------------------------
+
+
+class _MemoryAcquisitionFailingLogger:
+    """Raises only for the memory_acquisition audit event, recording every
+    other event normally.
+
+    This precisely isolates what Phase 9's own new audit call
+    (_audit_memory_acquisition, wrapped in its own try/except) protects
+    against, without conflating it with a separate, pre-existing, out-of-
+    scope characteristic discovered while writing this test: AIRouter.route()
+    itself (ai/router.py, unchanged since Phase 7 Batch 2) never wraps its
+    own success/failure-path self._logger.emit() calls in a try/except. A
+    logger that raises on EVERY call - including AIRouter's own "ai_call"
+    logging - causes route() itself to raise, which AIReasoningEngine.reason()
+    already catches via its existing broad `except Exception: return None`
+    clause, degrading the whole request to "AI reasoning could not produce a
+    summary" rather than crashing. That is a real, but inherited and
+    unmodified Phase 7 characteristic - identical in kind for the existing
+    Phase 8 file-summary workflow and the plain advisory-suggestion path -
+    not something Phase 9 introduces or is responsible for fixing, and it is
+    documented, not silently fixed, in the Batch 3 completion report."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def emit(self, **kwargs: object) -> str:
+        if kwargs.get("action_type") == "memory_acquisition":
+            raise RuntimeError("simulated memory-acquisition logger failure")
+        self.calls.append(kwargs)
+        return str(len(self.calls))
+
+
+def test_failing_acquisition_audit_does_not_break_a_valid_summary_workflow() -> None:
+    memory = _memory_manager()
+    record = memory.save(content="Quarterly results improved across every region.")
+    assert record is not None
+    orchestrator, provider, _ = _build_orchestrator(
+        "A short summary.\nStep 1: note the key points",
+        _MemoryAcquisitionFailingLogger(),  # type: ignore[arg-type]
+        memory,
+    )
+
+    response = orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert response.success is True
+    assert response.message.startswith("[AI memory summary - advisory only]")
+    assert len(provider.received_requests) == 1
+
+
+def test_failing_acquisition_audit_does_not_break_a_not_found_response() -> None:
+    memory = _memory_manager()
+    orchestrator, _, _ = _build_orchestrator(
+        "unused", _MemoryAcquisitionFailingLogger(), memory  # type: ignore[arg-type]
+    )
+
+    response = orchestrator.handle_request("summarise memory 999999")
+
+    assert response.success is False
+    assert "no memory found" in response.message.lower()
+
+
+class _AiCallFailingLogger:
+    """Raises only for the ai_call audit event (AIRouter's own), recording
+    every other event normally. Proves the Phase 9 closure fix
+    (ai/router.py's AIRouter._emit_audit_event isolation) holds in the real
+    memory-summary stack: a valid AI result still succeeds, and logging
+    failure alone does not convert it into "reasoning unavailable", even
+    though the same logger instance is also wired into ToolExecutor and this
+    orchestrator's own _audit_memory_acquisition."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def emit(self, **kwargs: object) -> str:
+        if kwargs.get("action_type") == "ai_call":
+            raise RuntimeError("simulated ai_call logger failure")
+        self.calls.append(kwargs)
+        return str(len(self.calls))
+
+
+def test_valid_memory_summary_survives_a_failing_ai_call_audit_logger() -> None:
+    memory = _memory_manager()
+    record = memory.save(content="Quarterly results improved across every region.")
+    assert record is not None
+    orchestrator, provider, _ = _build_orchestrator(
+        "A short summary.\nStep 1: note the key points",
+        _AiCallFailingLogger(),  # type: ignore[arg-type]
+        memory,
+    )
+
+    response = orchestrator.handle_request(f"summarise memory {record.id}")
+
+    assert response.success is True
+    assert response.message.startswith("[AI memory summary - advisory only]")
     assert len(provider.received_requests) == 1
 
 

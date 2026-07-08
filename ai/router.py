@@ -119,9 +119,7 @@ class AIRouter:
             validated = self._validator.validate(response)
         except (AIProviderError, ResponseValidationError) as exc:
             duration_ms = self._elapsed_ms(start)
-            self._logger.emit(
-                source=_SOURCE,
-                action_type=_ACTION_TYPE,
+            self._emit_audit_event(
                 outcome=EventOutcome.FAILURE,
                 detail=f"provider={self._provider.name} error={exc}",
                 duration_ms=duration_ms,
@@ -130,9 +128,7 @@ class AIRouter:
             raise
 
         duration_ms = self._elapsed_ms(start)
-        self._logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=EventOutcome.SUCCESS,
             detail=(
                 f"provider={validated.provider or self._provider.name} "
@@ -143,6 +139,58 @@ class AIRouter:
             session_id=session_id,
         )
         return validated
+
+    def _emit_audit_event(
+        self,
+        *,
+        outcome: EventOutcome,
+        detail: str,
+        duration_ms: int,
+        session_id: int | None,
+    ) -> None:
+        """Emit this router's own ai_call audit event, isolating a failing logger.
+
+        This is the narrow fix for a real, disclosed observability gap found
+        during Phase 9 Batch 3's end-to-end verification: previously, both of
+        route()'s own self._logger.emit() calls were unguarded, so a raising
+        logger propagated out of route() itself - which
+        AIReasoningEngine.reason()'s existing broad `except Exception: return
+        None` then silently turned into an apparent "reasoning unavailable"
+        result, even though the provider call and validation had already
+        genuinely succeeded. That let an audit-logging failure change
+        routing success/failure semantics, violating the same "observability
+        must never alter an otherwise-authoritative outcome" rule already
+        upheld everywhere else (JarvisOrchestrator._audit_unexpected_action,
+        Phase 7 Batch 4; PromptBuilder's report_injection guard, Phase 7
+        Batch 5A; JarvisOrchestrator._audit_memory_acquisition, Phase 9
+        Batch 2).
+
+        Only this logging/reporting boundary is isolated. It never affects
+        provider selection, request construction, validation, or exception
+        propagation: the bare `raise` in the caller's except block always
+        re-raises the original AIProviderError/ResponseValidationError
+        untouched, regardless of whether this method's own emit() call
+        succeeded or was swallowed here.
+
+        Args:
+            outcome: The outcome to record for this call.
+            detail: The detail string describing the call.
+            duration_ms: The elapsed time of the call, in milliseconds.
+            session_id: Optional session identifier for the event.
+        """
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                duration_ms=duration_ms,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never alter
+            # routing success/failure semantics.
+            pass
 
     def is_available(self) -> bool:
         """Report whether the routed provider is currently usable.

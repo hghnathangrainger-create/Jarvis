@@ -137,6 +137,81 @@ def test_route_reraises_response_validation_error() -> None:
         router.route(system_instruction="sys", user_message="hello")
 
 
+# --- Audit-logging failure never alters routing success/failure semantics ----
+# (Phase 9 closure fix: route()'s own self._logger.emit() calls previously
+# propagated a raising logger straight out of route() itself.)
+
+
+class _FailingLogger:
+    """Raises on every emit() call."""
+
+    def emit(self, **kwargs: object) -> str:
+        raise RuntimeError("simulated logger failure")
+
+
+def test_successful_response_survives_a_failing_success_audit_logger() -> None:
+    """A valid provider response is still returned, and the logger failure
+    does not escape route(), even though the SUCCESS audit call raises."""
+    provider = _FakeProvider(text="a real summary")
+    router = _router(provider, _FailingLogger())  # type: ignore[arg-type]
+
+    response = router.route(system_instruction="sys", user_message="hello")
+
+    assert response.text == "a real summary"
+    assert response.provider == "fake"
+    assert provider.last_request is not None
+
+
+def test_provider_failure_semantics_survive_a_failing_failure_audit_logger() -> None:
+    """The original AIProviderError still propagates, unmasked and
+    unreplaced, even though the FAILURE audit call also raises."""
+    router = _router(_FakeProvider(fail=True), _FailingLogger())  # type: ignore[arg-type]
+
+    with pytest.raises(AIProviderError, match="simulated failure"):
+        router.route(system_instruction="sys", user_message="hello")
+
+
+def test_validation_failure_semantics_survive_a_failing_failure_audit_logger() -> None:
+    router = _router(_FakeProvider(text="   "), _FailingLogger())  # type: ignore[arg-type]
+
+    with pytest.raises(ResponseValidationError):
+        router.route(system_instruction="sys", user_message="hello")
+
+
+def test_provider_is_called_exactly_as_before_when_logger_fails() -> None:
+    provider = _FakeProvider(text="hello again")
+    router = _router(provider, _FailingLogger())  # type: ignore[arg-type]
+
+    router.route(system_instruction="sys", user_message="hello")
+
+    assert provider.last_request is not None
+    assert provider.last_request.messages[0].content == "hello"
+
+
+def test_route_logs_success_unchanged_when_logger_works_normally() -> None:
+    """Existing audit event semantics (single SUCCESS event, correct detail
+    shape) are unaffected by the fix when the logger does not fail."""
+    logger = _SpyLogger()
+    router = _router(_FakeProvider(text="fine"), logger)
+
+    router.route(system_instruction="sys", user_message="hello")
+
+    assert len(logger.events) == 1
+    assert logger.events[0]["outcome"].value == "success"
+    assert "provider=fake" in str(logger.events[0]["detail"])
+
+
+def test_route_logs_failure_unchanged_when_logger_works_normally() -> None:
+    logger = _SpyLogger()
+    router = _router(_FakeProvider(fail=True), logger)
+
+    with pytest.raises(AIProviderError):
+        router.route(system_instruction="sys", user_message="hello")
+
+    assert len(logger.events) == 1
+    assert logger.events[0]["outcome"].value == "failure"
+
+
 # --- is_available() passthrough ----------------------------------------------
 
 

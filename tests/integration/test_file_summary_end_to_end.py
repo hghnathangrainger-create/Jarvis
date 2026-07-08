@@ -275,6 +275,42 @@ def test_injection_bearing_file_remains_untrusted_and_is_audited(
     assert response.approval_request is None
 
 
+# --- AIRouter audit-logging failure never alters routing outcome (closure fix) --
+
+
+class _AiCallFailingLogger:
+    """Raises only for the ai_call audit event (AIRouter's own), recording
+    every other event normally - proving the Phase 9 closure fix holds in
+    the real stack: a valid AI result still succeeds even when AIRouter's
+    own audit-logging call fails."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def emit(self, **kwargs: object) -> str:
+        if kwargs.get("action_type") == "ai_call":
+            raise RuntimeError("simulated ai_call logger failure")
+        self.calls.append(kwargs)
+        return str(len(self.calls))
+
+
+def test_valid_file_summary_survives_a_failing_ai_call_audit_logger(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report.txt"
+    path.write_text("Quarterly results improved across every region.\n")
+    orchestrator, provider, _ = _build_orchestrator(
+        "A short summary.\nStep 1: note the key points",
+        _AiCallFailingLogger(),  # type: ignore[arg-type]
+    )
+
+    response = orchestrator.handle_request(f"summarise file {path}")
+
+    assert response.success is True
+    assert response.message.startswith("[AI file summary - advisory only]")
+    assert len(provider.received_requests) == 1
+
+
 # --- Failure paths, real stack ---------------------------------------------------
 
 

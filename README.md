@@ -12,6 +12,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 6 complete: Durable Approvals and Approval-Lifecycle Timeout Enforcement.**
 **Phase 7 complete: Core Simplification and AI Safety Hardening.**
 **Phase 8 complete: Real External-Content Ingestion.**
+**Phase 9 complete: Stored-Memory Ingestion for Advisory AI.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -21,9 +22,11 @@ Phase 7 is a **safety and structure phase, not a capability phase**: it simplifi
 
 Phase 8 is Jarvis's first real use of that trust boundary: an explicit `summarise file <path>` command reads a real file and supplies its contents to the advisory AI as typed, untrusted context — scanned, audited, and never able to gain new authority, exactly as Phase 7 already guarantees. See the Phase 8 section below.
 
+Phase 9 is the second real use of that same trust boundary: an explicit `summarise memory <id>` command reads one already-stored memory and supplies its content to the advisory AI the same way — typed, untrusted, scanned, audited, and never able to gain new authority. See the Phase 9 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **800 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–8 test, including all of Phase 8's batches.
+> **Verified:** `poetry run pytest -v` — **903 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–9 test, including all of Phase 9's batches and its AIRouter audit-failure-isolation closure fix.
 
 ---
 
@@ -211,6 +214,32 @@ Stored-memory ingestion, web or browser content ingestion, a generic multi-sourc
 
 ---
 
+## Phase 9 — Stored-Memory Ingestion for Advisory AI (complete)
+
+Phase 9 is the second content source proven through the Phase 7 trust and injection-defence pipeline: one already-stored Episodic Memory, retrieved by its explicit numeric id and supplied to the advisory AI, through the identical, completely unmodified Phase 7/8 machinery. It is deliberately narrow: one memory, by id, per request, delivered in three controlled batches. See `docs/phase_9_completion_report.md` for the full write-up.
+
+- **Batch 1 — Stored-memory ingestion foundation.** A new, narrow module reads one memory directly through the Memory Manager and labels it as untrusted AI context, with provenance established by construction from the record actually returned, not merely the id requested. A real design mistake was caught and corrected before any code was written: the memory tool's own "get" operation returns a CLI-formatted display string, not the memory's raw content, so this module depends on the Memory Manager directly instead.
+- **Batch 2 — Command and orchestrator wiring.** An explicit `summarise memory <id>` (or `summarize memory <id>`) command, recognised by the Core's command router. The orchestrator coordinates the retrieval, the AI reasoning call, its own acquisition audit event, and the same unexpected-action policy every other AI-advised response already uses — it never retrieves the memory itself and never builds the AI's context directly.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against a real, saved memory, including a real prompt-injection attempt, this README section, and `docs/phase_9_completion_report.md`.
+
+### Memory summary command
+
+| Command | What it does |
+|---|---|
+| `summarise memory <id>` / `summarize memory <id>` | Retrieves the memory by id (GREEN, same as `show memory`) and asks the advisory AI to summarise its content. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI memory summary - advisory only]`. If AI reasoning is off, the id is missing or not a number, or no memory has that id, Jarvis says so plainly — it never presents a failure as if it were a real summary. If the memory's content is longer than the character limit, only the retained portion is sent to the AI, and the response says so honestly rather than implying the whole memory was reviewed.
+
+### Safety note: stored memory is untrusted, scanned, and audited — nothing new is trusted
+
+A memory's content is always typed as untrusted AI context, exactly like file content: automatically scanned for instruction-like patterns before reaching the AI, with a suspicious finding audited through the same observability path Phase 7 already built. A memory being something Jarvis itself stored does not make it trusted — it was not typed live, in this turn, and could itself have been influenced by something injected earlier. Memory content can never become the user's live authority, system authority, grant approval, or an executable instruction, no matter what it contains. Reading a memory is already safe (GREEN) and unchanged; asking advisory AI about a memory you already asked Jarvis to remember adds no new approval requirement. As in Phase 7 and 8, any AI-suggested action arising from a memory summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 9
+
+Multi-memory retrieval or selection (exactly one memory, by explicit id, per request), automatic memory selection or ranking, semantic/vector search over memories, Session/Working/Project/Semantic/Procedural/Entity Memory, the Knowledge Library, a generic multi-source ingestion framework, any new AI execution authority, any new approval gate for reading or summarising a memory, and token-aware size limiting (memory content is truncated by a simple character limit, not a model-aware token budget). Memory retrieval by id is not session-isolated — the same, already-existing characteristic of `show memory <id>` — which is not a concern in Jarvis's current single-user, local architecture, but would need review before any future multi-user or remotely-shared use.
+
+---
+
 ## Example Session
 
 ```
@@ -286,8 +315,9 @@ jarvis/
 ├── ai/             Provider interface, Claude provider, advisory reasoning
 │                   routed through one AIRouter/PromptBuilder path, the
 │                   typed trusted/untrusted AIContextBlock model, and
-│                   file-content ingestion for the AI reasoning path
-│                   (ai/file_ingestion.py)
+│                   file-content and stored-memory ingestion for the AI
+│                   reasoning path (ai/file_ingestion.py,
+│                   ai/memory_ingestion.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
@@ -316,10 +346,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 8 is complete**: Jarvis can now read a real file and have the advisory AI summarise it, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_8_completion_report.md`, is **stored-memory ingestion** — the natural second content source, reusing the same file-ingestion pattern (a narrow, source-specific module that owns its own acquisition and establishes provenance by construction). Web/browser ingestion should follow only after that, once a dependency and tool-safety design for outbound network access has been separately scoped and reviewed. Neither is started yet.
+**Phase 9 is complete**: Jarvis can now retrieve a real stored memory by id and have the advisory AI summarise it, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_9_completion_report.md`, is **multi-memory retrieval and selection** — the first capability that requires a real answer to "which memories, how many, and how are they combined," now that single-record ingestion has been proven twice (file, memory). A separately-scoped, pre-existing observability finding (Phase 7's `AIRouter` not guarding its own audit-logging calls) is also recommended for its own independent review — see `docs/phase_9_completion_report.md` for the full account. Web/browser ingestion, and any Semantic/Entity Memory work, remain explicitly further out, each requiring its own separately-scoped design review before being started.
 
 Resumable approvals, deeper but still-advisory AI assistance, and optional smarter search over memory remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, and Phase 8 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, and Phase 9 are complete for their defined scope, not yet tagged. None is a finished product.*
