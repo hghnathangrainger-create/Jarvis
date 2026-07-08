@@ -23,7 +23,7 @@ module free of wiring concerns and easy to test in isolation.
 
 from __future__ import annotations
 
-from ai.prompt_builder import PromptBuilder
+from ai.prompt_builder import PromptBuilder, audit_suspicious_injection
 from ai.providers.claude import ClaudeProvider
 from ai.reasoning_engine import AIReasoningEngine
 from ai.response_validator import ResponseValidator
@@ -140,7 +140,12 @@ def build_orchestrator() -> JarvisOrchestrator:
     if settings.ai_reasoning_enabled:
         ai_router = AIRouter(
             provider=ClaudeProvider(settings),
-            prompt_builder=PromptBuilder(),
+            # Phase 7, Batch 5A: a suspicious injection scan is now audited
+            # through the same real logger, closing the gap where a
+            # detected pattern was never reported anywhere.
+            prompt_builder=PromptBuilder(
+                report_injection=audit_suspicious_injection(logger)
+            ),
             validator=ResponseValidator(),
             logger=logger,
             settings=settings,

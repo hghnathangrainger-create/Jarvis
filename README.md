@@ -10,14 +10,17 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 
 **Phase 5 complete: Better Memory and Personal Knowledge System.**
 **Phase 6 complete: Durable Approvals and Approval-Lifecycle Timeout Enforcement.**
+**Phase 7 complete: Core Simplification and AI Safety Hardening.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
 Phase 6 adds a durable, read-only record of every approval decision, so it survives a restart — without making any past decision resumable or replayable — and a bounded lifecycle for pending approvals: a YELLOW request left unanswered now expires automatically instead of waiting forever. See the Phase 6 section below.
 
+Phase 7 is a **safety and structure phase, not a capability phase**: it simplifies the Core's request-routing code, and completes the Master Specification's prompt-injection defence — trusted-vs-untrusted AI context, automatic scanning of untrusted context for instruction-like patterns (audited when suspicious), and an audited policy for an AI-suggested action that falls outside a request's own plan. No new user-facing command, no new AI power, and no new execution authority were added. See the Phase 7 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **559 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–6 test, including Phase 6's durable approval history and YELLOW approval-timeout enforcement.
+> **Verified:** `poetry run pytest -v` — **733 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–7 test, including all of Phase 7's batches.
 
 ---
 
@@ -158,6 +161,27 @@ Resumable approvals, an `approve <id>` command for anything not currently pendin
 
 ---
 
+## Phase 7 — Core Simplification and AI Safety Hardening (complete)
+
+Phase 7 is a **safety and structure phase, not a capability phase**: it removes the one identified piece of Core architectural debt, and completes the Master Specification's prompt-injection defence, delivered in six controlled batches. See `docs/phase_7_completion_report.md` for the full write-up, including the history of a verification finding and its closure.
+
+- **Batch 1 — Command routing extraction.** The Core's request-text-to-tool matching logic moved out of `JarvisOrchestrator` into its own `CommandRouter`, with zero behaviour change.
+- **Batch 2 — Trusted vs untrusted AI context, and one AI request path.** A typed `AIContextBlock` (`JARVIS_TRUSTED` or `UNTRUSTED`) replaces bare strings in every AI prompt; `JARVIS_TRUSTED` can only be produced by two guarded factory methods, never by an arbitrary caller. Every AI call — including the advisory reasoning engine's — now travels through exactly one construction path. A real gap was also fixed: AI reasoning had never actually been wired into the running application before this batch, regardless of the `AI_REASONING_ENABLED` setting.
+- **Batch 3 — Prompt-injection pattern detection.** Untrusted AI context is automatically scanned for instruction-like patterns (imperatives directed at an AI, role/system-override phrasing, tool-call-like syntax, jailbreak phrasing) before it reaches a provider. Detection never blocks or rewrites anything by itself.
+- **Batch 4 — Unexpected AI action escalation.** An AI-suggested action outside the current request's own plan is evaluated against the existing GREEN/YELLOW/RED classification and audited: GREEN is flagged, YELLOW is escalated, RED is blocked — as a policy verdict and an audit event only. See the safety note below for exactly what this does and does not protect today.
+- **Batch 5 — End-to-end verification and documentation.** One consolidated integration test exercising the real stack together, this README section, and `docs/phase_7_completion_report.md`. This batch's own verification found that a detected injection pattern was never audited anywhere — reported rather than silently patched, since Batch 5 itself added no production code.
+- **Batch 5A — Injection detection audit closure.** The gap Batch 5 found is closed: a suspicious injection detection is now audited through the existing observability system, the same way the Batch 4 escalation verdict already was — using the existing audit vocabulary, with a failure-resilient reporter, and no change to detection remaining detection-only.
+
+### Safety note: AI suggestions remain advisory only
+
+Nothing in Phase 7 gives the AI any new authority. An AI-suggested action can never become a tool call, can never grant itself approval, can never change a security tier, and can never modify a plan — this is proven directly by tests, not just asserted. **The Batch 4 escalation policy is armed but currently unreachable**: no code path anywhere in this codebase lets an AI suggestion execute in the first place, so the YELLOW/RED verdicts have no live action to protect yet. Phase 7 builds the gate for the day a future phase lets Jarvis read real external content (a webpage, a file) into an AI prompt; it does not open that door itself — no tool in this codebase feeds external content into an AI prompt today.
+
+### What is deliberately NOT included in Phase 7
+
+Any new user-facing command or tool, any new AI capability, any path that lets an AI suggestion execute, a Workflow Engine of any kind, real external-content ingestion into an AI prompt (web pages, files, or memory fed into a prompt), and any change to what gets classified GREEN/YELLOW/RED.
+
+---
+
 ## Example Session
 
 ```
@@ -226,16 +250,21 @@ jarvis/
 ├── config/         Configuration and shared constants (security tiers, AI flag)
 ├── storage/        SQLite database and ORM models (memory category column)
 ├── observability/  Structured event logging
-├── security/       Security Manager and append-only audit log
+├── security/       Security Manager: action classification, append-only audit
+│                   log, prompt-injection pattern detection, and the
+│                   unexpected-AI-action escalation policy
 ├── memory/         Memory Engine: save, list, search, categories, update, forget
-├── ai/             Provider interface, Claude provider, and advisory reasoning
+├── ai/             Provider interface, Claude provider, advisory reasoning
+│                   routed through one AIRouter/PromptBuilder path, and the
+│                   typed trusted/untrusted AIContextBlock model
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
 │                   file_read (GREEN); file_create, file_append,
 │                   memory_update, memory_forget (YELLOW, approval-gated)
 ├── approval/       Approval models and the Approval Manager
-├── core/           Orchestrator that wires everything together
+├── core/           Orchestrator that wires everything together, plus the
+│                   CommandRouter that matches request text to a tool
 ├── ui/             Command-line interface and approval prompts
 ├── tests/          Unit and integration tests
 ├── docs/           Specifications, implementation plans, and reports
@@ -256,8 +285,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 6 is complete**: durable, read-only approval history, a polished CLI experience for it, and a bounded YELLOW approval lifecycle that expires an unanswered request instead of waiting forever. Deliberately not included, each requiring its own safety review and architecture decision before it could even be scoped: resumable approvals (replaying a past pending or expired request after a restart, with its own reclassification and expiry-interaction rules), deeper but still-advisory AI assistance (richer summaries and suggestions across memories), and optional smarter search over memory. Every future addition continues to go only behind the Security Manager, with the user in control.
+**Phase 7 is complete**: the Core's command-routing logic is simplified, and the Master Specification's prompt-injection defence is complete at the policy, detection, escalation, and audit level — trusted-vs-untrusted AI context, automatic scanning of untrusted context (audited when suspicious), and an audited unexpected-AI-action policy. What comes next is **a future phase that introduces real external-content ingestion** (a webpage, a file, or memory fed into an AI prompt for the first time) — the reason Phase 7 exists is to make that phase start from a codebase already honest about trust boundaries, rather than retrofitting that honesty afterward. No such phase is scoped or designed yet.
+
+Resumable approvals, deeper but still-advisory AI assistance, and optional smarter search over memory remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 is complete for its defined scope, not yet tagged. Neither is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 and Phase 7 are complete for their defined scope, not yet tagged. None is a finished product.*
