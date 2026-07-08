@@ -10,12 +10,18 @@ Responsibilities:
     - For safe, recognised requests, route to the correct built-in tool through
       the ToolExecutor, which enforces the security gate.
     - Always include the generated Plan in the response.
+    - Coordinate the explicit file-summary workflow (Phase 8, Batch 2) by
+      calling ai.file_ingestion.ingest_file_for_ai() and AIReasoningEngine -
+      never by reading a file or building AI context itself.
 
 Does NOT:
     - Call the Claude API or any AI provider.
     - Execute anything directly; all tool execution goes through ToolExecutor.
     - Bypass the security gate under any circumstance.
     - Implement autonomous behaviour, voice, phone, or UI.
+    - Read a file itself, or construct/relabel an AIContextBlock. File
+      acquisition and provenance labelling belong solely to
+      ai.file_ingestion.ingest_file_for_ai() (Phase 8, Batch 1).
 
 The orchestrator coordinates existing subsystems; it owns no planning,
 security, or execution logic of its own. Every consequential action flows
@@ -30,6 +36,7 @@ from typing import Protocol
 
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision
+from ai.file_ingestion import ingest_file_for_ai
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from config.constants import EventOutcome, SecurityTier
@@ -73,6 +80,19 @@ class _AuditLogger(Protocol):
 
 _SOURCE = "jarvis_orchestrator"
 _UNEXPECTED_ACTION_TYPE = "unexpected_ai_action"
+
+#: Advisory label for a file-summary response's message (Phase 8, Batch 2).
+#: Deliberately distinct from _attach_ai_suggestion's own
+#: "[AI suggestion - advisory only]" label: that label marks an *appended*
+#: annotation on an already-decided response; this one marks a response
+#: whose entire content *is* the AI's own advisory output.
+_FILE_SUMMARY_LABEL = "[AI file summary - advisory only]"
+_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise this file's contents."
+)
+_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for this file right now."
+)
 
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
@@ -265,13 +285,19 @@ class JarvisOrchestrator:
     ) -> JarvisResponse:
         """Handle a user request and return a structured response.
 
-        This is a thin wrapper around the rule-based request handler. The
-        response is produced entirely by the existing Planner, SecurityManager,
-        ToolExecutor, and ApprovalManager path. Only after that authoritative
-        response is built is an *advisory* AI suggestion optionally attached,
-        and only when a reasoning engine is active. The AI never changes the
-        outcome: routing, classification, approval, and execution are all
-        already decided before the AI is consulted.
+        An explicit file-summary request ("summarise file <path>", Phase 8,
+        Batch 2) is recognised first and handled by its own terminal path
+        (_handle_file_summary_request) - it never reaches the rule-based
+        handler below or _attach_ai_suggestion, since its entire response
+        *is* the AI's own advisory output, not an annotation appended to an
+        already-decided one. Every other request is a thin wrapper around
+        the rule-based request handler: the response is produced entirely by
+        the existing Planner, SecurityManager, ToolExecutor, and
+        ApprovalManager path. Only after that authoritative response is
+        built is an *advisory* AI suggestion optionally attached, and only
+        when a reasoning engine is active. The AI never changes the outcome:
+        routing, classification, approval, and execution are all already
+        decided before the AI is consulted.
 
         Args:
             user_request: The user's request in natural language.
@@ -281,8 +307,120 @@ class JarvisOrchestrator:
             A JarvisResponse describing the outcome, with an advisory
             ai_suggestion attached only when AI reasoning is active.
         """
+        file_summary_path = self._command_router.match_file_summary(
+            user_request.strip()
+        )
+        if file_summary_path is not None:
+            return self._handle_file_summary_request(
+                file_summary_path, user_request, session_id
+            )
+
         response = self._handle_request_core(user_request, session_id=session_id)
         return self._attach_ai_suggestion(response, user_request, session_id)
+
+    def _handle_file_summary_request(
+        self, path: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarise file <path>" request (Phase 8, Batch 2).
+
+        This is a terminal response path, separate from the rule-based
+        _handle_request_core/_attach_ai_suggestion flow: the AI's own output
+        is the entire point of this request, not an annotation appended to
+        an already-decided response. It still coordinates only existing,
+        already-secured components - it owns no file-reading, context
+        construction, or unexpected-action logic of its own:
+
+            1. A Plan is generated normally (Planner.create_plan), so the
+               existing unexpected-action policy has a real expected-action
+               scope to evaluate AI suggestions against, exactly as for any
+               other request.
+            2. ai.file_ingestion.ingest_file_for_ai() performs the file read
+               through the real ToolExecutor (the same GREEN, already-
+               classified, already-audited "file_read" tool call any other
+               file-reading request goes through) and returns either an
+               UNTRUSTED AIContextBlock or a represented failure - this
+               method never calls FileReadTool directly, never constructs an
+               AIContextBlock itself, and never re-labels or re-derives
+               trust or provenance.
+            3. On success, the returned context_block - already trust-tagged
+               and labelled by ingest_file_for_ai - is forwarded, unchanged,
+               into a new AIReasoningRequest.
+            4. AIReasoningEngine.reason() is called exactly as it always is;
+               this method has no ability to execute anything regardless of
+               what the AI returns.
+            5. Every AI-suggested action is evaluated through the existing,
+               unmodified _evaluate_unexpected_actions/_audit_unexpected_action
+               methods - the same Batch 4 policy and audit path every other
+               request already uses. This is not optional: a multi-line AI
+               summary can produce AISuggestedAction entries under
+               AIReasoningEngine._parse()'s existing behaviour, and this
+               path is at least as exposed to adversarial content as any
+               other, since the AI reasoned about real file content.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            path: The file path extracted by CommandRouter.match_file_summary.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced; otherwise success=False with an honest explanation of
+            which stage did not complete (AI reasoning disabled/unavailable,
+            or file acquisition failed) - never blocked or requiring
+            confirmation, since reading a GREEN file and consulting
+            advisory AI about already-permitted content requires no new
+            approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        ingestion = ingest_file_for_ai(self._executor, path, session_id=session_id)
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read the file.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_FILE_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
 
     def _attach_ai_suggestion(
         self,

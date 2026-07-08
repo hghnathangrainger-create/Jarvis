@@ -1,12 +1,17 @@
 """
 command_router.py
 
-Command routing for the Jarvis AI Operating System (Phase 7, Batch 1).
+Command routing for the Jarvis AI Operating System (Phase 7, Batch 1;
+explicit file-summary command added in Phase 8, Batch 2).
 
 Responsibilities:
     - Match a user's natural-language request text to the name of a
       registered tool, if a known phrasing applies.
     - Build the input dictionary the matched tool expects from that text.
+    - Recognise the explicit file-summary command and extract its path
+      (match_file_summary), as a separate, narrow operation from
+      match()/build_input() - summarising a file is a multi-step
+      AI-reasoning workflow, not a single tool execution.
 
 Does NOT:
     - Classify security tiers (that is the Security Manager's job).
@@ -111,6 +116,17 @@ _FILE_APPEND_PREFIXES: tuple[str, ...] = (
     "append",
 )
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
+
+#: Leading phrases that indicate an explicit file-summary request (Phase 8,
+#: Batch 2). The text after the phrase is treated as the file path. This is
+#: deliberately a separate, narrow match from the file_read prefixes above:
+#: summarising a file is a multi-step AI-reasoning workflow, not a single
+#: tool execution, so it is never returned by match()/build_input(), which
+#: only ever name a registered tool the orchestrator can execute directly.
+_FILE_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise file",
+    "summarize file",
+)
 
 
 class CommandRouter:
@@ -229,6 +245,35 @@ class CommandRouter:
             return "echo"
 
         return None
+
+    def match_file_summary(self, text: str) -> str | None:
+        """Match an explicit file-summary request and extract its path.
+
+        Recognises "summarise file <path>" and "summarize file <path>"
+        (Phase 8, Batch 2). This is a distinct, narrow operation from
+        match()/build_input(): it never names a registered tool for the
+        orchestrator to execute directly, because summarising a file is a
+        multi-step AI-reasoning workflow (read the file, then reason about
+        its contents), not a single tool execution. Only recognised when
+        file_read is registered, since that is the tool this workflow reads
+        through.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted path if the text matches a file-summary command -
+            possibly an empty string, if the phrase was used with no path -
+            or None if the text does not match this command at all.
+        """
+        if not self._registry.has_tool("file_read"):
+            return None
+
+        lowered = text.casefold()
+        if self._file_prefix(lowered, _FILE_SUMMARY_PREFIXES) is None:
+            return None
+
+        return self._extract_path(text, _FILE_SUMMARY_PREFIXES)
 
     def build_input(self, tool_name: str, text: str) -> dict[str, object]:
         """Build the input dictionary for the matched tool.

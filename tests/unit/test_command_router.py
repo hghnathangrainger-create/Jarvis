@@ -313,3 +313,67 @@ def test_build_input_approval_history_get_by_id(router: CommandRouter) -> None:
 
 def test_build_input_unknown_tool_returns_empty_dict(router: CommandRouter) -> None:
     assert router.build_input("info", "system info") == {}
+
+
+# --- match_file_summary(): explicit file-summary command (Phase 8, Batch 2) --
+
+
+def test_match_file_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
+
+
+def test_match_file_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_file_summary("summarize file report.txt") == "report.txt"
+
+
+def test_match_file_summary_preserves_paths_with_spaces(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_file_summary("summarise file my notes/meeting notes.txt")
+        == "my notes/meeting notes.txt"
+    )
+
+
+def test_match_file_summary_strips_quotes_and_filler_word(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_file_summary('summarise file the "report.txt"') == "report.txt"
+    )
+
+
+def test_match_file_summary_with_no_path_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    """Recognised as a file-summary command, but with no path - the caller
+    (JarvisOrchestrator) is responsible for handling the empty path as a
+    normal acquisition failure, exactly like an empty file_read path."""
+    assert router.match_file_summary("summarise file") == ""
+
+
+def test_match_file_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_file_summary("summarise the plan for me") is None
+    assert router.match_file_summary("read file report.txt") is None
+    assert router.match_file_summary("do a backflip") is None
+
+
+def test_match_file_summary_returns_none_when_file_read_not_registered() -> None:
+    registry = ToolRegistry()
+    router = CommandRouter(registry)
+    assert router.match_file_summary("summarise file report.txt") is None
+
+
+def test_match_file_summary_does_not_change_normal_match_behaviour(
+    router: CommandRouter,
+) -> None:
+    """Adding match_file_summary must not change match()'s own routing."""
+    assert router.match("read file report.txt") == "file_read"
+    assert router.match("echo hello") == "echo"
+    assert router.match("summarise file report.txt") is None
