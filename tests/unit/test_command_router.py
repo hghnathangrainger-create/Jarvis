@@ -377,3 +377,89 @@ def test_match_file_summary_does_not_change_normal_match_behaviour(
     assert router.match("read file report.txt") == "file_read"
     assert router.match("echo hello") == "echo"
     assert router.match("summarise file report.txt") is None
+
+
+# --- match_memory_summary(): explicit memory-summary command (Phase 9, Batch 2)
+
+
+def test_match_memory_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_summary("summarise memory 42") == "42"
+
+
+def test_match_memory_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_summary("summarize memory 42") == "42"
+
+
+def test_match_memory_summary_extracts_raw_unparsed_id_text(
+    router: CommandRouter,
+) -> None:
+    """The router extracts the raw trailing text only - it never parses it
+    into an int itself; a non-numeric or malformed id is still returned as
+    a string for the orchestrator to reject honestly."""
+    assert router.match_memory_summary("summarise memory abc") == "abc"
+    assert router.match_memory_summary("summarise memory 4.2") == "4.2"
+    assert router.match_memory_summary("summarise memory -5") == "-5"
+
+
+def test_match_memory_summary_with_no_id_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    """Recognised as a memory-summary command, but with no id - the caller
+    (JarvisOrchestrator) is responsible for handling the empty id as an
+    honest invalid-id failure, exactly like an empty file-summary path."""
+    assert router.match_memory_summary("summarise memory") == ""
+
+
+def test_match_memory_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_summary("summarise memory   42   ") == "42"
+
+
+def test_match_memory_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_summary("summarise the plan for me") is None
+    assert router.match_memory_summary("show memory 42") is None
+    assert router.match_memory_summary("forget memory 42") is None
+    assert router.match_memory_summary("summarise file report.txt") is None
+    assert router.match_memory_summary("do a backflip") is None
+
+
+def test_match_memory_summary_does_not_require_any_registered_tool() -> None:
+    """Unlike match_file_summary (gated on file_read being registered),
+    memory summarisation never goes through a registered tool at all, so it
+    is recognised even with an empty registry."""
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match_memory_summary("summarise memory 42") == "42"
+
+
+def test_match_memory_summary_does_not_change_normal_match_behaviour(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_summary must not change match()'s own routing,
+    including its existing "show memory <id>" and "forget memory <id>"
+    behaviour. Note that match() itself already returns "memory" for text
+    containing the bare keyword "memory" (pre-existing, unrelated behaviour,
+    unchanged here) - this is harmless in practice because JarvisOrchestrator
+    checks match_memory_summary first and never falls through to match() for
+    a recognised memory-summary command (see test_command_router_orchestrator
+    dispatch order proven in test_memory_summary_workflow.py)."""
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match("read file report.txt") == "file_read"
+    assert router.match("echo hello") == "echo"
+
+
+def test_match_memory_summary_does_not_change_file_summary_behaviour(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_summary must not change match_file_summary()'s
+    own recognition."""
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
+    assert router.match_file_summary("summarise memory 42") is None

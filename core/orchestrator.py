@@ -37,11 +37,13 @@ from typing import Protocol
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision
 from ai.file_ingestion import ingest_file_for_ai
+from ai.memory_ingestion import MemoryIngestionResult, ingest_memory_for_ai
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from config.constants import EventOutcome, SecurityTier
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse
+from memory.memory_manager import MemoryManager
 from planner.plan_models import Plan
 from planner.planner import Planner
 from security.security_manager import (
@@ -94,6 +96,29 @@ _AI_REASONING_UNAVAILABLE_MESSAGE = (
     "AI reasoning could not produce a summary for this file right now."
 )
 
+#: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
+#: Distinct from _FILE_SUMMARY_LABEL for the same reason that label is
+#: distinct from _attach_ai_suggestion's own annotation label: this marks a
+#: response whose entire content *is* the AI's own advisory output about a
+#: stored memory, not an annotation appended to an already-decided response.
+_MEMORY_SUMMARY_LABEL = "[AI memory summary - advisory only]"
+_MEMORY_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise this memory's contents."
+)
+_MEMORY_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for this memory right now."
+)
+_MEMORY_MANAGER_NOT_AVAILABLE_MESSAGE = (
+    "Memory access is not available, so I can't summarise this memory."
+)
+
+#: Action type for the orchestrator's own memory-acquisition audit event
+#: (Phase 9, Batch 2). Acquisition here goes directly through
+#: MemoryManager.get() rather than ToolExecutor, so it never receives the
+#: generic "tool_call" event ToolExecutor would otherwise emit for free; this
+#: is the explicit, disclosed replacement (Phase 9 plan, Section 15).
+_MEMORY_ACQUISITION_ACTION_TYPE = "memory_acquisition"
+
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
 # EventOutcome values that ToolExecutor already logs purely at
@@ -134,6 +159,14 @@ class JarvisOrchestrator:
             outside the plan's expected scope (Phase 7, Batch 4). It is never
             used to reclassify, execute, or approve anything; the security
             gate remains solely ToolExecutor's.
+        _memory_manager: Optional MemoryManager used only by the explicit
+            memory-summary workflow (Phase 9, Batch 2) to retrieve a single
+            stored memory by id via ingest_memory_for_ai(). The orchestrator
+            never calls MemoryManager.get() itself, never constructs a memory
+            AIContextBlock itself, and never reads MemoryRecord.source -
+            acquisition and provenance stay entirely inside
+            ai.memory_ingestion. When omitted, memory-summary requests fail
+            honestly rather than raising.
         _logger: Optional audit logger for the unexpected-action verdict.
             When omitted, evaluation still happens but nothing is recorded.
     """
@@ -148,6 +181,7 @@ class JarvisOrchestrator:
         approval_manager: ApprovalManager | None = None,
         reasoning_engine: AIReasoningEngine | None = None,
         security_manager: SecurityManager | None = None,
+        memory_manager: MemoryManager | None = None,
         logger: _AuditLogger | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
@@ -169,6 +203,12 @@ class JarvisOrchestrator:
                 verdict for AI-suggested actions (Phase 7, Batch 4). A new one
                 is created if omitted; it is stateless, so this is equivalent
                 to sharing the application's existing instance.
+            memory_manager: An optional MemoryManager, used only by the
+                explicit "summarise memory <id>" workflow (Phase 9, Batch 2).
+                No new instance is ever created here if omitted - unlike
+                approval_manager/security_manager, MemoryManager requires a
+                real store, so there is no safe stateless default; when
+                omitted, memory-summary requests fail honestly instead.
             logger: Optional audit logger for the unexpected-action verdict.
                 The verdict is always evaluated; when logger is omitted,
                 nothing is recorded, matching how approval_manager behaves
@@ -181,6 +221,7 @@ class JarvisOrchestrator:
         self._approvals = approval_manager or ApprovalManager()
         self._reasoning = reasoning_engine
         self._security = security_manager or SecurityManager()
+        self._memory_manager = memory_manager
         self._logger = logger
 
     @property
@@ -286,11 +327,13 @@ class JarvisOrchestrator:
         """Handle a user request and return a structured response.
 
         An explicit file-summary request ("summarise file <path>", Phase 8,
+        Batch 2) or memory-summary request ("summarise memory <id>", Phase 9,
         Batch 2) is recognised first and handled by its own terminal path
-        (_handle_file_summary_request) - it never reaches the rule-based
-        handler below or _attach_ai_suggestion, since its entire response
-        *is* the AI's own advisory output, not an annotation appended to an
-        already-decided one. Every other request is a thin wrapper around
+        (_handle_file_summary_request / _handle_memory_summary_request) - it
+        never reaches the rule-based handler below or _attach_ai_suggestion,
+        since its entire response *is* the AI's own advisory output, not an
+        annotation appended to an already-decided one. Every other request is
+        a thin wrapper around
         the rule-based request handler: the response is produced entirely by
         the existing Planner, SecurityManager, ToolExecutor, and
         ApprovalManager path. Only after that authoritative response is
@@ -313,6 +356,14 @@ class JarvisOrchestrator:
         if file_summary_path is not None:
             return self._handle_file_summary_request(
                 file_summary_path, user_request, session_id
+            )
+
+        memory_summary_raw_id = self._command_router.match_memory_summary(
+            user_request.strip()
+        )
+        if memory_summary_raw_id is not None:
+            return self._handle_memory_summary_request(
+                memory_summary_raw_id, user_request, session_id
             )
 
         response = self._handle_request_core(user_request, session_id=session_id)
@@ -421,6 +472,223 @@ class JarvisOrchestrator:
         self._evaluate_unexpected_actions(response, result, session_id)
 
         return response
+
+    def _handle_memory_summary_request(
+        self, raw_id_text: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarise memory <id>" request (Phase 9, Batch 2).
+
+        This is a terminal response path, the direct architectural sibling of
+        _handle_file_summary_request, separate from the rule-based
+        _handle_request_core/_attach_ai_suggestion flow: the AI's own output
+        about a stored memory is the entire point of this request, not an
+        annotation appended to an already-decided response. It still
+        coordinates only existing, already-secured components - it owns no
+        memory-retrieval, context-construction, or unexpected-action logic of
+        its own:
+
+            1. A Plan is generated normally (Planner.create_plan), so the
+               existing unexpected-action policy has a real expected-action
+               scope to evaluate AI suggestions against, exactly as for any
+               other request.
+            2. The raw trailing id text CommandRouter.match_memory_summary
+               extracted is parsed into an int here, before anything else is
+               attempted - an invalid id fails honestly with no memory read,
+               no audit event, and no AI ever consulted.
+            3. Required collaborators (AI reasoning, then the memory_manager)
+               are confirmed available, each with its own honest failure.
+            4. ai.memory_ingestion.ingest_memory_for_ai() performs the memory
+               read directly through MemoryManager.get() - the same typed
+               acquisition boundary Batch 1 established - and returns either
+               an UNTRUSTED AIContextBlock or a represented failure. This
+               method never calls MemoryManager.get() directly, never
+               constructs an AIContextBlock itself, never reads
+               MemoryRecord.source, and never re-labels or re-derives trust
+               or provenance.
+            5. The orchestrator's own acquisition audit event is emitted
+               (_audit_memory_acquisition) - the explicit, disclosed
+               replacement for the tool_call event this path does not
+               receive for free, since it never goes through ToolExecutor.
+            6. On success, the returned context_block - already trust-tagged
+               and labelled by ingest_memory_for_ai - is forwarded, unchanged,
+               into a new AIReasoningRequest.
+            7. AIReasoningEngine.reason() is called exactly as it always is;
+               this method has no ability to execute anything regardless of
+               what the AI returns.
+            8. Every AI-suggested action is evaluated through the existing,
+               unmodified _evaluate_unexpected_actions/_audit_unexpected_action
+               methods - the same Batch 4 policy and audit path every other
+               request already uses.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            raw_id_text: The raw, unparsed trailing text extracted by
+                CommandRouter.match_memory_summary - possibly empty or
+                non-numeric.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced from a genuinely retrieved memory; otherwise
+            success=False with an honest explanation of which stage did not
+            complete (invalid id, AI reasoning disabled/unavailable, memory
+            subsystem unavailable, or memory acquisition failure) - never
+            blocked or requiring confirmation, since reading a memory is
+            already GREEN and consulting advisory AI about already-permitted
+            content requires no new approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        memory_id = self._parse_memory_id(raw_id_text)
+        if memory_id is None:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    f"'{raw_id_text}' is not a valid memory id. Please "
+                    "provide a numeric id, for example 'summarise memory 42'."
+                ),
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._memory_manager is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_MANAGER_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        ingestion = ingest_memory_for_ai(self._memory_manager, memory_id)
+        self._audit_memory_acquisition(ingestion, memory_id, session_id)
+
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read that memory.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+        if ingestion.truncated:
+            summary = (
+                f"{summary} Note: only part of this memory's content was "
+                "available for this summary."
+            )
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_MEMORY_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
+    @staticmethod
+    def _parse_memory_id(raw_id_text: str) -> int | None:
+        """Parse a raw trailing id string into a memory id.
+
+        Deliberately strict: only a string of digits (after stripping
+        surrounding whitespace) is accepted. Missing, blank, non-numeric, or
+        malformed text (including a negative sign, decimal point, or any
+        embedded whitespace) is rejected as invalid, never guessed at or
+        reinterpreted as a search query.
+
+        Args:
+            raw_id_text: The raw, unparsed trailing text
+                CommandRouter.match_memory_summary extracted after the
+                command prefix.
+
+        Returns:
+            The parsed id as a non-negative int, or None if the text is
+            empty or is not made up entirely of digits.
+        """
+        text = raw_id_text.strip()
+        if not text.isdigit():
+            return None
+        return int(text)
+
+    def _audit_memory_acquisition(
+        self,
+        ingestion: MemoryIngestionResult,
+        memory_id: int,
+        session_id: int | None,
+    ) -> None:
+        """Record the memory-acquisition outcome, if a logger is configured.
+
+        This is the explicit, disclosed replacement for the free tool_call
+        audit event ToolExecutor would have produced had this path gone
+        through it (Phase 9 plan, Section 15) - acquisition here goes
+        directly through MemoryManager.get(), which emits nothing on its own.
+        When no logger is configured, this is a no-op, matching how every
+        other optional-audit call site in this class behaves without one.
+
+        Never embeds raw memory content, the AI-facing truncation notice
+        text, or any historical user instruction in the audit detail - only
+        the requested memory id, the outcome, and (when acquisition
+        succeeded) whether truncation occurred. Makes no claim of session
+        isolation or authorization enforcement: memory retrieval by id
+        remains the same unscoped-by-id lookup it already is (Phase 9 plan,
+        Sections 6, 12, 21).
+
+        Args:
+            ingestion: The result of ingest_memory_for_ai().
+            memory_id: The id that was requested.
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        outcome = EventOutcome.SUCCESS if ingestion.success else EventOutcome.FAILURE
+        detail = f"memory_id={memory_id} outcome={outcome.value}"
+        if ingestion.success:
+            detail += f" truncated={ingestion.truncated}"
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_MEMORY_ACQUISITION_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=SecurityTier.GREEN,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative memory-summary workflow already in
+            # progress - same precedent as _audit_unexpected_action
+            # (Phase 7, Batch 4) and PromptBuilder's report_injection guard
+            # (Phase 7, Batch 5A).
+            pass
 
     def _attach_ai_suggestion(
         self,

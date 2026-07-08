@@ -160,6 +160,11 @@ def build_orchestrator() -> JarvisOrchestrator:
         approval_manager=approvals,
         reasoning_engine=reasoning_engine,
         security_manager=security,
+        # Phase 9, Batch 2: the same MemoryManager instance already built
+        # above (not a second one) is passed through so the explicit
+        # "summarise memory <id>" workflow can retrieve a memory directly,
+        # exactly as the plan requires.
+        memory_manager=memory,
         logger=logger,
     )
 

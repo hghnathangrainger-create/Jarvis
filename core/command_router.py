@@ -128,6 +128,18 @@ _FILE_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize file",
 )
 
+#: Leading phrases that indicate an explicit memory-summary request (Phase 9,
+#: Batch 2). The text after the phrase is treated as the raw, unparsed
+#: trailing id text. Deliberately a separate, narrow match from
+#: match()/build_input(), mirroring _FILE_SUMMARY_PREFIXES: summarising a
+#: memory is a multi-step AI-reasoning workflow, not a single tool
+#: execution, so it is never returned by match()/build_input(), which only
+#: ever name a registered tool the orchestrator can execute directly.
+_MEMORY_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise memory",
+    "summarize memory",
+)
+
 
 class CommandRouter:
     """Matches request text to a registered tool and builds its input.
@@ -274,6 +286,49 @@ class CommandRouter:
             return None
 
         return self._extract_path(text, _FILE_SUMMARY_PREFIXES)
+
+    def match_memory_summary(self, text: str) -> str | None:
+        """Match an explicit memory-summary request and extract its raw id text.
+
+        Recognises "summarise memory <id>" and "summarize memory <id>"
+        (Phase 9, Batch 2). This is a distinct, narrow operation from
+        match()/build_input(), mirroring match_file_summary(): it never names
+        a registered tool for the orchestrator to execute directly, because
+        summarising a memory is a multi-step AI-reasoning workflow (retrieve
+        the memory, then reason about its contents), not a single tool
+        execution.
+
+        Only the raw trailing text is extracted here - unlike
+        _extract_memory_id/_extract_trailing_id (used by the existing
+        "forget memory <id>"/"show memory <id>" commands, which parse
+        straight to an int for a ToolExecutor-routed tool's input), the id
+        here is deliberately left as unparsed text. This command never goes
+        through ToolExecutor or MemoryTool, so validating and parsing it into
+        an int is the orchestrator's responsibility, not this router's
+        (Phase 9 plan, Section 18, Batch 2).
+
+        Unlike match_file_summary, this method does not gate on any tool
+        being registered: memory summarisation never goes through a
+        registered tool at all, so there is no registry check that would
+        honestly reflect whether the workflow can actually run. Whether the
+        required memory_manager collaborator is available is the
+        orchestrator's own responsibility to check.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing text if the text matches a
+            memory-summary command - possibly empty, or non-numeric, if the
+            phrase was used with no id or a malformed one - or None if the
+            text does not match this command at all.
+        """
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _MEMORY_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
 
     def build_input(self, tool_name: str, text: str) -> dict[str, object]:
         """Build the input dictionary for the matched tool.
