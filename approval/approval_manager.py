@@ -444,15 +444,10 @@ class ApprovalManager:
             request: The request that was decided.
             decision: The recorded decision.
         """
-        if self._audit_logger is None:
-            return
-
         outcome = (
             EventOutcome.SUCCESS if decision.is_approved else EventOutcome.BLOCKED
         )
-        self._audit_logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=outcome,
             detail=self._build_detail(request, decision),
             security_tier=request.security_tier,
@@ -594,17 +589,66 @@ class ApprovalManager:
             request: The request that expired.
             expired_at: The moment the expiry was detected.
         """
-        if self._audit_logger is None:
-            return
-
-        self._audit_logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=EventOutcome.TIMEOUT,
             detail=self._build_timeout_detail(request),
             security_tier=request.security_tier,
             session_id=request.session_id,
         )
+
+    def _emit_audit_event(
+        self,
+        *,
+        outcome: EventOutcome,
+        detail: str,
+        security_tier: SecurityTier,
+        session_id: int | None,
+    ) -> None:
+        """Emit one approval_decision audit event, isolating a failing
+        logger so it can never alter an already-authoritative approval
+        outcome (Phase 15 Batch 4B closure).
+
+        Empirically proven defect this closes: _audit()/_audit_timeout()
+        previously called self._audit_logger.emit(...) directly, with no
+        isolation, from a point *after* the authoritative in-memory state
+        change had already happened (approve()/decline() had already
+        removed the request from _pending and recorded the decision in
+        _decisions; _sweep_expired() had already popped the expired
+        request from _pending). A raising logger therefore propagated out
+        of approve()/decline()/get_pending()/list_pending()/has_pending()
+        - even for has_pending() checking a request_id entirely unrelated
+        to the one that happened to expire - silently orphaning an
+        already-decided or already-expired request: the caller (and, for a
+        Phase 15 workflow, WorkflowEngine.resume()) never received the
+        decision, the durable ApprovalHistoryStore write for it was never
+        reached, and a paused workflow could be left permanently stuck.
+
+        When no audit logger is configured, this remains a no-op exactly
+        as before. Nothing here changes event names, EventOutcome mapping,
+        detail content, security tier, session_id, timeout durations, or
+        approval semantics - only the emit() call itself is now isolated.
+
+        Args:
+            outcome: The EventOutcome to record.
+            detail: The already-built detail string.
+            security_tier: The tier to record.
+            session_id: Optional session identifier.
+        """
+        if self._audit_logger is None:
+            return
+        try:
+            self._audit_logger.emit(
+                source=_SOURCE,
+                action_type=_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=security_tier,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative approval outcome already decided.
+            pass
 
     def _build_timeout_detail(self, request: ApprovalRequest) -> str:
         """Build the human-readable detail string for a timeout event.
