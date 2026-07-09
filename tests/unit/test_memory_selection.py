@@ -45,10 +45,12 @@ import ai.memory_selection as memory_selection_module
 from ai.memory_selection import (
     CategorySelectionResult,
     QuerySelectionResult,
+    RecentCountSelectionResult,
     RecentSelectionResult,
     select_memory_ids_by_category,
     select_memory_ids_by_query,
     select_recent_memory_ids,
+    select_recent_memory_ids_by_count,
 )
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
@@ -1141,6 +1143,405 @@ def test_does_not_call_ingestion_or_ai_during_recent_selection(
 
     assert result.success
     assert isinstance(result, RecentSelectionResult)
+
+
+# =============================================================================
+# Count-based recency selection (Phase 14, Batch 1)
+# =============================================================================
+
+
+# --- RecentCountSelectionResult invariants -----------------------------------
+
+
+def test_count_result_success_construction_is_valid(
+    memory_manager: MemoryManager,
+) -> None:
+    result = RecentCountSelectionResult(selected_ids=(1, 2), requested_count=5)
+
+    assert result.success
+    assert not result.zero_matches
+    assert not result.invalid_count
+    assert not result.failed
+    assert result.match_count == 2
+
+
+def test_count_result_zero_matches_construction_is_valid() -> None:
+    result = RecentCountSelectionResult(requested_count=5)
+
+    assert result.zero_matches
+    assert not result.success
+    assert not result.invalid_count
+    assert not result.failed
+    assert result.selected_ids == ()
+
+
+def test_count_result_invalid_count_construction_is_valid() -> None:
+    result = RecentCountSelectionResult(invalid_count=True)
+
+    assert result.invalid_count
+    assert not result.success
+    assert not result.zero_matches
+    assert not result.failed
+    assert result.requested_count is None
+    assert result.selected_ids == ()
+    assert result.error is None
+
+
+def test_count_result_failed_construction_is_valid() -> None:
+    result = RecentCountSelectionResult(requested_count=5, error="boom")
+
+    assert result.failed
+    assert not result.success
+    assert not result.zero_matches
+    assert not result.invalid_count
+    assert result.selected_ids == ()
+
+
+def test_count_result_invalid_count_rejects_coexisting_error() -> None:
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult(invalid_count=True, error="boom")
+
+
+def test_count_result_invalid_count_rejects_coexisting_selected_ids() -> None:
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult(invalid_count=True, selected_ids=(1, 2))
+
+
+def test_count_result_invalid_count_rejects_coexisting_requested_count() -> None:
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult(invalid_count=True, requested_count=5)
+
+
+def test_count_result_non_invalid_requires_a_requested_count() -> None:
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult(selected_ids=(1,))
+
+
+def test_count_result_rejects_error_and_selected_ids_together() -> None:
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult(
+            requested_count=5, selected_ids=(1, 2), error="boom"
+        )
+
+
+def test_count_result_all_defaults_construction_is_incoherent_and_rejected() -> None:
+    # Plain RecentCountSelectionResult() defaults to invalid_count=False and
+    # requested_count=None - an incoherent combination (every non-invalid
+    # state requires a validated requested_count), so it must raise rather
+    # than silently construct a meaningless "successful" empty result.
+    with pytest.raises(ValueError):
+        RecentCountSelectionResult()
+
+
+def test_count_result_match_count_reflects_selected_ids_cardinality() -> None:
+    result = RecentCountSelectionResult(
+        selected_ids=(1, 2, 3, 4), requested_count=4
+    )
+
+    assert result.match_count == 4
+
+
+# --- Count validation: accepted values ---------------------------------------
+
+
+def test_count_of_one_is_accepted(memory_manager: MemoryManager) -> None:
+    _save(memory_manager, "count-check entry")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "1")
+
+    assert result.success
+    assert result.requested_count == 1
+
+
+def test_count_of_ten_is_accepted(memory_manager: MemoryManager) -> None:
+    for i in range(10):
+        _save(memory_manager, f"count-check entry {i}")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "10")
+
+    assert result.success
+    assert result.requested_count == 10
+    assert len(result.selected_ids) == 10
+
+
+def test_leading_zero_is_accepted(memory_manager: MemoryManager) -> None:
+    _save(memory_manager, "leading-zero-check entry")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "05")
+
+    assert result.success
+    assert result.requested_count == 5
+
+
+def test_surrounding_whitespace_is_accepted_after_strip(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "whitespace-check entry")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "  5  ")
+
+    assert result.success
+    assert result.requested_count == 5
+
+
+# --- Count validation: rejected values, never silently clamped -------------
+
+
+def test_count_of_zero_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "0")
+
+    assert result.invalid_count
+    assert result.requested_count is None
+    assert result.selected_ids == ()
+
+
+def test_count_above_ten_is_rejected_never_clamped(
+    memory_manager: MemoryManager,
+) -> None:
+    for i in range(15):
+        _save(memory_manager, f"over-limit-check entry {i}")
+    spy = _RecentSpyMemoryManager(memory_manager)
+
+    result = select_recent_memory_ids_by_count(spy, "11")
+
+    assert result.invalid_count
+    assert result.requested_count is None
+    # The critical proof: no lookup was ever attempted at all, so the
+    # count was never silently reinterpreted as 10.
+    assert spy.list_recent_calls == []
+
+
+def test_plus_prefixed_count_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "+5")
+
+    assert result.invalid_count
+
+
+def test_negative_count_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "-5")
+
+    assert result.invalid_count
+
+
+def test_decimal_count_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "5.0")
+
+    assert result.invalid_count
+
+
+def test_embedded_whitespace_count_is_rejected(
+    memory_manager: MemoryManager,
+) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "5 5")
+
+    assert result.invalid_count
+
+
+def test_empty_count_text_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "")
+
+    assert result.invalid_count
+
+
+def test_whitespace_only_count_text_is_rejected(
+    memory_manager: MemoryManager,
+) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "   ")
+
+    assert result.invalid_count
+
+
+def test_non_numeric_count_text_is_rejected(memory_manager: MemoryManager) -> None:
+    result = select_recent_memory_ids_by_count(memory_manager, "five")
+
+    assert result.invalid_count
+
+
+def test_unicode_digit_count_behaviour_matches_existing_repository_semantics(
+    memory_manager: MemoryManager,
+) -> None:
+    """Locks the existing, inherited str.isdigit()/int() behaviour rather
+    than guessing at it: a fullwidth Unicode digit is accepted by
+    str.isdigit() (and by int()) exactly as it already would be for a
+    memory id parsed by core/orchestrator.py's own _parse_memory_id() -
+    this is carried-forward repository behaviour, not a new rule invented
+    for this function."""
+    fullwidth_five = "５"  # U+FF15 FULLWIDTH DIGIT FIVE
+    assert fullwidth_five.isdigit()
+    assert int(fullwidth_five) == 5
+    _save(memory_manager, "unicode-digit-check entry")
+
+    result = select_recent_memory_ids_by_count(memory_manager, fullwidth_five)
+
+    assert result.success
+    assert result.requested_count == 5
+
+
+def test_invalid_count_produces_no_exception_and_no_lookup(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _RecentSpyMemoryManager(memory_manager)
+
+    result = select_recent_memory_ids_by_count(spy, "not-a-count")
+
+    assert result.invalid_count
+    assert spy.list_recent_calls == []
+
+
+# --- Delegation to select_recent_memory_ids(): exactly once, limit=count ---
+
+
+def test_valid_count_delegates_exactly_once_with_matching_limit(
+    memory_manager: MemoryManager,
+) -> None:
+    for i in range(6):
+        _save(memory_manager, f"delegation-check entry {i}")
+    spy = _RecentSpyMemoryManager(memory_manager)
+
+    select_recent_memory_ids_by_count(spy, "3")
+
+    assert spy.list_recent_calls == [3]
+
+
+def test_no_local_list_recent_reimplementation_exists() -> None:
+    """Confirms select_recent_memory_ids_by_count() never calls
+    .list_recent() itself - the only path to that method is through the
+    existing, unmodified select_recent_memory_ids(). Parses the actual
+    function body via ast (excluding the docstring, which legitimately
+    discusses list_recent() in prose) rather than a raw substring search."""
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(select_recent_memory_ids_by_count))
+    tree = ast.parse(source)
+    func_def = tree.body[0]
+    assert isinstance(func_def, ast.FunctionDef)
+    # Skip the docstring (the first statement, a bare string expression).
+    body_without_docstring = func_def.body[1:]
+
+    called_attrs = {
+        node.func.attr
+        for stmt in body_without_docstring
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "list_recent" not in called_attrs
+
+    called_names = {
+        node.func.id
+        for stmt in body_without_docstring
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "select_recent_memory_ids" in called_names
+
+
+def test_success_ids_and_order_preserved_unchanged(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [_save(memory_manager, f"order-check entry {i}") for i in range(5)]
+
+    result = select_recent_memory_ids_by_count(memory_manager, "5")
+
+    # Newest-first (created_at DESC, id DESC), identical to
+    # select_recent_memory_ids()'s own order - never re-sorted here.
+    assert result.selected_ids == tuple(reversed(ids))
+
+
+def test_zero_matches_maps_correctly_through_delegation() -> None:
+    # Use a real, empty in-memory store rather than a bespoke double, so
+    # the delegated zero-matches path is exercised genuinely.
+    from sqlalchemy import create_engine
+
+    from storage.database import create_session_factory, initialize_database
+
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    manager = MemoryManager(EpisodicMemoryStore(factory))
+
+    result = select_recent_memory_ids_by_count(manager, "5")
+
+    assert result.zero_matches
+    assert not result.failed
+    assert not result.invalid_count
+    assert result.requested_count == 5
+    assert result.selected_ids == ()
+
+
+def test_delegated_failure_maps_correctly_without_leaking_raw_exception() -> None:
+    result = select_recent_memory_ids_by_count(
+        _RaisingRecentMemoryManager(), "5"
+    )
+
+    assert result.failed
+    assert not result.success
+    assert not result.zero_matches
+    assert not result.invalid_count
+    assert result.requested_count == 5
+    assert result.selected_ids == ()
+    assert result.error == "Could not look up recent stored memories right now."
+    assert "simulated database failure" not in (result.error or "")
+
+
+# --- Storage/ordering compatibility ------------------------------------------
+
+
+def test_more_than_requested_records_are_capped_at_the_requested_count(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [_save(memory_manager, f"cap-check entry {i}") for i in range(11)]
+
+    result = select_recent_memory_ids_by_count(memory_manager, "4")
+
+    assert len(result.selected_ids) == 4
+    # The four newest (highest ids), newest first - never the store's
+    # full 11, never a differently-chosen subset.
+    assert result.selected_ids == tuple(reversed(ids))[:4]
+
+
+def test_count_selection_spans_multiple_categories_by_recency_order(
+    memory_manager: MemoryManager,
+) -> None:
+    older_id = _save(memory_manager, "older project entry", category="project")
+    newer_id = _save(memory_manager, "newer note entry", category="note")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "2")
+
+    assert result.selected_ids == (newer_id, older_id)
+
+
+def test_does_not_call_ingestion_or_ai_during_count_selection(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "a memory for the no-ingestion proof")
+
+    result = select_recent_memory_ids_by_count(memory_manager, "1")
+
+    assert result.success
+    assert isinstance(result, RecentCountSelectionResult)
+
+
+def test_module_does_not_reference_phase_10_ingestion_count_path() -> None:
+    assert not hasattr(memory_selection_module, "ingest_memories_for_ai")
+    assert not hasattr(memory_selection_module, "ingest_memory_for_ai")
+    assert not hasattr(memory_selection_module, "MemorySetIngestionResult")
+    assert not hasattr(memory_selection_module, "AIContextBlock")
+
+
+# --- Phase 13 selector/result untouched by the Phase 14 addition -----------
+
+
+def test_phase_13_recent_selector_unaffected_by_phase_14_addition(
+    memory_manager: MemoryManager,
+) -> None:
+    memory_id = _save(memory_manager, "phase 13 regression check content")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert isinstance(result, RecentSelectionResult)
+    assert result.selected_ids == (memory_id,)
 
 
 # --- Phase 11/12 selectors remain fully unmodified by Phase 13 -------------

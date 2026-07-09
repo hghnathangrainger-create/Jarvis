@@ -6,10 +6,12 @@ System. Query-based selection was added in Phase 11, Batch 1
 (Deterministic Query-Based Memory Selection Foundation); category-based
 selection was added in Phase 12, Batch 1 (Deterministic Category-Based
 Memory Selection Foundation); recency-based selection was added in Phase
-13, Batch 1 (Deterministic Recent-Memory Selection Foundation) - all three
-as sibling capabilities in this same module, mirroring how
-ai/memory_ingestion.py already houses both its single- and multi-record
-ingestion responsibilities together.
+13, Batch 1 (Deterministic Recent-Memory Selection Foundation);
+count-bounded recency selection was added in Phase 14, Batch 1
+(Count-Based Recent Selection Foundation) - all four as sibling
+capabilities in this same module, mirroring how ai/memory_ingestion.py
+already houses both its single- and multi-record ingestion
+responsibilities together.
 
 Responsibilities:
     - Query selection: accept an explicit, caller-supplied query string
@@ -34,11 +36,23 @@ Responsibilities:
       invented time-window (last 24 hours, today, this week, or
       otherwise), since no such capability exists anywhere in the store
       this module calls (Phase 13 plan, Section 2).
+    - Count-based recency selection: accept an explicit, caller-supplied
+      count string, defensively validate it (strict digit-only text,
+      inclusive range [1, 10]) before ever calling
+      select_recent_memory_ids()/MemoryManager.list_recent(), and delegate
+      the actual lookup, unchanged, to the existing
+      select_recent_memory_ids(memory_manager, limit=count)
+      (docs/phase_14_implementation_plan.md, Section 5.2). This is the
+      only one of the four selectors that reuses another selector in this
+      same module internally, rather than calling a MemoryManager method
+      directly - by design, since the fixed-ceiling Phase 13 primitive
+      already is exactly "select the newest N ids," parameterised by the
+      count this selector validates first.
     - Preserve MemoryManager.search()'s/list_by_category()'s/
-      list_recent()'s own result order exactly for all three selectors -
-      no re-sorting, no deduplication, no candidate-pool reduction (Phase
-      11 plan, Section 5.2; Phase 12 plan, Section 7.1; Phase 13 plan,
-      Section 6).
+      list_recent()'s own result order exactly for all selectors - no
+      re-sorting, no deduplication, no candidate-pool reduction (Phase 11
+      plan, Section 5.2; Phase 12 plan, Section 7.1; Phase 13 plan,
+      Section 6; Phase 14 plan, Section 6).
     - Extract only the ordered memory ids from the results, never their
       content.
     - Represent every outcome as data, mirroring ai/memory_ingestion.py's
@@ -57,7 +71,14 @@ Responsibilities:
       matches, lookup failure - Phase 13 plan, Section 5.2), the same
       shape as query selection, because recency takes no caller-supplied
       criterion that could itself be invalid - there is no fourth
-      "invalid input" state to represent.
+      "invalid input" state to represent. Count-based recency selection
+      has four distinct, never-collapsed states (success, zero matches,
+      invalid count, lookup failure - Phase 14 plan, Section 5.3), the
+      same shape as category selection, because a user-supplied count -
+      unlike the criterion-free Phase 13 command - is a genuinely
+      different, more severe kind of input problem: an out-of-range or
+      malformed count must never silently reach
+      MemoryManager.list_recent() at all.
 
 Does NOT (query selection, Phase 11):
     - Reject, strip, normalise, or otherwise pre-validate the query
@@ -122,11 +143,42 @@ Does NOT (recency selection, Phase 13):
       exceeded (Phase 13 plan, Section 6).
     - Accept a caller-supplied count or time period. The selection
       ceiling is a fixed, code-level constant; no user-tunable parameter
-      is exposed (Phase 13 plan, Section 3, Candidate A).
+      is exposed (Phase 13 plan, Section 3, Candidate A). A user-tunable
+      count is a distinct, sibling capability - select_recent_memory_ids()
+      itself is not modified to add one (Phase 14 plan, Section 5.2).
     - Rely on MemoryManager.list_recent()'s own default limit (20). The
       fixed Phase 13 selection ceiling (10) is always passed explicitly.
 
-Does NOT (all three selectors):
+Does NOT (count-based recency selection, Phase 14):
+    - Duplicate MemoryManager.list_recent()'s call site, its exception
+      boundary, or its order-preservation guarantee. This selector adds no
+      second try/except around the same lookup merely for symmetry with
+      the other three selectors - it delegates the entire lookup, once,
+      to the existing, unmodified select_recent_memory_ids() (Phase 14
+      plan, Section 5.2).
+    - Silently clamp an out-of-range or malformed count to the nearest
+      valid value. A count of 0, a count above the fixed maximum, or any
+      non-digit text is represented as `invalid_count=True`, never
+      silently reinterpreted (Phase 14 plan, Section 5.1).
+    - Invent a new digit-validation policy. The same strict
+      `text.strip(); if not text.isdigit(): return None`-shaped check
+      core/orchestrator.py's own _parse_memory_id() already uses is
+      mirrored exactly, including its existing acceptance of leading
+      zeroes and of whatever Unicode digit characters str.isdigit() itself
+      already accepts - inherited, existing repository behaviour, not a
+      new rule invented for this function (Phase 14 plan, Section 5.1).
+    - Introduce an independently duplicated selection-ceiling literal. The
+      maximum accepted count is a direct reference to the existing
+      _RECENT_SELECTION_LIMIT constant, not a second `10` that could drift
+      from it (Phase 14 plan, Section 5.1/8).
+    - Store the raw, as-typed count text on the result, or log it anywhere
+      in this module. This module emits no audit events at all (see
+      below); a future caller that wishes to echo the raw text in a
+      user-facing rejection message already has it in scope from its own
+      command-matching step, exactly as the category workflow's own
+      orchestrator handler already does for an invalid category.
+
+Does NOT (all four selectors):
     - Retrieve memory content, construct an AIContextBlock, assign
       ContentTrust, or call PromptBuilder, AIRouter, AIReasoningEngine, or
       any AI provider. This module answers exactly one question per
@@ -136,28 +188,35 @@ Does NOT (all three selectors):
       ai/memory_ingestion.py's ingest_memories_for_ai(), called
       afterward, unchanged, by a future orchestrator caller (Phase 11
       plan, Sections 11, 12; Phase 12 plan, Section 11; Phase 13 plan,
-      Section 11).
+      Section 11; Phase 14 plan, Section 13).
     - Duplicate any part of MemorySetIngestionResult,
       ingest_memories_for_ai(), _truncate(), combined-context
       framing/budgeting, whole-record omission, or partial-success
       accounting - all of that remains Phase 10's, untouched and reused
       unchanged by a future caller.
     - Emit any audit/observability event. The memory_query_selection,
-      memory_category_selection, and memory_recent_selection audit events
-      are all orchestrator/workflow concerns, assigned to their respective
-      Batch 2 (Phase 11 plan, Section 12.2; Phase 12 plan, Section 12;
-      Phase 13 plan, Section 13), not this primitive.
+      memory_category_selection, memory_recent_selection, and
+      memory_recent_count_selection audit events are all
+      orchestrator/workflow concerns, assigned to their respective Batch 2
+      (Phase 11 plan, Section 12.2; Phase 12 plan, Section 12; Phase 13
+      plan, Section 13; Phase 14 plan, Section 8), not this primitive.
     - Retry, rank, or otherwise second-guess a lookup-layer exception - a
       raised exception is caught once, at this module's own boundary, for
       the one call it wraps, and represented as a single, honest failure
-      state.
+      state. Count-based recency selection is the one exception to
+      "caught once here": it adds no exception boundary of its own at
+      all, since it never calls MemoryManager directly - the one boundary
+      that matters (around list_recent()) already belongs to, and remains
+      owned by, select_recent_memory_ids().
 
-This module's only new production component in Phase 13 Batch 1 is the
-recency-selection primitive; the existing Phase 11 query-selection
-primitive (select_memory_ids_by_query/QuerySelectionResult) and Phase 12
-category-selection primitive (select_memory_ids_by_category/
-CategorySelectionResult) are untouched in behaviour, per the explicit
-instruction not to generalise or rename existing APIs merely for symmetry.
+This module's only new production component in Phase 14 Batch 1 is the
+count-based recency-selection primitive; the existing Phase 11
+query-selection primitive (select_memory_ids_by_query/QuerySelectionResult),
+Phase 12 category-selection primitive (select_memory_ids_by_category/
+CategorySelectionResult), and Phase 13 recency-selection primitive
+(select_recent_memory_ids/RecentSelectionResult) are untouched in
+behaviour, per the explicit instruction not to generalise or rename
+existing APIs merely for symmetry.
 """
 
 from __future__ import annotations
@@ -734,3 +793,228 @@ def select_recent_memory_ids(
 
     selected_ids = tuple(record.id for record in records)
     return RecentSelectionResult(selected_ids=selected_ids)
+
+
+# ---------------------------------------------------------------------------
+# Count-based recency selection (Phase 14, Batch 1)
+# ---------------------------------------------------------------------------
+
+#: The minimum accepted user-supplied recent-memory count
+#: (docs/phase_14_implementation_plan.md, Section 5.1). A count of 0 is
+#: rejected as invalid input - a "latest 0 memories" request is a
+#: malformed parameter, not a legitimate request that happens to select
+#: nothing, so no lookup is attempted for it.
+_RECENT_COUNT_MINIMUM = 1
+
+#: The maximum accepted user-supplied recent-memory count
+#: (docs/phase_14_implementation_plan.md, Section 5.1/8). Deliberately a
+#: direct reference to the existing Phase 13 _RECENT_SELECTION_LIMIT
+#: constant above - not an independently duplicated literal 10 - so the
+#: two ceilings can never silently drift apart, and an over-limit count
+#: can never reach ai/memory_ingestion.py's own max_records=10 backstop.
+_RECENT_COUNT_MAXIMUM = _RECENT_SELECTION_LIMIT
+
+
+@dataclass(frozen=True, slots=True)
+class RecentCountSelectionResult:
+    """The result of a deterministic, user-count-bounded recency selection.
+
+    Exactly one of four states applies, distinguished by the `success`,
+    `zero_matches`, `invalid_count`, and `failed` properties below - never
+    collapsed into a single generic outcome, the same four-state shape as
+    CategorySelectionResult (docs/phase_14_implementation_plan.md, Section
+    5.3), because a user-supplied count is a genuinely different, more
+    severe kind of input problem than the criterion-free Phase 13 command:
+    an out-of-range or malformed count must never silently reach
+    MemoryManager.list_recent() at all.
+
+    Attributes:
+        selected_ids: The ids of the records the delegated
+            select_recent_memory_ids() call returned, in exactly the
+            order it returned them - never re-sorted, deduplicated, or
+            reordered here. Empty for every state except a non-empty
+            success.
+        requested_count: The validated, in-range count actually used for
+            the lookup (e.g. 5), never the raw, as-typed text. Present
+            (non-None) for `success`, `zero_matches`, and `failed` - every
+            state where a real, valid count was actually established
+            before a lookup was attempted or failed. `None` only when
+            `invalid_count` is True, since there is no valid count to
+            report for input that was never valid to begin with.
+        error: A human-readable failure reason, set only when the
+            delegated select_recent_memory_ids() call itself reported a
+            failure. None otherwise, including for `invalid_count` and
+            zero matches.
+        invalid_count: True only when the supplied count text failed
+            strict validation (not made up entirely of digits after
+            stripping surrounding whitespace, or out of the accepted
+            [1, 10] range) - no lookup was ever attempted.
+    """
+
+    selected_ids: tuple[int, ...] = ()
+    requested_count: int | None = None
+    error: str | None = None
+    invalid_count: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject any construction that does not represent a coherent outcome.
+
+        Raises:
+            ValueError: If `invalid_count` is True alongside a non-None
+                `error`, a non-empty `selected_ids`, or a non-None
+                `requested_count` - an invalid-count result never claims a
+                valid count, selected ids, or a lookup error, since no
+                lookup was ever attempted. Also raised if `invalid_count`
+                is False but `requested_count` is None (every other state
+                requires a valid count to have been established), or if
+                `error` is set alongside a non-empty `selected_ids`.
+        """
+        if self.invalid_count:
+            if (
+                self.error is not None
+                or self.selected_ids
+                or self.requested_count is not None
+            ):
+                raise ValueError(
+                    "RecentCountSelectionResult with invalid_count=True "
+                    "cannot also carry an error, selected_ids, or a "
+                    "requested_count - no lookup was ever attempted for "
+                    "an invalid count."
+                )
+            return
+
+        if self.requested_count is None:
+            raise ValueError(
+                "RecentCountSelectionResult must carry a validated "
+                "requested_count whenever invalid_count is False - "
+                "success, zero_matches, and failed all require a count "
+                "that already passed validation before a lookup was "
+                "attempted or failed."
+            )
+        if self.error is not None and self.selected_ids:
+            raise ValueError(
+                "RecentCountSelectionResult cannot carry both "
+                "selected_ids and an error - a represented lookup "
+                "failure never claims that any ids were actually "
+                "selected."
+            )
+
+    @property
+    def success(self) -> bool:
+        """Return whether the lookup completed and returned at least one record.
+
+        Returns:
+            True only when `invalid_count` is False, `error` is None, and
+            `selected_ids` is non-empty.
+        """
+        return (
+            not self.invalid_count
+            and self.error is None
+            and bool(self.selected_ids)
+        )
+
+    @property
+    def zero_matches(self) -> bool:
+        """Return whether a valid count completed a lookup that matched nothing.
+
+        Distinct from both `invalid_count` and `failed`: the supplied
+        count was genuinely valid and the lookup itself succeeded - it is
+        a valid, deterministic fact that no memories are currently stored.
+
+        Returns:
+            True only when `invalid_count` is False, `error` is None, and
+            `selected_ids` is empty.
+        """
+        return (
+            not self.invalid_count
+            and self.error is None
+            and not self.selected_ids
+        )
+
+    @property
+    def failed(self) -> bool:
+        """Return whether the delegated lookup itself reported a failure.
+
+        Returns:
+            True only when `error` is set.
+        """
+        return self.error is not None
+
+    @property
+    def match_count(self) -> int:
+        """Return the number of selected ids.
+
+        Returns:
+            len(selected_ids).
+        """
+        return len(self.selected_ids)
+
+
+def select_recent_memory_ids_by_count(
+    memory_manager: MemoryManager, raw_count_text: str
+) -> RecentCountSelectionResult:
+    """Select an ordered set of the newest N memory ids, N supplied by the caller.
+
+    Strictly validates `raw_count_text` before anything else is attempted -
+    the same defensive-validation-at-the-selector-boundary posture Phase 12
+    established for categories (docs/phase_14_implementation_plan.md,
+    Section 5.1/5.2): a count that is not made up entirely of digits (after
+    stripping surrounding whitespace), or that falls outside the accepted
+    [1, 10] range, never reaches MemoryManager.list_recent() at all and is
+    represented as `invalid_count=True`. This mirrors
+    core/orchestrator.py's own _parse_memory_id() digit-validation
+    semantics exactly (`text.strip(); if not text.isdigit(): return
+    None`) - leading zeroes are accepted ("05" -> 5), while a leading "+"
+    or "-", a decimal point, or any embedded whitespace are all rejected
+    (`str.isdigit()` returns False for all of them); any Unicode digit
+    character `str.isdigit()` itself already accepts is accepted here too
+    - this is inherited, existing repository behaviour, not a new rule
+    invented for this function.
+
+    For a valid, in-range count, this function performs no lookup of its
+    own: it delegates once, unchanged, to the existing
+    select_recent_memory_ids(memory_manager, limit=count) - the exact same
+    Phase 13 primitive, reusing its own single MemoryManager.list_recent()
+    call site and its own exception boundary completely. No second
+    try/except around the same lookup is added here; a delegated failure's
+    `error` text is copied through verbatim, never re-derived, re-wrapped,
+    or leaked from a raw exception (select_recent_memory_ids() already
+    guarantees the latter).
+
+    Args:
+        memory_manager: The MemoryManager forwarded to
+            select_recent_memory_ids().
+        raw_count_text: The caller-supplied count text, checked for strict
+            digit-only validity and range before any other use - not
+            stripped or altered here beyond what the validation check
+            itself performs.
+
+    Returns:
+        A RecentCountSelectionResult. If `raw_count_text` fails validation,
+        `invalid_count` is True, `requested_count` is None, and no lookup
+        is attempted (`.invalid_count` is True). On a successful lookup
+        that returned at least one record, `selected_ids` carries the
+        ordered ids and `requested_count` carries the validated count
+        (`.success` is True). On a successful lookup that returned
+        nothing, `selected_ids` is empty and `requested_count` still
+        carries the validated count (`.zero_matches` is True). If the
+        delegated select_recent_memory_ids() call itself failed,
+        `selected_ids` is empty, `requested_count` still carries the
+        validated count, and `error` carries the delegated call's own
+        honest failure message (`.failed` is True).
+    """
+    text = raw_count_text.strip()
+    if not text.isdigit():
+        return RecentCountSelectionResult(invalid_count=True)
+
+    count = int(text)
+    if not (_RECENT_COUNT_MINIMUM <= count <= _RECENT_COUNT_MAXIMUM):
+        return RecentCountSelectionResult(invalid_count=True)
+
+    inner = select_recent_memory_ids(memory_manager, limit=count)
+    if inner.failed:
+        return RecentCountSelectionResult(requested_count=count, error=inner.error)
+
+    return RecentCountSelectionResult(
+        requested_count=count, selected_ids=inner.selected_ids
+    )
