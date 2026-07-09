@@ -40,9 +40,15 @@ import pytest
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
 import ai.memory_selection as memory_selection_module
-from ai.memory_selection import QuerySelectionResult, select_memory_ids_by_query
+from ai.memory_selection import (
+    CategorySelectionResult,
+    QuerySelectionResult,
+    select_memory_ids_by_category,
+    select_memory_ids_by_query,
+)
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from memory.memory_models import KNOWN_CATEGORIES
 
 
 class _SpyMemoryManager:
@@ -411,3 +417,388 @@ def test_does_not_call_ingestion_or_ai_during_selection(
 
     assert result.success
     assert isinstance(result, QuerySelectionResult)
+
+
+# =============================================================================
+# Category-based selection (Phase 12, Batch 1)
+# =============================================================================
+
+
+class _CategorySpyMemoryManager:
+    """Wraps a real MemoryManager, recording every (category, limit)
+    list_by_category() call received, without changing real behaviour."""
+
+    def __init__(self, real: MemoryManager) -> None:
+        self._real = real
+        self.list_by_category_calls: list[tuple[str, int]] = []
+
+    def list_by_category(self, category: str, limit: int = 20):
+        self.list_by_category_calls.append((category, limit))
+        return self._real.list_by_category(category, limit=limit)
+
+
+class _RaisingCategoryMemoryManager:
+    """Simulates a genuine category-lookup exception."""
+
+    def list_by_category(self, category: str, limit: int = 20):
+        raise RuntimeError("simulated database failure")
+
+
+# --- Successful selection, canonicalization, order preservation -------------
+
+
+def test_successful_category_selection_returns_matching_ids(
+    memory_manager: MemoryManager,
+) -> None:
+    id_a = _save(memory_manager, "Project note one", category="project")
+    id_b = _save(memory_manager, "Project note two", category="project")
+    _save(memory_manager, "Personal note", category="personal")
+
+    result = select_memory_ids_by_category(memory_manager, "project")
+
+    assert result.success
+    assert not result.zero_matches
+    assert not result.invalid_category
+    assert not result.failed
+    assert result.error is None
+    assert result.category == "project"
+    assert set(result.selected_ids) == {id_a, id_b}
+
+
+@pytest.mark.parametrize("category", list(KNOWN_CATEGORIES))
+def test_every_supported_category_is_selectable(
+    memory_manager: MemoryManager, category: str
+) -> None:
+    memory_id = _save(memory_manager, f"a {category} memory", category=category)
+
+    result = select_memory_ids_by_category(memory_manager, category)
+
+    assert result.success
+    assert result.category == category
+    assert result.selected_ids == (memory_id,)
+
+
+def test_category_result_order_is_preserved_not_sorted(
+    memory_manager: MemoryManager,
+) -> None:
+    id_a = _save(memory_manager, "alpha project note", category="project")
+    id_b = _save(memory_manager, "beta project note", category="project")
+    id_c = _save(memory_manager, "gamma project note", category="project")
+
+    result = select_memory_ids_by_category(memory_manager, "project")
+
+    assert result.selected_ids == (id_c, id_b, id_a)
+
+
+def test_category_no_numeric_reordering_of_selected_ids(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [
+        _save(memory_manager, f"reorder-check {i}", category="note")
+        for i in range(5)
+    ]
+
+    result = select_memory_ids_by_category(memory_manager, "note")
+
+    assert result.selected_ids == tuple(reversed(ids))
+    assert result.selected_ids != tuple(sorted(result.selected_ids))
+
+
+def test_category_isolation_project_records_excluded_from_personal(
+    memory_manager: MemoryManager,
+) -> None:
+    project_id = _save(memory_manager, "project only content", category="project")
+    personal_id = _save(memory_manager, "personal only content", category="personal")
+
+    project_result = select_memory_ids_by_category(memory_manager, "project")
+    personal_result = select_memory_ids_by_category(memory_manager, "personal")
+
+    assert project_result.selected_ids == (project_id,)
+    assert personal_id not in project_result.selected_ids
+    assert personal_result.selected_ids == (personal_id,)
+    assert project_id not in personal_result.selected_ids
+
+
+def test_returned_ids_correspond_exactly_to_saved_records(
+    memory_manager: MemoryManager,
+) -> None:
+    saved_ids = {
+        _save(memory_manager, f"preference entry {i}", category="preference")
+        for i in range(4)
+    }
+
+    result = select_memory_ids_by_category(memory_manager, "preference")
+
+    assert set(result.selected_ids) == saved_ids
+
+
+# --- Canonicalization: case variants, whitespace -----------------------------
+
+
+def test_uppercase_category_canonicalizes_to_lowercase(
+    memory_manager: MemoryManager,
+) -> None:
+    memory_id = _save(memory_manager, "uppercase test", category="project")
+
+    result = select_memory_ids_by_category(memory_manager, "PROJECT")
+
+    assert result.success
+    assert result.category == "project"
+    assert result.selected_ids == (memory_id,)
+
+
+@pytest.mark.parametrize(
+    "variant", ["Project", "PROJECT", "  project  ", "Project ", " PROJECT"]
+)
+def test_accepted_case_and_whitespace_variants_canonicalize_identically(
+    memory_manager: MemoryManager, variant: str
+) -> None:
+    memory_id = _save(memory_manager, "variant test", category="project")
+
+    result = select_memory_ids_by_category(memory_manager, variant)
+
+    assert result.success
+    assert result.category == "project"
+    assert result.selected_ids == (memory_id,)
+
+
+def test_category_field_holds_canonical_value_not_raw_spelling(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "canonical check", category="note")
+
+    result = select_memory_ids_by_category(memory_manager, "  NOTE  ")
+
+    assert result.category == "note"
+    assert result.category != "  NOTE  "
+
+
+# --- Fixed limit=10, exact call count, no candidate-pool reduction ---------
+
+
+def test_explicit_limit_of_ten_is_passed_to_list_by_category(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _CategorySpyMemoryManager(memory_manager)
+    for i in range(3):
+        _save(memory_manager, f"limit-check {i}", category="project")
+
+    select_memory_ids_by_category(spy, "project")
+
+    assert spy.list_by_category_calls == [("project", 10)]
+
+
+def test_more_than_ten_category_matches_are_capped_at_ten_newest(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [
+        _save(memory_manager, f"ceiling-check {i}", category="project")
+        for i in range(11)
+    ]
+
+    result = select_memory_ids_by_category(memory_manager, "project")
+
+    assert len(result.selected_ids) == 10
+    assert result.selected_ids == tuple(reversed(ids))[:10]
+    assert ids[0] not in result.selected_ids
+
+
+def test_does_not_retrieve_a_larger_category_pool_then_slice(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _CategorySpyMemoryManager(memory_manager)
+    for i in range(15):
+        _save(memory_manager, f"pool-check {i}", category="project")
+
+    select_memory_ids_by_category(spy, "project")
+
+    # Exactly one list_by_category() call, with limit=10 - never limit=20
+    # (the store's own default) and never a larger pool later reduced.
+    assert spy.list_by_category_calls == [("project", 10)]
+
+
+# --- Invalid-category correctness invariant ---------------------------------
+
+
+def test_unknown_category_is_rejected_without_any_lookup(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _CategorySpyMemoryManager(memory_manager)
+    _save(memory_manager, "a general memory", category="general")
+
+    result = select_memory_ids_by_category(spy, "spaceships")
+
+    assert result.invalid_category
+    assert not result.success
+    assert not result.zero_matches
+    assert not result.failed
+    assert result.category is None
+    assert result.selected_ids == ()
+    assert result.error is None
+    # The critical proof: no lookup was ever attempted, so
+    # normalize_category()'s silent "general" fallback never had an
+    # opportunity to fire, and "general" content was never selected.
+    assert spy.list_by_category_calls == []
+
+
+def test_unknown_category_does_not_select_general_records(
+    memory_manager: MemoryManager,
+) -> None:
+    general_id = _save(memory_manager, "general content", category="general")
+
+    result = select_memory_ids_by_category(memory_manager, "spaceships")
+
+    assert result.invalid_category
+    assert general_id not in result.selected_ids
+    assert result.selected_ids == ()
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    ["", "   ", "project.", "spaceships", "SYSTEM", "JARVIS_TRUSTED", "!!!"],
+)
+def test_invalid_or_prompt_like_category_input_is_rejected(
+    memory_manager: MemoryManager, invalid_input: str
+) -> None:
+    result = select_memory_ids_by_category(memory_manager, invalid_input)
+
+    assert result.invalid_category
+    assert result.category is None
+    assert result.selected_ids == ()
+    assert result.error is None
+
+
+def test_empty_string_direct_call_resolves_to_invalid_category(
+    memory_manager: MemoryManager,
+) -> None:
+    result = select_memory_ids_by_category(memory_manager, "")
+
+    assert result.invalid_category
+    assert not result.zero_matches
+    assert not result.failed
+
+
+def test_whitespace_only_direct_call_resolves_to_invalid_category(
+    memory_manager: MemoryManager,
+) -> None:
+    result = select_memory_ids_by_category(memory_manager, "   ")
+
+    assert result.invalid_category
+    assert not result.zero_matches
+    assert not result.failed
+
+
+# --- Zero records vs. invalid category vs. lookup failure -------------------
+
+
+def test_valid_category_with_zero_records(memory_manager: MemoryManager) -> None:
+    result = select_memory_ids_by_category(memory_manager, "preference")
+
+    assert result.zero_matches
+    assert not result.success
+    assert not result.invalid_category
+    assert not result.failed
+    assert result.category == "preference"
+    assert result.selected_ids == ()
+    assert result.error is None
+
+
+def test_category_lookup_exception_is_represented_as_failed() -> None:
+    result = select_memory_ids_by_category(
+        _RaisingCategoryMemoryManager(), "project"
+    )
+
+    assert result.failed
+    assert not result.success
+    assert not result.zero_matches
+    assert not result.invalid_category
+    assert result.category == "project"
+    assert result.selected_ids == ()
+    assert result.error == "Could not look up stored memories by category right now."
+
+
+def test_zero_matches_and_invalid_category_and_failed_are_all_distinct(
+    memory_manager: MemoryManager,
+) -> None:
+    zero_result = select_memory_ids_by_category(memory_manager, "note")
+    invalid_result = select_memory_ids_by_category(memory_manager, "spaceships")
+    failed_result = select_memory_ids_by_category(
+        _RaisingCategoryMemoryManager(), "note"
+    )
+
+    assert zero_result.zero_matches and not zero_result.invalid_category and not zero_result.failed
+    assert invalid_result.invalid_category and not invalid_result.zero_matches and not invalid_result.failed
+    assert failed_result.failed and not failed_result.zero_matches and not failed_result.invalid_category
+
+
+# --- CategorySelectionResult invariants -------------------------------------
+
+
+def test_invalid_category_result_rejects_coexisting_error() -> None:
+    with pytest.raises(ValueError):
+        CategorySelectionResult(invalid_category=True, error="boom")
+
+
+def test_invalid_category_result_rejects_coexisting_selected_ids() -> None:
+    with pytest.raises(ValueError):
+        CategorySelectionResult(invalid_category=True, selected_ids=(1, 2))
+
+
+def test_invalid_category_result_rejects_coexisting_category() -> None:
+    with pytest.raises(ValueError):
+        CategorySelectionResult(invalid_category=True, category="project")
+
+
+def test_non_invalid_result_requires_a_category() -> None:
+    with pytest.raises(ValueError):
+        CategorySelectionResult(selected_ids=(1,))
+
+
+def test_result_rejects_error_and_selected_ids_together() -> None:
+    with pytest.raises(ValueError):
+        CategorySelectionResult(category="project", selected_ids=(1, 2), error="boom")
+
+
+def test_all_defaults_construction_is_incoherent_and_rejected() -> None:
+    # Plain CategorySelectionResult() defaults to invalid_category=False
+    # and category=None - an incoherent combination (every non-invalid
+    # state requires a canonical category), so it must raise rather than
+    # silently construct a meaningless "successful" empty result. The only
+    # way to construct a valid, all-empty-fields result is explicitly
+    # passing invalid_category=True (proven by
+    # test_unknown_category_is_rejected_without_any_lookup above, which
+    # exercises that exact construction via the real selector function).
+    with pytest.raises(ValueError):
+        CategorySelectionResult()
+
+
+# --- No Phase 10 ingestion or AI/provider involvement (category path) ------
+
+
+def test_does_not_call_ingestion_or_ai_during_category_selection(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "a memory for the no-ingestion proof", category="note")
+
+    result = select_memory_ids_by_category(memory_manager, "note")
+
+    assert result.success
+    assert isinstance(result, CategorySelectionResult)
+
+
+def test_no_duplicate_ids_across_multiple_real_category_matches(
+    memory_manager: MemoryManager,
+) -> None:
+    # The store performs a single, non-joining filter over one table, so a
+    # matching row can never be returned more than once - proven here
+    # directly rather than simulating an artificial duplicate scenario the
+    # real store cannot produce.
+    ids = [
+        _save(memory_manager, f"dup-check {i}", category="project")
+        for i in range(6)
+    ]
+
+    result = select_memory_ids_by_category(memory_manager, "project")
+
+    assert len(result.selected_ids) == len(set(result.selected_ids))
+    assert set(result.selected_ids) == set(ids)

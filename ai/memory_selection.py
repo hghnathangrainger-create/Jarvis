@@ -1,29 +1,47 @@
 """
 memory_selection.py
 
-Deterministic query-based memory selection for the Jarvis AI Operating
-System (Phase 11, Batch 1: Deterministic Query-Based Memory Selection
-Foundation).
+Deterministic, non-id-based memory selection for the Jarvis AI Operating
+System. Query-based selection was added in Phase 11, Batch 1
+(Deterministic Query-Based Memory Selection Foundation); category-based
+selection was added in Phase 12, Batch 1 (Deterministic Category-Based
+Memory Selection Foundation) as a sibling capability in this same module,
+mirroring how ai/memory_ingestion.py already houses both its single- and
+multi-record ingestion responsibilities together.
 
 Responsibilities:
-    - Accept an explicit, caller-supplied query string and invoke the
-      existing, unmodified MemoryManager.search() with the fixed Phase 11
-      selection ceiling (docs/phase_11_implementation_plan.md, Section
-      5.1: limit=10, matching core/orchestrator.py's own
+    - Query selection: accept an explicit, caller-supplied query string
+      and invoke the existing, unmodified MemoryManager.search() with the
+      fixed Phase 11 selection ceiling (docs/phase_11_implementation_plan.md,
+      Section 5.1: limit=10, matching core/orchestrator.py's own
       _MAX_MEMORY_SET_SIZE and ai/memory_ingestion.py's own
       _DEFAULT_MAX_RECORDS).
-    - Preserve MemoryManager.search()'s own result order exactly - no
-      re-sorting, no deduplication, no candidate-pool reduction (Phase 11
-      plan, Section 5.2).
-    - Extract only the ordered memory ids from the search results, never
-      their content.
+    - Category selection: accept an explicit, caller-supplied category
+      string, defensively validate it against the existing
+      is_known_category() helper before ever calling
+      MemoryManager.list_by_category() or normalize_category(), and
+      invoke list_by_category() with the fixed Phase 12 selection ceiling
+      (docs/phase_12_implementation_plan.md, Section 7.2: limit=10).
+    - Preserve MemoryManager.search()'s/list_by_category()'s own result
+      order exactly for both selectors - no re-sorting, no deduplication,
+      no candidate-pool reduction (Phase 11 plan, Section 5.2; Phase 12
+      plan, Section 7.1).
+    - Extract only the ordered memory ids from the results, never their
+      content.
     - Represent every outcome as data, mirroring ai/memory_ingestion.py's
-      MemoryIngestionResult/MemorySetIngestionResult convention: a
-      successful, non-empty selection; a successful search that matched
-      nothing (zero matches); and a search-layer failure are three
-      distinct, never-collapsed states (Phase 11 plan, Sections 8, 12.2.1).
+      MemoryIngestionResult/MemorySetIngestionResult convention. Query
+      selection has three distinct, never-collapsed states (success, zero
+      matches, search failure - Phase 11 plan, Sections 8, 12.2.1).
+      Category selection has four distinct, never-collapsed states
+      (success, zero matches, invalid category, lookup failure - Phase 12
+      plan, Sections 5.3, 6, 8), because an unknown category is a
+      genuinely different, more severe kind of input problem than an
+      empty search query: reusing MemoryManager.list_by_category()
+      directly with an unvalidated category would let
+      normalize_category() silently substitute "general" rather than
+      failing, honestly or otherwise (Phase 12 plan, Section 2.1).
 
-Does NOT:
+Does NOT (query selection, Phase 11):
     - Reject, strip, normalise, or otherwise pre-validate the query
       string. MemoryManager.search() already returns an empty result for
       an empty or whitespace-only query
@@ -44,29 +62,57 @@ Does NOT:
       as ai/memory_ingestion.py already calls MemoryManager.get()
       directly - the same disclosed, accepted bypass of MemoryTool's own
       formatting/clamping layer (Phase 11 plan, Section 7.1).
+    - Rely on MemoryManager.search()'s own default limit (20). The fixed
+      Phase 11 selection ceiling (10) is always passed explicitly.
+
+Does NOT (category selection, Phase 12):
+    - Ever call MemoryManager.list_by_category() or normalize_category()
+      with a category that has not already passed is_known_category() -
+      the defensive validation is this module's own, not merely relied
+      upon from a caller (Phase 12 plan, Section 5.3, Candidate B). An
+      unknown category never reaches the lookup call, so
+      normalize_category()'s own silent "general" fallback never has an
+      opportunity to fire from this path.
+    - Invent aliases, fuzzy matching, or any AI-based category inference.
+      KNOWN_CATEGORIES/normalize_category()/is_known_category() remain
+      the sole source of truth, imported and reused directly.
+    - Call MemoryTool as a category-lookup proxy, or perform any direct
+      SQL/filtering logic locally - MemoryManager.list_by_category() is
+      called directly, unchanged, exactly once per selection attempt.
+    - Rely on MemoryManager.list_by_category()'s own default limit (20).
+      The fixed Phase 12 selection ceiling (10) is always passed
+      explicitly.
+
+Does NOT (both selectors):
     - Retrieve memory content, construct an AIContextBlock, assign
       ContentTrust, or call PromptBuilder, AIRouter, AIReasoningEngine, or
-      any AI provider. This module answers exactly one question: which
-      ordered ids did the existing deterministic search return? Turning
-      those ids into AI-facing context remains exclusively
+      any AI provider. This module answers exactly one question per
+      selector: which ordered ids did the existing deterministic
+      mechanism return for this validated input? Turning those ids into
+      AI-facing context remains exclusively
       ai/memory_ingestion.py's ingest_memories_for_ai(), called
-      afterward, unchanged, by a future Batch 2 caller (Phase 11 plan,
-      Sections 11, 12).
+      afterward, unchanged, by a future orchestrator caller (Phase 11
+      plan, Sections 11, 12; Phase 12 plan, Section 11).
     - Duplicate any part of MemorySetIngestionResult,
       ingest_memories_for_ai(), _truncate(), combined-context
       framing/budgeting, whole-record omission, or partial-success
       accounting - all of that remains Phase 10's, untouched and reused
       unchanged by a future caller.
-    - Emit any audit/observability event. The memory_query_selection audit
-      event is an orchestrator/workflow concern, assigned to Batch 2
-      (Phase 11 plan, Section 12.2), not this primitive.
-    - Retry, rank, or otherwise second-guess a search-layer exception - a
-      raised exception is caught once, at this module's own boundary, and
-      represented as a single, honest failure state.
-    - Rely on MemoryManager.search()'s own default limit (20). The fixed
-      Phase 11 selection ceiling (10) is always passed explicitly.
+    - Emit any audit/observability event. Both the memory_query_selection
+      and memory_category_selection audit events are
+      orchestrator/workflow concerns, assigned to their respective Batch 2
+      (Phase 11 plan, Section 12.2; Phase 12 plan, Section 12), not this
+      primitive.
+    - Retry, rank, or otherwise second-guess a lookup-layer exception - a
+      raised exception is caught once, at this module's own boundary, for
+      the one call it wraps, and represented as a single, honest failure
+      state.
 
-This module is the only new production component Phase 11 Batch 1 adds.
+This module's only new production component in Phase 12 Batch 1 is the
+category-selection primitive; the existing Phase 11 query-selection
+primitive (select_memory_ids_by_query/QuerySelectionResult) is untouched
+in behaviour, per the explicit instruction not to generalise or rename
+Phase 11 APIs merely for symmetry.
 """
 
 from __future__ import annotations
@@ -74,6 +120,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from memory.memory_manager import MemoryManager
+from memory.memory_models import is_known_category, normalize_category
 
 #: The fixed Phase 11 selection ceiling (docs/phase_11_implementation_plan.md,
 #: Section 5.1). Deliberately identical to core/orchestrator.py's own
@@ -232,3 +279,245 @@ def select_memory_ids_by_query(
 
     selected_ids = tuple(record.id for record in records)
     return QuerySelectionResult(selected_ids=selected_ids, query_length=len(query))
+
+
+# ---------------------------------------------------------------------------
+# Category-based selection (Phase 12, Batch 1)
+# ---------------------------------------------------------------------------
+
+#: The fixed Phase 12 selection ceiling (docs/phase_12_implementation_plan.md,
+#: Section 7.2). Deliberately identical in value to _SELECTION_LIMIT above
+#: and to Phase 10's own max_records default, for the same reason Phase 11
+#: already established: the category-lookup limit and the Phase 10
+#: selection ceiling are equal by explicit design, not by coincidence, and
+#: remain two independently configurable numbers, never conflated as one
+#: concept in code.
+_CATEGORY_SELECTION_LIMIT = 10
+
+#: Honest, generic failure message for a genuine category-lookup exception.
+#: Deliberately does not embed the raised exception's own text, mirroring
+#: _SEARCH_FAILURE_MESSAGE's own convention above.
+_CATEGORY_LOOKUP_FAILURE_MESSAGE = (
+    "Could not look up stored memories by category right now."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CategorySelectionResult:
+    """The result of a deterministic, category-based memory-id selection.
+
+    Exactly one of four states applies, distinguished by the `success`,
+    `zero_matches`, `invalid_category`, and `failed` properties below -
+    never collapsed into one another, even though a future caller (Batch 2)
+    may map `zero_matches`, `invalid_category`, and `failed` to the same
+    EventOutcome.FAILURE audit value (docs/phase_12_implementation_plan.md,
+    Section 12).
+
+    Unlike QuerySelectionResult (Phase 11), whose `query_length` field
+    exists because a search query is arbitrary, potentially-sensitive free
+    text, this result carries the actual `category` value directly - a
+    category is always one of a small, fixed, non-sensitive set of known
+    strings (never arbitrary user free text), so storing and later logging
+    it directly is safe (Phase 12 plan, Section 6).
+
+    Attributes:
+        selected_ids: The ids of the records MemoryManager.list_by_
+            category() returned, in exactly the order it returned them -
+            never re-sorted, deduplicated, or reordered here. Empty for
+            every state except a non-empty success.
+        category: The canonical, validated category actually queried
+            (e.g. "project"), never the raw, as-supplied user spelling.
+            Present (non-None) for `success`, `zero_matches`, and `failed`
+            - every state where a real, known category was actually
+            established before a lookup was attempted or failed. `None`
+            only when `invalid_category` is True, since there is no
+            canonical category to report for input that was never valid
+            to begin with.
+        error: A human-readable failure reason, set only when the
+            underlying list_by_category() call itself raised. None
+            otherwise, including for `invalid_category` and zero matches.
+        invalid_category: True only when the supplied category failed
+            is_known_category() validation - no lookup was ever
+            attempted.
+    """
+
+    selected_ids: tuple[int, ...] = ()
+    category: str | None = None
+    error: str | None = None
+    invalid_category: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject any construction that does not represent a coherent outcome.
+
+        Raises:
+            ValueError: If `invalid_category` is True alongside a
+                non-None `error`, a non-empty `selected_ids`, or a non-None
+                `category` - an invalid-category result never claims a
+                canonical category, selected ids, or a lookup error,
+                since no lookup was ever attempted. Also raised if
+                `invalid_category` is False but `category` is None (every
+                other state requires a canonical category to have been
+                established), or if `error` is set alongside a non-empty
+                `selected_ids`.
+        """
+        if self.invalid_category:
+            if (
+                self.error is not None
+                or self.selected_ids
+                or self.category is not None
+            ):
+                raise ValueError(
+                    "CategorySelectionResult with invalid_category=True "
+                    "cannot also carry an error, selected_ids, or a "
+                    "category - no lookup was ever attempted for an "
+                    "invalid category."
+                )
+            return
+
+        if self.category is None:
+            raise ValueError(
+                "CategorySelectionResult must carry a canonical category "
+                "whenever invalid_category is False - success, "
+                "zero_matches, and failed all require a category that "
+                "already passed validation before a lookup was attempted "
+                "or failed."
+            )
+        if self.error is not None and self.selected_ids:
+            raise ValueError(
+                "CategorySelectionResult cannot carry both selected_ids "
+                "and an error - a represented lookup failure never claims "
+                "that any ids were actually selected."
+            )
+
+    @property
+    def success(self) -> bool:
+        """Return whether the lookup completed and matched at least one record.
+
+        Returns:
+            True only when `invalid_category` is False, `error` is None,
+            and `selected_ids` is non-empty.
+        """
+        return (
+            not self.invalid_category
+            and self.error is None
+            and bool(self.selected_ids)
+        )
+
+    @property
+    def zero_matches(self) -> bool:
+        """Return whether a valid category lookup completed but matched nothing.
+
+        Distinct from both `invalid_category` and `failed`: the supplied
+        category was genuinely known and the lookup itself succeeded - it
+        is a valid, deterministic fact that no stored memory currently has
+        this category.
+
+        Returns:
+            True only when `invalid_category` is False, `error` is None,
+            and `selected_ids` is empty.
+        """
+        return (
+            not self.invalid_category
+            and self.error is None
+            and not self.selected_ids
+        )
+
+    @property
+    def failed(self) -> bool:
+        """Return whether the underlying list_by_category() call itself raised.
+
+        Returns:
+            True only when `error` is set.
+        """
+        return self.error is not None
+
+    @property
+    def match_count(self) -> int:
+        """Return the number of selected ids.
+
+        Returns:
+            len(selected_ids).
+        """
+        return len(self.selected_ids)
+
+
+def select_memory_ids_by_category(
+    memory_manager: MemoryManager,
+    category: str,
+    *,
+    limit: int = _CATEGORY_SELECTION_LIMIT,
+) -> CategorySelectionResult:
+    """Select an ordered set of memory ids matching a category, deterministically.
+
+    Defensively validates `category` against the existing, unmodified
+    `is_known_category()` before anything else is attempted. An unknown
+    category never reaches `normalize_category()` or
+    `MemoryManager.list_by_category()` - this is the selector's own
+    correctness guarantee (docs/phase_12_implementation_plan.md, Section
+    5.3, Candidate B), not merely a convention a caller must remember to
+    uphold: without it, `normalize_category()` would silently substitute
+    `"general"` for any unrecognised category, which could select the
+    wrong records entirely rather than merely failing or returning empty.
+
+    For a category that passes validation, the canonical form (from
+    `normalize_category()`) is used for both the actual
+    `memory_manager.list_by_category()` call and this result's own
+    `category` field - never the raw, as-supplied spelling. Calls
+    `list_by_category(canonical, limit=limit)` exactly once - the sole
+    call site - and extracts only the ids of the returned records, in
+    exactly the order it returned them. Applies no ranking, no re-sorting,
+    no deduplication, and no candidate-pool reduction: whatever order and
+    whichever up-to-`limit` records `MemoryManager.list_by_category()`/
+    `EpisodicMemoryStore.list_recent()` returns is exactly what this
+    function reports (created_at DESC, id DESC, per the current store
+    implementation - see docs/phase_12_implementation_plan.md, Section
+    7.1).
+
+    An empty or whitespace-only `category` fails `is_known_category()`
+    exactly like any other unrecognised value (mirroring
+    `is_known_category("")` returning False) and therefore also resolves
+    to `invalid_category`, never to a silent `"general"` lookup - there is
+    no separate empty-input special case here (Phase 12 plan, Section 8).
+
+    Args:
+        memory_manager: The MemoryManager used to perform the lookup.
+        category: The caller-supplied category text, checked against
+            `is_known_category()` before any other use - not stripped or
+            altered here (that helper already strips/lower-cases
+            internally for its own comparison).
+        limit: The maximum number of records `memory_manager.
+            list_by_category()` may return. Defaults to the fixed Phase 12
+            selection ceiling (10). Production callers should not
+            override this; it exists as a parameter only so tests can
+            exercise the limit explicitly without relying on the
+            module-level default.
+
+    Returns:
+        A CategorySelectionResult. If `category` fails validation,
+        `invalid_category` is True, `category` is None, and no lookup is
+        attempted (`.invalid_category` is True). On a successful lookup
+        that matched at least one record, `selected_ids` carries the
+        ordered ids and `category` carries the canonical form (`.success`
+        is True). On a successful lookup that matched nothing,
+        `selected_ids` is empty and `category` still carries the
+        canonical form (`.zero_matches` is True). If
+        `list_by_category()` itself raises, `selected_ids` is empty,
+        `category` still carries the canonical form, and `error` carries
+        an honest, generic failure message (`.failed` is True) - the
+        raised exception's own text is never embedded in the returned
+        error.
+    """
+    if not is_known_category(category):
+        return CategorySelectionResult(invalid_category=True)
+
+    canonical = normalize_category(category)
+
+    try:
+        records = memory_manager.list_by_category(canonical, limit=limit)
+    except Exception:
+        return CategorySelectionResult(
+            category=canonical, error=_CATEGORY_LOOKUP_FAILURE_MESSAGE
+        )
+
+    selected_ids = tuple(record.id for record in records)
+    return CategorySelectionResult(selected_ids=selected_ids, category=canonical)

@@ -686,3 +686,176 @@ def test_match_memory_query_summary_does_not_change_existing_routing(
     assert router.match_memory_summary("summarise memory 42") == "42"
     assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
+
+
+# --- match_memory_category_summary(): category-based memory-summary command (Phase 12, Batch 2)
+
+
+def test_match_memory_category_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+
+
+def test_match_memory_category_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_category_summary("summarize memories in project")
+        == "project"
+    )
+
+
+def test_match_memory_category_summary_extracts_exact_raw_category_text(
+    router: CommandRouter,
+) -> None:
+    """The extracted text is the raw trailing category, unparsed and
+    unnormalised beyond the leading/trailing whitespace strip every other
+    summary matcher already applies - case and punctuation are preserved
+    exactly; validation/canonicalisation happen downstream."""
+    assert (
+        router.match_memory_category_summary("summarise memories in PROJECT")
+        == "PROJECT"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in spaceships")
+        == "spaceships"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in SYSTEM")
+        == "SYSTEM"
+    )
+
+
+def test_match_memory_category_summary_requires_the_in_grammar(
+    router: CommandRouter,
+) -> None:
+    """Without the literal "in" grammar, this is not a category-based
+    request at all - it falls through to the plural explicit-id matcher
+    (proven in the orchestrator-level workflow tests), never silently
+    treated as a category."""
+    assert router.match_memory_category_summary("summarise memories") is None
+    assert router.match_memory_category_summary("summarise memories 3, 7, 12") is None
+    assert router.match_memory_category_summary("summarise memory 42") is None
+    assert (
+        router.match_memory_category_summary("summarise memories about security")
+        is None
+    )
+
+
+def test_match_memory_category_summary_with_no_category_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_category_summary("summarise memories in") == ""
+    assert router.match_memory_category_summary("summarise memories in   ") == ""
+
+
+def test_match_memory_category_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_category_summary("summarise memories in   project   ")
+        == "project"
+    )
+
+
+def test_match_memory_category_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_category_summary("summarise the plan for me") is None
+    assert router.match_memory_category_summary("show memory 42") is None
+    assert router.match_memory_category_summary("forget memory 42") is None
+    assert router.match_memory_category_summary("summarise file report.txt") is None
+    assert router.match_memory_category_summary("show memories in project") is None
+    assert router.match_memory_category_summary("do a backflip") is None
+
+
+def test_match_memory_category_summary_does_not_require_any_registered_tool() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+
+
+def test_match_memory_category_summary_does_not_collide_with_plural_explicit_id(
+    router: CommandRouter,
+) -> None:
+    """The concrete collision found during planning (the same class Phase
+    11 already discovered): without the required "in" grammar, this
+    matcher must return None so the plural explicit-id matcher (checked
+    afterward by the orchestrator) can recognise its own command
+    unchanged."""
+    assert router.match_memory_category_summary("summarise memories 27, 12, 18") is None
+    assert router.match_memory_set_summary("summarise memories 27, 12, 18") == (
+        "27, 12, 18"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+
+
+def test_plural_matcher_alone_would_also_match_category_text_proving_the_collision(
+    router: CommandRouter,
+) -> None:
+    """Documents the concrete collision this batch's dispatch-order fix
+    resolves: match_memory_set_summary(), considered in isolation, DOES
+    also match "summarise memories in <category>" (its prefix is a plain
+    string prefix of the whole text), returning the wrong raw text
+    ("in project", not a valid id list). Disambiguation is not performed
+    by either matcher unilaterally - it is the caller
+    (JarvisOrchestrator.handle_request) checking the more specific
+    category matcher first that resolves this, proven end-to-end in
+    test_memory_category_summary_workflow.py."""
+    assert router.match_memory_set_summary(
+        "summarise memories in project"
+    ) == "in project"
+
+
+def test_match_memory_category_summary_does_not_collide_with_singular_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_category_summary("summarise memory 42") is None
+    assert router.match_memory_summary("summarise memories in project") is None
+
+
+def test_match_memory_category_summary_does_not_collide_with_query_command(
+    router: CommandRouter,
+) -> None:
+    """"summarise memories in" and "summarise memories about" diverge at
+    their second word - neither matcher ever swallows the other's
+    command."""
+    assert (
+        router.match_memory_category_summary("summarise memories about security")
+        is None
+    )
+    assert (
+        router.match_memory_query_summary("summarise memories in project") is None
+    )
+
+
+def test_match_memory_category_summary_does_not_change_existing_routing(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_category_summary must not change match()'s own
+    routing, match_memory_summary()'s own recognition,
+    match_memory_query_summary()'s own recognition,
+    match_memory_set_summary()'s own recognition, or
+    match_file_summary()'s own recognition (broad generic memory path
+    compatibility, including the pre-existing "show memories in
+    <category>" command)."""
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match("show memories in project") == "memory"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert (
+        router.match_memory_query_summary("summarise memories about security")
+        == "security"
+    )
+    assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"

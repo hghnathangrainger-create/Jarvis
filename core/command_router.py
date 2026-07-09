@@ -158,6 +158,27 @@ _MEMORY_QUERY_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memories about",
 )
 
+#: Leading phrases that indicate an explicit category-based memory-summary
+#: request (Phase 12, Batch 2). The text after the phrase is treated as the
+#: raw, unparsed trailing category text. This prefix is a strict
+#: superset-string of _MEMORY_SET_SUMMARY_PREFIXES below ("summarise
+#: memories in" starts with "summarise memories"), so the caller
+#: (JarvisOrchestrator.handle_request) MUST check
+#: match_memory_category_summary before match_memory_set_summary, or a
+#: category-based request would be incorrectly swallowed by the plural
+#: explicit-id matcher and rejected as an invalid id list
+#: (docs/phase_12_implementation_plan.md, Section 3.1/3.2 - the same
+#: collision class Phase 11 already discovered and fixed for its own
+#: "about" grammar). This prefix does not collide with
+#: _MEMORY_QUERY_SUMMARY_PREFIXES (Phase 11) in either direction:
+#: "summarise memories in" and "summarise memories about" diverge at their
+#: second word ("in" vs "about"), so check order between these two new
+#: matchers does not affect correctness.
+_MEMORY_CATEGORY_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise memories in",
+    "summarize memories in",
+)
+
 #: Leading phrases that indicate an explicit multi-memory-summary request
 #: (Phase 10, Batch 2). The text after the phrase is treated as the raw,
 #: unparsed trailing id-list text. Deliberately a separate, narrow match from
@@ -165,8 +186,9 @@ _MEMORY_QUERY_SUMMARY_PREFIXES: tuple[str, ...] = (
 #: character, so the two can never collide as prefixes of one another in
 #: either direction - verified directly, not merely assumed - so checking
 #: order between the singular and plural matchers does not matter. This
-#: prefix DOES collide with _MEMORY_QUERY_SUMMARY_PREFIXES above (it is a
-#: strict prefix of it) - see the ordering requirement documented there.
+#: prefix DOES collide with _MEMORY_QUERY_SUMMARY_PREFIXES and
+#: _MEMORY_CATEGORY_SUMMARY_PREFIXES above (it is a strict prefix of both)
+#: - see the ordering requirement documented there.
 _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarise memories",
     "summarize memories",
@@ -401,6 +423,51 @@ class CommandRouter:
         """
         lowered = text.casefold()
         prefix = self._file_prefix(lowered, _MEMORY_QUERY_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
+
+    def match_memory_category_summary(self, text: str) -> str | None:
+        """Match an explicit category-based memory-summary request and
+        extract its raw category text.
+
+        Recognises "summarise memories in <category>" and "summarize
+        memories in <category>" (Phase 12, Batch 2) - the category-based
+        sibling of match_memory_query_summary()/match_memory_set_summary().
+        Only the raw trailing text is extracted here, exactly as those
+        methods already do: category validation, canonicalisation, and
+        deterministic category lookup are the orchestrator/selector's
+        responsibility (docs/phase_12_implementation_plan.md, Section
+        4/5), not this router's. This method never interprets the category
+        semantically, never normalises or validates it, and never performs
+        natural-language routing of any kind - the only input it
+        recognises is the literal, required "in" grammar plus whatever
+        text follows it.
+
+        The caller MUST check this method before match_memory_set_summary():
+        "summarise memories in" is a strict superset-string of "summarise
+        memories", so checking the plural explicit-id matcher first would
+        incorrectly swallow a category-based request
+        (docs/phase_12_implementation_plan.md, Section 3.1/3.2). This
+        method does not collide with match_memory_summary() (singular) or
+        match_memory_query_summary() (Phase 11) in either direction:
+        "summarise memory" diverges at the word's 6th character ('y' vs
+        'i'), and "summarise memories about" diverges at the second word
+        ("about" vs "in") - so its position relative to either of those
+        checks does not affect correctness.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing category text if the text matches a
+            category-based memory-summary command - possibly empty, if
+            the phrase was used with no category text at all - or None if
+            the text does not match this command at all.
+        """
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _MEMORY_CATEGORY_SUMMARY_PREFIXES)
         if prefix is None:
             return None
 

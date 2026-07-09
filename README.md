@@ -15,6 +15,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 9 complete: Stored-Memory Ingestion for Advisory AI.**
 **Phase 10 complete: Multi-Memory Retrieval and Selection for Advisory AI.**
 **Phase 11 complete: Deterministic Query-Based Memory Selection for Advisory AI.**
+**Phase 12 complete: Deterministic Category-Based Memory Selection for Advisory AI.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -30,9 +31,11 @@ Phase 10 extends that same trust boundary to more than one memory at once: an ex
 
 Phase 11 answers the question Phase 10 left open: an explicit `summarise memories about <query>` command deterministically **searches** stored memory content for a query, selects up to 10 matching memories, and combines them the same way Phase 10 already does — still a plain, case-insensitive content-pattern match, not semantic search or AI-selected memory, and still scanned, still audited, still never able to gain new authority. See the Phase 11 section below.
 
+Phase 12 extends automatic selection to a second, complementary dimension: an explicit `summarise memories in <category>` command deterministically looks up stored memories already filed under one of your known categories (`general`, `personal`, `project`, `preference`, `note`) and combines them the same way Phase 10 already does. An unrecognised category is honestly rejected — it is never silently treated as a request for your general-category memories. See the Phase 12 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **1124 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–11 test, including all of Phase 11's batches.
+> **Verified:** `poetry run pytest -v` — **1267 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–12 test, including all of Phase 12's batches.
 
 ---
 
@@ -298,6 +301,32 @@ Semantic or vector memory retrieval, embeddings, similarity ranking, AI-selected
 
 ---
 
+## Phase 12 — Deterministic Category-Based Memory Selection for Advisory AI (complete)
+
+Phase 12 answers the question Phase 11 left open: an explicit `summarise memories in <category>` command deterministically looks up already-stored memories filed under one of your known categories and combines them for the advisory AI, reusing Phase 10's own combination architecture unchanged. It requires **a known category for every request**; an unrecognised category is honestly rejected rather than silently substituted with your general-category memories. See `docs/phase_12_completion_report.md` for the full write-up.
+
+- **Batch 1 — Deterministic category-based memory selection foundation.** A new selector deterministically looks up stored memories by category, using the repository's existing category helpers, capped at 10 matches, preserving the store's own result order exactly. Crucially, it checks whether a category is actually known *before* looking anything up, so a typo or unrecognised category can never be silently treated as a request for your general-category memories.
+- **Batch 2 — Category command and orchestrator wiring.** An explicit `summarise memories in <category>` (or `summarize memories in <category>`) command. A concrete command-routing collision — this command's own prefix is a superset of Phase 10's explicit-id command prefix, the same kind of collision Phase 11 already had — was found during planning and fixed the same way, so all three commands keep working exactly as intended.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against real, multiple saved memories across every known category, including a genuine stored-content injection attempt, this README section, and `docs/phase_12_completion_report.md`.
+
+### Category-based memory summary command
+
+| Command | What it does |
+|---|---|
+| `summarise memories in <category>` / `summarize memories in <category>` | Deterministically looks up stored memories already filed under the given category (GREEN, same authority as `show memories in <category>`), selects up to 10 matches, and asks the advisory AI to summarise them together. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI category memory summary - advisory only]`. The known categories are `general`, `personal`, `project`, `preference`, and `note` — the same categories Phase 5's `remember this as <category>: ...` command already uses. If the named category isn't one of these, Jarvis says so plainly, naming the known categories, rather than guessing or falling back to a different category. If a known category currently has no stored memories, or the lookup itself could not run, Jarvis says so plainly rather than presenting an empty or failed lookup as if it were a real summary. Up to 10 matching memories are selected; if more than 10 are in the category, Jarvis says so honestly rather than claiming to have compared or ranked them.
+
+### Safety note: category selects, it never trusts, executes, or silently substitutes
+
+Looking up stored memory by category is exactly as safe (GREEN, read-only) as looking it up already is via `show memories in <category>`. Every matched memory's content remains untrusted, exactly as it already is for every other summary command — a memory being *filed under* a category does not make it trusted. The category name itself is never mixed into that untrusted memory content; it is only ever used to select, and it reaches the advisory AI the same way any other typed request text already does. An unrecognised category is never silently treated as "general" — this is checked before any memories are looked up at all. As in Phase 7 through 11, any AI-suggested action arising from a category summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 12
+
+Semantic or vector memory retrieval, embeddings, similarity ranking, AI-selected or AI-classified categories, fuzzy or approximate category matching, multi-category or combined query-and-category selection, autonomous memory discovery, recency-based automatic selection, any change to `MemoryManager`, `MemoryTool`, `EpisodicMemoryStore`, or the category helper functions, any new AI execution authority, and any new approval gate for looking up or summarising memories by category. A category is deterministic, known-vocabulary selection only — it is never treated as an instruction, and it never changes what Jarvis is allowed to do.
+
+---
+
 ## Example Session
 
 ```
@@ -376,7 +405,8 @@ jarvis/
 │                   file-content and single/multi-memory ingestion for the
 │                   AI reasoning path (ai/file_ingestion.py,
 │                   ai/memory_ingestion.py), and deterministic query-based
-│                   memory selection (ai/memory_selection.py)
+│                   and category-based memory selection
+│                   (ai/memory_selection.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
@@ -405,10 +435,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 11 is complete**: Jarvis can now deterministically search stored memories by content and have the advisory AI summarise the matches together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_11_completion_report.md`, is **recency-based or category-based automatic memory selection** — each its own narrow, separately-scoped design review, reusing this phase's and Phase 10's combination architecture rather than reinventing it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
+**Phase 12 is complete**: Jarvis can now deterministically look up stored memories by a known category and have the advisory AI summarise the matches together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_12_completion_report.md`, is **recency-based automatic memory selection** ("summarise my most recent memories" or similar) — its own narrow, separately-scoped design review, reusing Phase 10's combination architecture rather than reinventing it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
 
 Resumable approvals and deeper but still-advisory AI assistance remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, and Phase 11 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, and Phase 12 are complete for their defined scope, not yet tagged. None is a finished product.*

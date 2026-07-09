@@ -43,13 +43,19 @@ from ai.memory_ingestion import (
     ingest_memories_for_ai,
     ingest_memory_for_ai,
 )
-from ai.memory_selection import QuerySelectionResult, select_memory_ids_by_query
+from ai.memory_selection import (
+    CategorySelectionResult,
+    QuerySelectionResult,
+    select_memory_ids_by_category,
+    select_memory_ids_by_query,
+)
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from config.constants import EventOutcome, SecurityTier
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse
 from memory.memory_manager import MemoryManager
+from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
 from planner.planner import Planner
 from security.security_manager import (
@@ -187,6 +193,46 @@ _MEMORY_QUERY_EMPTY_MESSAGE = (
 #: ai/prompt_builder.py's own audit_suspicious_injection convention of
 #: logging text_length rather than text.
 _MEMORY_QUERY_SELECTION_ACTION_TYPE = "memory_query_selection"
+
+#: Advisory label for a category-based memory-summary response's message
+#: (Phase 12, Batch 2). Distinct from the other summary labels for the
+#: same reason each of those is distinct from the others: this marks a
+#: response whose entire content *is* the AI's own advisory output about a
+#: deterministically category-selected set of memories, not an annotation
+#: appended to an already-decided response.
+_MEMORY_CATEGORY_SUMMARY_LABEL = "[AI category memory summary - advisory only]"
+_MEMORY_CATEGORY_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise these memories' contents."
+)
+_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for these memories right now."
+)
+_MEMORY_CATEGORY_MANAGER_NOT_AVAILABLE_MESSAGE = (
+    "Memory access is not available, so I can't look up memories by category."
+)
+#: Honest rejection message for a category-based summary request with no
+#: category text at all (docs/phase_12_implementation_plan.md, Section 8,
+#: category 1 - "empty category syntax", rejected before
+#: select_memory_ids_by_category() is ever called, mirroring Phase 11's
+#: own pre-selector rejection of an empty query).
+_MEMORY_CATEGORY_EMPTY_MESSAGE = (
+    "Please provide a category to look up, for example "
+    "'summarise memories in project'."
+)
+
+#: Action type for the orchestrator's own category-selection audit event
+#: (Phase 12, Batch 2). Reports that a deterministic category lookup was
+#: attempted and its outcome, distinct from the per-id memory_acquisition
+#: events Phase 10's ingestion still emits afterward for the ids the
+#: lookup selected (docs/phase_12_implementation_plan.md, Section 12/13).
+#: Unlike the query-selection event, the category value itself is logged
+#: directly when one was actually established - categories are a small,
+#: fixed, non-sensitive vocabulary (docs/phase_12_implementation_plan.md,
+#: Section 12) - but never for an invalid category, where no canonical
+#: category was ever established (CategorySelectionResult.category is
+#: None), so the field is omitted entirely rather than carrying the raw,
+#: unvalidated input or a fabricated "general" value.
+_MEMORY_CATEGORY_SELECTION_ACTION_TYPE = "memory_category_selection"
 
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
@@ -400,11 +446,13 @@ class JarvisOrchestrator:
         An explicit file-summary request ("summarise file <path>", Phase 8,
         Batch 2), singular memory-summary request ("summarise memory <id>",
         Phase 9, Batch 2), query-based memory-summary request ("summarise
-        memories about <query>", Phase 11, Batch 2), or explicit-id
-        multi-memory-summary request ("summarise memories <ids>", Phase 10,
-        Batch 2) is recognised first and handled by its own terminal path
-        (_handle_file_summary_request / _handle_memory_summary_request /
-        _handle_memory_query_summary_request /
+        memories about <query>", Phase 11, Batch 2), category-based
+        memory-summary request ("summarise memories in <category>", Phase
+        12, Batch 2), or explicit-id multi-memory-summary request
+        ("summarise memories <ids>", Phase 10, Batch 2) is recognised first
+        and handled by its own terminal path (_handle_file_summary_request /
+        _handle_memory_summary_request / _handle_memory_query_summary_request
+        / _handle_memory_category_summary_request /
         _handle_memory_set_summary_request) - it never reaches the
         rule-based handler below or _attach_ai_suggestion, since its entire
         response *is* the AI's own advisory output, not an annotation
@@ -419,16 +467,18 @@ class JarvisOrchestrator:
         consulted.
 
         Dispatch precedence is significant and deliberately ordered
-        (docs/phase_11_implementation_plan.md, Section 3.2.1): the
-        query-based matcher is checked BEFORE the explicit-id plural
-        matcher, because "summarise memories about" is a strict
-        superset-string of "summarise memories" - checking the plural
-        matcher first would incorrectly swallow a query-based request and
-        reject it as an invalid id list. The query-based matcher's
-        position relative to the singular matcher does not affect
-        correctness (their prefixes never collide), but it is placed
-        after it here to keep the singular-then-plural-id family visually
-        adjacent to its own new query-based sibling.
+        (docs/phase_11_implementation_plan.md, Section 3.2.1;
+        docs/phase_12_implementation_plan.md, Section 3.2): both the
+        query-based and category-based matchers are checked BEFORE the
+        explicit-id plural matcher, because "summarise memories about" and
+        "summarise memories in" are both strict superset-strings of
+        "summarise memories" - checking the plural matcher first would
+        incorrectly swallow either request and reject it as an invalid id
+        list. Neither matcher's position relative to the singular matcher,
+        nor relative to each other, affects correctness (none of their
+        prefixes collide with one another), but they are grouped together
+        here, immediately before the plural matcher they must both
+        precede.
 
         Args:
             user_request: The user's request in natural language.
@@ -460,6 +510,16 @@ class JarvisOrchestrator:
         if memory_query_summary_raw_text is not None:
             return self._handle_memory_query_summary_request(
                 memory_query_summary_raw_text, user_request, session_id
+            )
+
+        memory_category_summary_raw_text = (
+            self._command_router.match_memory_category_summary(
+                user_request.strip()
+            )
+        )
+        if memory_category_summary_raw_text is not None:
+            return self._handle_memory_category_summary_request(
+                memory_category_summary_raw_text, user_request, session_id
             )
 
         memory_set_summary_raw_ids = self._command_router.match_memory_set_summary(
@@ -898,6 +958,227 @@ class JarvisOrchestrator:
         response = JarvisResponse(
             success=True,
             message=f"{_MEMORY_QUERY_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
+    def _handle_memory_category_summary_request(
+        self, raw_category_text: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarise memories in <category>" request
+        (Phase 12, Batch 2).
+
+        This is a terminal response path, the category-based sibling of
+        _handle_memory_query_summary_request, generalised from a
+        deterministic search query to a deterministic category lookup. It
+        owns no category validation/canonicalisation beyond the one call
+        to ai.memory_selection.select_memory_ids_by_category() (which is
+        itself the defensive, authoritative correctness boundary - see
+        docs/phase_12_implementation_plan.md, Section 5.3), no memory
+        retrieval/combination beyond reusing
+        ai.memory_ingestion.ingest_memories_for_ai() unchanged, and no
+        unexpected-action logic of its own:
+
+            1. A Plan is generated normally, exactly as for every other
+               request.
+            2. The raw trailing category text CommandRouter.match_memory_
+               category_summary extracted is checked for emptiness here
+               (docs/phase_12_implementation_plan.md, Section 4/8, category
+               1) - a category-command phrase with no trailing text at all
+               fails honestly with no lookup attempted, no audit event,
+               and no AI ever consulted. This is the *only* pre-selector
+               check this method performs: whether the supplied text is a
+               *known* category is the selector's own responsibility, not
+               this method's (Section 5.3, Candidate B) - no second
+               category vocabulary is duplicated here.
+            3. Required collaborators (AI reasoning, then the
+               memory_manager) are confirmed available, each with its own
+               honest failure - mirroring the query workflow's own order.
+            4. ai.memory_selection.select_memory_ids_by_category() performs
+               the one deterministic category lookup, at the fixed Phase
+               12 selection ceiling (10), preserving the store's own
+               result order exactly. This method never calls
+               MemoryManager.list_by_category() itself, never calls
+               MemoryTool, and never ranks, reorders, or deduplicates the
+               selector's result.
+            5. The Phase 12 selection outcome is audited once
+               (_audit_memory_category_selection) - a new, narrow,
+               non-authoritative event distinct from Phase 10's per-id
+               acquisition events.
+            6. An invalid category, zero matching records, and a genuine
+               lookup failure each return their own distinct, honest
+               response - none of the three ever reaches ingestion or AI
+               reasoning. An unknown category (e.g. "spaceships") never
+               selects "general" memories: select_memory_ids_by_category()
+               already refused to call MemoryManager.list_by_category() at
+               all for it (Section 2.1/5.3).
+            7. On a non-empty selection, the ordered selected ids are
+               handed, unchanged and in the same order, into
+               ai.memory_ingestion.ingest_memories_for_ai() - the exact
+               same Phase 10 primitive the explicit-id and query-based
+               workflows already use, unmodified. This method never
+               constructs or combines an AIContextBlock itself.
+            8. The existing per-id acquisition audit
+               (_audit_memory_set_acquisition) fires exactly as it already
+               does for the explicit-id and query-based workflows.
+            9. If no id could be included, this fails honestly with the
+               ingestion result's own itemized error - the AI is never
+               consulted with no usable context.
+            10. On partial or full success, the one combined context_block
+                - already trust-tagged and labelled from the *included*
+                set by ingest_memories_for_ai - is forwarded, unchanged,
+                into a new AIReasoningRequest. The raw category text is
+                never included in this context_block; it reaches the AI
+                only as part of the live user_input, exactly as every
+                other summary command's own trailing text already does
+                (docs/phase_12_implementation_plan.md, Section 9).
+            11. AIReasoningEngine.reason() is called exactly as it always
+                is; this method has no ability to execute anything
+                regardless of what the AI returns.
+            12. Every AI-suggested action is evaluated through the
+                existing, unmodified _evaluate_unexpected_actions/
+                _audit_unexpected_action methods.
+            13. The response honestly distinguishes two separate layers of
+                accounting: the Phase 12 category-selection count (how
+                many memories are in the category) and Phase 10's own
+                itemized ingestion disclosure (not_found/retrieval_errors/
+                omitted_for_size/truncated_records) via the existing,
+                unmodified _build_memory_set_disclosure - neither is ever
+                mixed into, or fed back into, the untrusted memory context
+                the AI reasoned about. The category named in the response
+                is always the *canonical* value from
+                CategorySelectionResult.category (e.g. "project"), never
+                the raw, as-typed spelling (e.g. "PROJECT").
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            raw_category_text: The raw, unparsed trailing text extracted
+                by CommandRouter.match_memory_category_summary - possibly
+                empty.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced from at least one genuinely retrieved memory;
+            otherwise success=False with an honest explanation of which
+            stage did not complete (empty category, AI reasoning
+            disabled/unavailable, memory subsystem unavailable, invalid
+            category, zero matching records, a lookup failure, or no
+            usable context after ingestion) - never blocked or requiring
+            confirmation, since looking up and reading memories by
+            category is already GREEN and consulting advisory AI about
+            already-permitted content requires no new approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        category_text = raw_category_text.strip()
+        if not category_text:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_CATEGORY_EMPTY_MESSAGE,
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_CATEGORY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._memory_manager is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_CATEGORY_MANAGER_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        selection = select_memory_ids_by_category(self._memory_manager, category_text)
+        self._audit_memory_category_selection(selection, session_id)
+
+        if selection.invalid_category:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    f"'{category_text}' is not a known memory category. "
+                    "Known categories are: "
+                    + ", ".join(KNOWN_CATEGORIES)
+                    + "."
+                ),
+                plan=plan,
+            )
+
+        if selection.zero_matches:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    f"No stored memories are in the '{selection.category}' "
+                    "category."
+                ),
+                plan=plan,
+            )
+
+        if selection.failed:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    selection.error
+                    or "Could not look up stored memories by category right now."
+                ),
+                plan=plan,
+            )
+
+        ingestion = ingest_memories_for_ai(self._memory_manager, selection.selected_ids)
+        self._audit_memory_set_acquisition(ingestion, session_id)
+
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read those memories.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        match_count = len(selection.selected_ids)
+        memory_noun = "memory" if match_count == 1 else "memories"
+        summary = (
+            f"{summary} Found {match_count} {memory_noun} in category "
+            f"'{selection.category}'."
+        )
+
+        disclosure = self._build_memory_set_disclosure(ingestion)
+        if disclosure:
+            summary = f"{summary} {disclosure}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_MEMORY_CATEGORY_SUMMARY_LABEL} {summary}",
             plan=plan,
         )
 
@@ -1346,6 +1627,96 @@ class JarvisOrchestrator:
             # the authoritative query-based memory-summary workflow
             # already in progress - same precedent as
             # _emit_memory_acquisition_event and AIRouter._emit_audit_event.
+            pass
+
+    def _audit_memory_category_selection(
+        self,
+        selection: CategorySelectionResult,
+        session_id: int | None,
+    ) -> None:
+        """Record the category-based selection outcome (Phase 12, Batch 2).
+
+        A new, narrow, non-authoritative audit event distinct from Phase
+        10's per-id memory_acquisition events: this one describes the
+        category-lookup step itself (was a lookup attempted, what was its
+        outcome, how many/which ids did it select) exactly once per
+        category-based request, never repeating information the
+        subsequent per-id acquisition events already carry during
+        ingestion (docs/phase_12_implementation_plan.md, Section 12/15).
+
+        Unlike _audit_memory_query_selection, the category value itself is
+        logged directly - via `selection.category` - whenever one was
+        actually established (`success`, `zero_records`, and `failure`
+        alike), because categories are a small, fixed, non-sensitive
+        vocabulary, never arbitrary free text (docs/phase_12_
+        implementation_plan.md, Section 6/12). For `invalid_category`,
+        `selection.category` is always None (enforced by
+        CategorySelectionResult's own construction invariant), so the
+        `category=` field is omitted entirely from the detail string -
+        never the raw, unvalidated input, and never a fabricated
+        "general" value.
+
+        `success`, `zero_records`, `invalid_category`, and `failure` are
+        distinguished via an `outcome=` field inside detail, not by new
+        EventOutcome members: `zero_records`, `invalid_category`, and a
+        genuine lookup exception all map to the existing
+        EventOutcome.FAILURE value, mirroring how
+        _emit_memory_acquisition_event already distinguishes not_found/
+        retrieval_error/omitted_for_size failures via a `reason=` field
+        inside one shared FAILURE outcome.
+
+        When no logger is configured, this is a no-op, matching every
+        other optional-audit call site in this class. A raising logger is
+        caught here, scoped only around the emit() call itself, so a
+        failing audit event can never break the authoritative selection
+        outcome (including invalid-category rejection), the subsequent
+        Phase 10 ingestion, or the AI reasoning result already computed or
+        about to be computed - the same precedent as
+        _audit_memory_query_selection, _emit_memory_acquisition_event, and
+        AIRouter._emit_audit_event.
+
+        Args:
+            selection: The result of select_memory_ids_by_category().
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        if selection.success:
+            outcome = EventOutcome.SUCCESS
+            outcome_label = "success"
+        elif selection.invalid_category:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "invalid_category"
+        elif selection.zero_matches:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "zero_records"
+        else:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "failure"
+
+        detail = f"outcome={outcome_label}"
+        if selection.category is not None:
+            detail += f" category={selection.category}"
+        detail += (
+            f" match_count={len(selection.selected_ids)} "
+            f"selected_ids={','.join(str(i) for i in selection.selected_ids)}"
+        )
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_MEMORY_CATEGORY_SELECTION_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=SecurityTier.GREEN,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative category-based memory-summary workflow
+            # already in progress - same precedent as
+            # _audit_memory_query_selection and AIRouter._emit_audit_event.
             pass
 
     def _emit_memory_acquisition_event(
