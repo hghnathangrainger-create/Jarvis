@@ -46,10 +46,12 @@ from ai.memory_ingestion import (
 from ai.memory_selection import (
     CategorySelectionResult,
     QuerySelectionResult,
+    RecentCountSelectionResult,
     RecentSelectionResult,
     select_memory_ids_by_category,
     select_memory_ids_by_query,
     select_recent_memory_ids,
+    select_recent_memory_ids_by_count,
 )
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
@@ -279,6 +281,44 @@ _MEMORY_RECENT_LOOKUP_FAILURE_FALLBACK_MESSAGE = (
 #: plan's own reasoning for why that field would be redundant.
 _MEMORY_RECENT_SELECTION_ACTION_TYPE = "memory_recent_selection"
 
+#: Advisory label for a count-based recent-memory-summary response's
+#: message (Phase 14, Batch 2). Distinct from the other summary labels for
+#: the same reason each of those is distinct from the others: this marks a
+#: response whose entire content *is* the AI's own advisory output about a
+#: deterministically count-bounded recency-selected set of memories, not
+#: an annotation appended to an already-decided response.
+_MEMORY_RECENT_COUNT_SUMMARY_LABEL = (
+    "[AI recent-count memory summary - advisory only]"
+)
+#: Deliberately a fifth, independently-declared copy of the same wording
+#: every other memory-summary workflow already uses for these two
+#: messages (docs/phase_14_implementation_plan.md, Section 12) - not
+#: centralised in this batch, per the explicit instruction not to perform
+#: that refactor here.
+_MEMORY_RECENT_COUNT_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise these memories' contents."
+)
+_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for these memories right now."
+)
+_MEMORY_RECENT_COUNT_MANAGER_NOT_AVAILABLE_MESSAGE = (
+    "Memory access is not available, so I can't look up recent memories by count."
+)
+
+#: Action type for the orchestrator's own count-based recency-selection
+#: audit event (Phase 14, Batch 2). A new, distinct event from Phase 13's
+#: own memory_recent_selection - reusing that event would force it to
+#: handle two semantically different call shapes (a fixed command with no
+#: per-request variance, and a user-controlled one with genuine variance),
+#: silently altering an already-shipped event's meaning for the *existing*
+#: command too (docs/phase_14_implementation_plan.md, Section 8). Unlike
+#: Phase 13's event, this one does carry a `requested_count=` field - the
+#: user-supplied count is genuine, safe-to-log, per-request metadata, a
+#: small bounded integer once validated - but only when a valid count was
+#: actually established; omitted entirely, never a fabricated value, for
+#: an invalid count.
+_MEMORY_RECENT_COUNT_SELECTION_ACTION_TYPE = "memory_recent_count_selection"
+
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
 # EventOutcome values that ToolExecutor already logs purely at
@@ -494,13 +534,15 @@ class JarvisOrchestrator:
         memories about <query>", Phase 11, Batch 2), category-based
         memory-summary request ("summarise memories in <category>", Phase
         12, Batch 2), recent-memory-summary request ("summarise recent
-        memories", Phase 13, Batch 2), or explicit-id multi-memory-summary
-        request ("summarise memories <ids>", Phase 10, Batch 2) is
-        recognised first and handled by its own terminal path
-        (_handle_file_summary_request / _handle_memory_summary_request /
-        _handle_memory_query_summary_request /
-        _handle_memory_category_summary_request /
+        memories", Phase 13, Batch 2), count-based recent-memory-summary
+        request ("summarise latest <count> memories", Phase 14, Batch 2),
+        or explicit-id multi-memory-summary request ("summarise memories
+        <ids>", Phase 10, Batch 2) is recognised first and handled by its
+        own terminal path (_handle_file_summary_request /
+        _handle_memory_summary_request / _handle_memory_query_summary_request
+        / _handle_memory_category_summary_request /
         _handle_memory_recent_summary_request /
+        _handle_memory_recent_count_summary_request /
         _handle_memory_set_summary_request) - it never reaches the
         rule-based handler below or _attach_ai_suggestion, since its entire
         response *is* the AI's own advisory output, not an annotation
@@ -537,6 +579,19 @@ class JarvisOrchestrator:
         any other summary-family prefix in either direction
         (docs/phase_13_implementation_plan.md, Section 4.1/11). It would
         route identically from any position in this dispatch block.
+
+        The count-based recent-memory matcher (Phase 14) is checked
+        immediately after the fixed recent-memory matcher, grouped
+        narratively as the third member of the "recency family"
+        (category -> recent -> recent-count), but its position here is
+        likewise **not** a correctness requirement: "summarise latest
+        <count> memories" requires the literal "latest" keyword and a
+        mandatory "memories" suffix that no other summary-family prefix
+        shares, and its own exact grammar is never a superset-string of,
+        nor collides with, any of the other five matchers in either
+        direction (docs/phase_14_implementation_plan.md, Section 4.2/4.3).
+        It would route identically from any position in this dispatch
+        block.
 
         Args:
             user_request: The user's request in natural language.
@@ -583,6 +638,16 @@ class JarvisOrchestrator:
         if self._command_router.match_memory_recent_summary(user_request.strip()):
             return self._handle_memory_recent_summary_request(
                 user_request, session_id
+            )
+
+        memory_recent_count_summary_raw_text = (
+            self._command_router.match_memory_recent_count_summary(
+                user_request.strip()
+            )
+        )
+        if memory_recent_count_summary_raw_text is not None:
+            return self._handle_memory_recent_count_summary_request(
+                memory_recent_count_summary_raw_text, user_request, session_id
             )
 
         memory_set_summary_raw_ids = self._command_router.match_memory_set_summary(
@@ -1440,6 +1505,218 @@ class JarvisOrchestrator:
 
         return response
 
+    def _handle_memory_recent_count_summary_request(
+        self, raw_count_text: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle a "summarise latest <count> memories" request (Phase 14,
+        Batch 2).
+
+        This is a terminal response path, the count-bounded sibling of
+        _handle_memory_recent_summary_request, generalised from a fixed,
+        criterion-free newest-10 selection to a user-supplied, strictly
+        validated, bounded count. It owns no count validation beyond the
+        one call to
+        ai.memory_selection.select_recent_memory_ids_by_count(), no memory
+        retrieval/combination beyond reusing
+        ai.memory_ingestion.ingest_memories_for_ai() unchanged, and no
+        unexpected-action logic of its own - every one of those
+        responsibilities stays inside the components it calls, or in the
+        existing, unmodified Phase 7 Batch 4 methods:
+
+            1. A Plan is generated normally, exactly as for every other
+               request.
+            2. Required collaborators (AI reasoning, then the
+               memory_manager) are confirmed available, each with its own
+               honest failure - mirroring every other memory-summary
+               workflow's own order. There is no separate emptiness
+               pre-check here (unlike the query/category workflows):
+               CommandRouter.match_memory_recent_count_summary()'s
+               mandatory "memories" suffix already means there is no
+               realistic "keyword with nothing after it" case to
+               distinguish (docs/phase_14_implementation_plan.md, Section
+               4.4).
+            3. ai.memory_selection.select_recent_memory_ids_by_count()
+               performs the one strict count validation and, for a valid
+               count, the one deterministic recency lookup - delegating
+               internally, unchanged, to the existing
+               select_recent_memory_ids(). This method never calls
+               MemoryManager.list_recent() itself, never calls MemoryTool,
+               and never ranks, reorders, or deduplicates the selector's
+               result.
+            4. The Phase 14 selection outcome is audited once
+               (_audit_memory_recent_count_selection) - a new, narrow,
+               non-authoritative event distinct from Phase 13's own
+               memory_recent_selection event and from Phase 10's per-id
+               acquisition events.
+            5. An invalid count, zero stored memories, and a genuine
+               lookup failure each return their own distinct, honest
+               response - none of the three ever reaches ingestion or AI
+               reasoning. An out-of-range or malformed count (zero, over
+               the fixed maximum, non-numeric, or otherwise not entirely
+               digits) never selects a silently-clamped substitute count -
+               select_recent_memory_ids_by_count() already refused to call
+               select_recent_memory_ids() at all for it.
+            6. On a non-empty selection, the ordered selected ids are
+               handed, unchanged and in exactly the same newest-first
+               order, into ai.memory_ingestion.ingest_memories_for_ai() -
+               the exact same Phase 10 primitive every other
+               memory-summary workflow already uses, unmodified. This
+               method never constructs or combines an AIContextBlock
+               itself.
+            7. The existing per-id acquisition audit
+               (_audit_memory_set_acquisition) fires exactly as it already
+               does for the other four memory-summary workflows.
+            8. If no id could be included, this fails honestly with the
+               ingestion result's own itemized error - the AI is never
+               consulted with no usable context.
+            9. On partial or full success, the one combined context_block
+               - already trust-tagged and labelled from the *included*
+               set by ingest_memories_for_ai - is forwarded, unchanged,
+               into a new AIReasoningRequest. No recency-count bookkeeping
+               (the requested count, the "latest" criterion) is ever
+               included in this context_block; it reaches the AI only as
+               part of the live user_input, exactly as every other summary
+               command's own text already does.
+            10. AIReasoningEngine.reason() is called exactly as it always
+                is; this method has no ability to execute anything
+                regardless of what the AI returns.
+            11. Every AI-suggested action is evaluated through the
+                existing, unmodified _evaluate_unexpected_actions/
+                _audit_unexpected_action methods.
+            12. The response honestly distinguishes two separate layers of
+                accounting: the Phase 14 selection-count sentence, built
+                from the selector's own actual `match_count` - never the
+                raw `requested_count` - so a request for the latest 10
+                that only matched 6 stored memories is disclosed as 6, not
+                10; and Phase 10's own itemized ingestion disclosure
+                (not_found/retrieval_errors/omitted_for_size/
+                truncated_records) via the existing, unmodified
+                _build_memory_set_disclosure - neither is ever mixed into,
+                or fed back into, the untrusted memory context the AI
+                reasoned about.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            raw_count_text: The raw, unparsed, unvalidated count text
+                extracted by
+                CommandRouter.match_memory_recent_count_summary - possibly
+                non-numeric, out of range, or containing internal
+                whitespace.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced from at least one genuinely retrieved memory;
+            otherwise success=False with an honest explanation of which
+            stage did not complete (AI reasoning disabled/unavailable,
+            memory subsystem unavailable, an invalid count, no stored
+            memories at all, a lookup failure, or no usable context after
+            ingestion) - never blocked or requiring confirmation, since
+            looking up and reading the newest N stored memories is already
+            GREEN and consulting advisory AI about already-permitted
+            content requires no new approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_COUNT_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._memory_manager is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_COUNT_MANAGER_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        selection = select_recent_memory_ids_by_count(
+            self._memory_manager, raw_count_text
+        )
+        self._audit_memory_recent_count_selection(selection, session_id)
+
+        if selection.invalid_count:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    f"'{raw_count_text.strip()}' is not a valid memory "
+                    "count. Please provide a whole number from 1 to 10, "
+                    "for example 'summarise latest 5 memories'."
+                ),
+                plan=plan,
+            )
+
+        if selection.zero_matches:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_ZERO_RECORDS_MESSAGE,
+                plan=plan,
+            )
+
+        if selection.failed:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    selection.error
+                    or _MEMORY_RECENT_LOOKUP_FAILURE_FALLBACK_MESSAGE
+                ),
+                plan=plan,
+            )
+
+        ingestion = ingest_memories_for_ai(self._memory_manager, selection.selected_ids)
+        self._audit_memory_set_acquisition(ingestion, session_id)
+
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read those memories.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        match_count = selection.match_count
+        memory_noun = "memory" if match_count == 1 else "memories"
+        summary = f"{summary} Found {match_count} recent {memory_noun}."
+
+        disclosure = self._build_memory_set_disclosure(ingestion)
+        if disclosure:
+            summary = f"{summary} {disclosure}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_MEMORY_RECENT_COUNT_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
     def _handle_memory_set_summary_request(
         self, raw_ids_text: str, user_request: str, session_id: int | None
     ) -> JarvisResponse:
@@ -2049,6 +2326,97 @@ class JarvisOrchestrator:
             # the authoritative recent-memory-summary workflow already in
             # progress - same precedent as _audit_memory_category_selection
             # and AIRouter._emit_audit_event.
+            pass
+
+    def _audit_memory_recent_count_selection(
+        self,
+        selection: RecentCountSelectionResult,
+        session_id: int | None,
+    ) -> None:
+        """Record the count-based recency-selection outcome (Phase 14,
+        Batch 2).
+
+        A new, narrow, non-authoritative audit event distinct from Phase
+        13's own memory_recent_selection event and from Phase 10's per-id
+        memory_acquisition events: this one describes the count-lookup
+        step itself (was a lookup attempted, what was its outcome, how
+        many/which ids did it select) exactly once per count-based
+        request, never repeating information the subsequent per-id
+        acquisition events already carry during ingestion
+        (docs/phase_14_implementation_plan.md, Section 8).
+
+        Unlike _audit_memory_recent_selection (which carries no criterion
+        field at all, since the fixed Phase 13 command takes none), this
+        event does carry `requested_count` directly - via
+        `selection.requested_count` - whenever one was actually
+        established (`success`, `zero_records`, and `failure` alike),
+        because a validated count is always a small, bounded integer
+        (1-10), never arbitrary or sensitive free text (Phase 14 plan,
+        Section 8). For `invalid_count`, `selection.requested_count` is
+        always None (enforced by RecentCountSelectionResult's own
+        construction invariant), so the `requested_count=` field is
+        omitted entirely from the detail string - never the raw,
+        unvalidated input, and never a fabricated value.
+
+        `success`, `zero_matches`, `invalid_count`, and `failed` are
+        distinguished via an `outcome=` field inside detail, not by new
+        EventOutcome members: `zero_matches`, `invalid_count`, and a
+        genuine lookup exception all map to the existing
+        EventOutcome.FAILURE value, mirroring
+        _audit_memory_category_selection's own four-state convention.
+
+        When no logger is configured, this is a no-op, matching every
+        other optional-audit call site in this class. A raising logger is
+        caught here, scoped only around the emit() call itself, so a
+        failing audit event can never break the authoritative selection
+        outcome (including invalid-count rejection), the subsequent Phase
+        10 ingestion, or the AI reasoning result already computed or about
+        to be computed - the same precedent as
+        _audit_memory_recent_selection, _audit_memory_category_selection,
+        and AIRouter._emit_audit_event.
+
+        Args:
+            selection: The result of select_recent_memory_ids_by_count().
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        if selection.success:
+            outcome = EventOutcome.SUCCESS
+            outcome_label = "success"
+        elif selection.invalid_count:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "invalid_count"
+        elif selection.zero_matches:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "zero_records"
+        else:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "failure"
+
+        detail = f"outcome={outcome_label}"
+        if selection.requested_count is not None:
+            detail += f" requested_count={selection.requested_count}"
+        detail += (
+            f" match_count={len(selection.selected_ids)} "
+            f"selected_ids={','.join(str(i) for i in selection.selected_ids)}"
+        )
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_MEMORY_RECENT_COUNT_SELECTION_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=SecurityTier.GREEN,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative count-based recent-memory-summary workflow
+            # already in progress - same precedent as
+            # _audit_memory_recent_selection and AIRouter._emit_audit_event.
             pass
 
     def _emit_memory_acquisition_event(

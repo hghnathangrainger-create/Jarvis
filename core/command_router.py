@@ -30,6 +30,8 @@ request is matched changed as part of the move.
 
 from __future__ import annotations
 
+import re
+
 from tools.registry import ToolRegistry
 
 # Recognised intents map to a built-in tool and the input that tool expects.
@@ -212,6 +214,51 @@ _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
 _MEMORY_RECENT_SUMMARY_EXACT: tuple[str, ...] = (
     "summarise recent memories",
     "summarize recent memories",
+)
+
+#: The compiled, case-insensitive grammar for a count-based recent-memory-
+#: summary command (Phase 14, Batch 2): "summarise latest <count> memories"
+#: / "summarize latest <count> memories". Unlike every other summary-family
+#: matcher, which recognises a fixed prefix and treats everything after it
+#: as unconstrained trailing text, this is the first grammar in the
+#: repository requiring a fixed prefix AND a fixed, mandatory suffix
+#: ("memories" at the very end) - natural English count phrasing places
+#: the number before the noun, not at the end of the string, so a simple
+#: prefix-only extraction cannot express it (docs/phase_14_implementation_
+#: plan.md, Section 4.3). `fullmatch` requires the literal "memories" to be
+#: the final token, so any extra trailing text ("... memories about
+#: security", "... memories in project") fails the match entirely rather
+#: than being silently ignored; the required "latest" keyword and the
+#: required "memories" suffix mean this can never collide with
+#: _MEMORY_SET_SUMMARY_PREFIXES ("summarise memories"),
+#: _MEMORY_SUMMARY_PREFIXES ("summarise memory"), or
+#: _MEMORY_RECENT_SUMMARY_EXACT ("summarise recent memories" - no "latest"
+#: token) in either direction - confirmed by direct trace, not merely
+#: assumed (Phase 14 plan, Section 4.2/4.3). The captured group is the raw,
+#: unvalidated count text - this matcher recognises grammatical shape
+#: only; numeric validity is
+#: ai.memory_selection.select_recent_memory_ids_by_count()'s own concern
+#: (Phase 14 plan, Section 5.1).
+#:
+#: Batch 2 refinement over the plan's own illustrative `(.+)` capture
+#: group: `(\S+)` is used instead, requiring the captured segment to be a
+#: single, internally-whitespace-free token. This was found necessary
+#: while writing this batch's own non-match tests: a greedy `(.+)` would
+#: also match "summarise latest 5 stored memories", silently absorbing the
+#: extra qualifier word "stored" into the captured "count" text ("5
+#: stored") - a command the plan explicitly lists as a required
+#: non-match, not a match-with-invalid-content. `(\S+)` closes this gap -
+#: it cannot span the space between "5" and "stored", so that command now
+#: correctly fails to match at all - while preserving every other intended
+#: behaviour: a single malformed word ("five") still matches and is
+#: correctly deferred to select_recent_memory_ids_by_count() for
+#: rejection, and arbitrary internal whitespace around the digits (e.g.
+#: "latest  5  memories") is still tolerated by the surrounding `\s+`
+#: separators, now without even needing a downstream `.strip()` - `\S+`
+#: never captures leading/trailing whitespace to begin with. No Batch 1
+#: code is affected by this refinement.
+_MEMORY_RECENT_COUNT_SUMMARY_PATTERN = re.compile(
+    r"(?:summarise|summarize)\s+latest\s+(\S+)\s+memories", re.IGNORECASE
 )
 
 
@@ -528,6 +575,71 @@ class CommandRouter:
             present.
         """
         return text.strip().casefold() in _MEMORY_RECENT_SUMMARY_EXACT
+
+    def match_memory_recent_count_summary(self, text: str) -> str | None:
+        """Match a count-based recent-memory-summary request and extract
+        its raw count text.
+
+        Recognises "summarise latest <count> memories" and "summarize
+        latest <count> memories" (Phase 14, Batch 2) - the user-count-
+        bounded sibling of match_memory_recent_summary(). Unlike that
+        method (an exact match with no trailing content at all), this
+        grammar has real content to extract, so - like
+        match_memory_query_summary()/match_memory_category_summary()/
+        match_memory_set_summary() - it returns the raw captured text, or
+        None if the text does not have this exact shape.
+
+        This is the first summary-family grammar requiring both a fixed
+        prefix ("summarise latest"/"summarize latest") and a fixed,
+        mandatory suffix ("memories") with required content between them -
+        every other matcher only ever recognises a prefix and treats
+        everything after it as trailing text. `fullmatch` against the
+        compiled pattern means any extra trailing content after the final
+        "memories" ("... memories about security", "... memories in
+        project") fails the match entirely - it is never silently accepted
+        with the extra tokens ignored; a missing count ("summarise latest
+        memories") also fails to match, since the captured group requires
+        at least one non-whitespace character strictly between "latest "
+        and " memories"; and an extra qualifier word between the count and
+        "memories" ("summarise latest 5 stored memories") also fails to
+        match, since the captured group cannot span the whitespace
+        separating two words (docs/phase_14_implementation_plan.md,
+        Section 4.3).
+
+        This method performs no validation of the captured text beyond
+        recognising the grammatical shape: it does not check whether the
+        captured text is numeric, in range, or otherwise well-formed - a
+        grammatically complete but semantically invalid count (for example
+        "summarise latest five memories" or "summarise latest 55
+        memories") still matches and returns its raw text unchanged.
+        Numeric/range validation is
+        ai.memory_selection.select_recent_memory_ids_by_count()'s own
+        responsibility (Phase 14 plan, Section 5.1), mirroring exactly how
+        match_memory_category_summary() defers category validity to
+        select_memory_ids_by_category().
+
+        This method does not collide with match_memory_summary (singular),
+        match_memory_query_summary, match_memory_category_summary,
+        match_memory_recent_summary, or match_memory_set_summary in either
+        direction (Phase 14 plan, Section 4.2/4.3) - its position relative
+        to those checks in the caller's dispatch order does not affect
+        correctness.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The raw, unvalidated captured count text (a single,
+            internally-whitespace-free token) if text matches this exact
+            grammar - possibly non-numeric or out of range, if the phrase
+            was used with a malformed count - or None if the text does not
+            match this grammar at all.
+        """
+        match = _MEMORY_RECENT_COUNT_SUMMARY_PATTERN.fullmatch(text)
+        if match is None:
+            return None
+
+        return match.group(1)
 
     def match_memory_set_summary(self, text: str) -> str | None:
         """Match an explicit multi-memory-summary request and extract its

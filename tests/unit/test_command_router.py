@@ -990,3 +990,218 @@ def test_match_memory_recent_summary_does_not_change_existing_routing(
     )
     assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
+
+
+# --- match_memory_recent_count_summary(): count-based recent-memory-summary command (Phase 14, Batch 2)
+
+
+def test_match_memory_recent_count_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_recent_count_summary("summarise latest 5 memories")
+        == "5"
+    )
+
+
+def test_match_memory_recent_count_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_recent_count_summary("summarize latest 5 memories")
+        == "5"
+    )
+
+
+def test_match_memory_recent_count_summary_extracts_raw_count_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 10 memories"
+    ) == "10"
+
+
+def test_match_memory_recent_count_summary_does_not_normalise_leading_zero(
+    router: CommandRouter,
+) -> None:
+    """The router extracts the raw captured text unchanged - leading-zero
+    normalisation, like all numeric validity, belongs to
+    select_recent_memory_ids_by_count(), not this matcher."""
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 05 memories"
+    ) == "05"
+
+
+def test_match_memory_recent_count_summary_matches_structurally_invalid_count_text(
+    router: CommandRouter,
+) -> None:
+    """A grammatically-complete command with a semantically invalid count
+    still matches at the router level - numeric/range validity is deferred
+    to the selector, never rejected here."""
+    assert router.match_memory_recent_count_summary(
+        "summarise latest five memories"
+    ) == "five"
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 0 memories"
+    ) == "0"
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 55 memories"
+    ) == "55"
+
+
+def test_match_memory_recent_count_summary_does_not_match_missing_count(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise latest memories"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "summarize latest memories"
+    ) is None
+
+
+def test_match_memory_recent_count_summary_does_not_match_singular_memory(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 5 memory"
+    ) is None
+
+
+def test_match_memory_recent_count_summary_does_not_match_other_recency_wording(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise recent 5 memories"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "summarise 5 recent memories"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "summarise very latest 5 memories"
+    ) is None
+
+
+def test_match_memory_recent_count_summary_does_not_match_extra_qualifier(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 5 stored memories"
+    ) is None
+
+
+def test_match_memory_recent_count_summary_does_not_match_extra_trailing_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 5 memories about security"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 5 memories in project"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "summarise latest 5 memories!"
+    ) is None
+
+
+def test_match_memory_recent_count_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise the plan for me"
+    ) is None
+    assert router.match_memory_recent_count_summary("show memory 42") is None
+    assert router.match_memory_recent_count_summary("forget memory 42") is None
+    assert router.match_memory_recent_count_summary(
+        "summarise file report.txt"
+    ) is None
+    assert router.match_memory_recent_count_summary(
+        "show memories in project"
+    ) is None
+    assert router.match_memory_recent_count_summary("do a backflip") is None
+
+
+def test_match_memory_recent_count_summary_does_not_collide_with_recent_exact_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise recent memories"
+    ) is None
+    assert router.match_memory_recent_summary("summarise latest 5 memories") is False
+
+
+def test_match_memory_recent_count_summary_does_not_collide_with_plural_explicit_id(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise memories 27, 12, 18"
+    ) is None
+    assert router.match_memory_set_summary("summarise latest 5 memories") is None
+    assert (
+        router.match_memory_recent_count_summary("summarise latest 5 memories")
+        == "5"
+    )
+
+
+def test_match_memory_recent_count_summary_does_not_collide_with_singular_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary("summarise memory 42") is None
+    assert router.match_memory_summary("summarise latest 5 memories") is None
+
+
+def test_match_memory_recent_count_summary_does_not_collide_with_query_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise memories about security"
+    ) is None
+    assert (
+        router.match_memory_query_summary("summarise latest 5 memories") is None
+    )
+
+
+def test_match_memory_recent_count_summary_does_not_collide_with_category_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_recent_count_summary(
+        "summarise memories in project"
+    ) is None
+    assert (
+        router.match_memory_category_summary("summarise latest 5 memories")
+        is None
+    )
+
+
+def test_match_memory_recent_count_summary_does_not_require_any_registered_tool() -> (
+    None
+):
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+
+    assert (
+        router.match_memory_recent_count_summary("summarise latest 5 memories")
+        == "5"
+    )
+
+
+def test_match_memory_recent_count_summary_does_not_change_existing_routing(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_recent_count_summary must not change match()'s
+    own routing, or any other matcher's own recognition."""
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match("show memories in project") == "memory"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert (
+        router.match_memory_query_summary("summarise memories about security")
+        == "security"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+    assert router.match_memory_recent_summary("summarise recent memories") is True
+    assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
