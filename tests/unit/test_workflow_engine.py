@@ -816,6 +816,49 @@ def test_plan_step_tier_is_ignored_for_execution() -> None:
     assert result.overall_status is StepStatus.COMPLETED
 
 
+def test_plan_step_display_green_cannot_bypass_a_live_yellow_classification() -> (
+    None
+):
+    """The inverse and more security-critical direction (Phase 15, Batch
+    4): a step whose display tier says GREEN must still pause for
+    approval if the real action it names actually classifies YELLOW -
+    proving a stale/optimistic display tier can never silently skip the
+    approval gate."""
+    yellow_tool = _YellowTool("y")
+    engine, _, _approvals = _engine(yellow_tool)
+    green_labelled_yellow_step = PlanStep(
+        number=1,
+        description="Looks safe but isn't.",
+        action="placeholder",
+        tier=SecurityTier.GREEN,  # deliberately wrong/optimistic display metadata
+        reason="placeholder",
+        tool_name="y",
+    )
+    result = engine.run(_plan(green_labelled_yellow_step))
+    assert yellow_tool.calls == []  # not truly run - paused for approval
+    assert result.overall_status is StepStatus.WAITING
+    assert result.pending_approval_request is not None
+
+
+def test_plan_step_display_green_cannot_bypass_a_live_red_classification() -> None:
+    """Same inverse proof for RED: a GREEN-labelled step naming a real RED
+    action is blocked, never silently executed."""
+    red_tool = _RedTool("r")
+    engine, _, _approvals = _engine(red_tool)
+    green_labelled_red_step = PlanStep(
+        number=1,
+        description="Looks safe but isn't.",
+        action="placeholder",
+        tier=SecurityTier.GREEN,
+        reason="placeholder",
+        tool_name="r",
+    )
+    result = engine.run(_plan(green_labelled_red_step))
+    assert red_tool.calls == []
+    assert result.overall_status is StepStatus.FAILED
+    assert result.step_outcomes[0].tool_result.blocked is True
+
+
 def test_engine_module_imports_no_security_manager_or_tool_registry() -> None:
     import workflow.engine as module
 
@@ -887,3 +930,128 @@ def test_every_except_exception_wraps_only_emit() -> None:
     # A single Pass statement (after the comment, which is not an AST node).
     assert len(body) == 1
     assert isinstance(body[0], ast.Pass)
+
+
+# --- Paused-workflow timeout leak (Phase 15, Batch 4) -------------------------
+#
+# Directly caused by Phase 15's own integration: ApprovalManager's existing
+# YELLOW timeout policy already expires an unanswered approval request on its
+# own, but nothing previously told WorkflowEngine to give up its own paused
+# state when that happened - since Phase 15 permits only one active/paused
+# workflow at a time, an expired approval would otherwise permanently block
+# every future run() call for the remaining lifetime of the instance.
+
+
+class _FakeClock:
+    """A settable clock, matching test_approval_manager_timeout.py's own
+    convention, so elapsed time can be simulated exactly."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def _engine_with_timeout(
+    tool: BaseTool, *, timeout_seconds: int, clock: _FakeClock
+) -> tuple[WorkflowEngine, ApprovalManager]:
+    security = _security()
+    registry = _registry(tool)
+    executor = _executor(registry, _RecordingLogger(), security)
+    approvals = ApprovalManager(timeout_seconds=timeout_seconds, clock=clock)
+    return (
+        WorkflowEngine(executor=executor, approvals=approvals, logger=_RecordingLogger()),
+        approvals,
+    )
+
+
+def test_expired_approval_is_reaped_and_unblocks_a_new_run() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fake_clock = _FakeClock(start)
+    yellow = _YellowTool("y")
+    engine, approvals = _engine_with_timeout(yellow, timeout_seconds=60, clock=fake_clock)
+
+    engine.run(_plan(_step(1, "y")))
+
+    # Advance time past the 60-second YELLOW window without ever resuming.
+    fake_clock.now = start + timedelta(seconds=61)
+
+    # A brand new workflow can now start - the stale paused state was reaped.
+    result = engine.run(_plan(_step(1, "y")))
+    assert result.overall_status in (StepStatus.COMPLETED, StepStatus.WAITING)
+
+
+def test_has_paused_reports_false_once_approval_expires() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fake_clock = _FakeClock(start)
+    yellow = _YellowTool("y")
+    engine, _approvals = _engine_with_timeout(yellow, timeout_seconds=60, clock=fake_clock)
+
+    result = engine.run(_plan(_step(1, "y")))
+    assert engine.has_paused(result.workflow_id) is True
+
+    fake_clock.now = start + timedelta(seconds=61)
+    assert engine.has_paused(result.workflow_id) is False
+
+
+def test_legitimate_pending_approval_is_not_reaped() -> None:
+    """The critical distinction this fix depends on: has_pending() also
+    returns False the instant a request is legitimately decided - reaping
+    must not be triggered by that, only by genuine expiry with no decision
+    recorded at all."""
+    yellow = _YellowTool("y")
+    engine, _, approvals = _engine(yellow)
+
+    result = engine.run(_plan(_step(1, "y")))
+    assert engine.has_paused(result.workflow_id) is True
+
+    decision = approvals.approve(result.pending_approval_request.request_id)
+    # At this exact point, ApprovalManager.has_pending() is already False
+    # (the request was just decided) - but the paused workflow must survive
+    # so resume() can still use it.
+    assert engine.has_paused(result.workflow_id) is True
+
+    resumed = engine.resume(result.workflow_id, decision)
+    assert resumed.overall_status is StepStatus.COMPLETED
+    assert len(yellow.calls) == 1
+
+
+# --- ToolExecutor logger-failure investigation (Phase 15, Batch 4) ----------
+#
+# Honest documentation of a real, pre-existing (not Phase-15-introduced)
+# characteristic: ToolExecutor.execute()'s own logger.emit() calls are not
+# wrapped in any try/except at all (unlike WorkflowEngine's own new workflow_*
+# events, or the narrow, optional-audit isolation pattern used elsewhere in
+# this codebase, e.g. core.orchestrator._emit_memory_acquisition_event). A
+# raising ToolExecutor logger therefore propagates, uncaught, out of
+# WorkflowEngine.run()/resume() (and out of the pre-existing single-step
+# _handle_request_core path too - this is not new to Phase 15). This is
+# classified as pre-existing architectural debt exposed - not caused, and not
+# fixed - by Phase 15's own integration; see the Batch 4 report for the full
+# classification. This test proves the actual, current behaviour rather than
+# asserting isolation that does not exist.
+
+
+def test_toolexecutor_logger_failure_propagates_uncaught_through_workflow_engine() -> (
+    None
+):
+    """Honest finding, not a regression test for a fix: this failure mode
+    is real, pre-existing, and out of Batch 4's authorised scope to change.
+    A raising ToolExecutor logger is NOT isolated - it propagates all the
+    way out of WorkflowEngine.run(), exactly as it already does out of the
+    pre-existing single-step orchestrator path."""
+    security = _security()
+    registry = _registry(_GreenTool("a"))
+    executor = ToolExecutor(
+        registry=registry, security_manager=security, logger=_FailingLogger()
+    )
+    approvals = ApprovalManager()
+    engine = WorkflowEngine(executor=executor, approvals=approvals, logger=_RecordingLogger())
+
+    with pytest.raises(RuntimeError, match="simulated logger failure"):
+        engine.run(_plan(_step(1, "a")))

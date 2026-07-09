@@ -57,7 +57,7 @@ from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
-from core.request_models import JarvisRequest, JarvisResponse
+from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -685,7 +685,7 @@ class JarvisOrchestrator:
     @staticmethod
     def _workflow_result_to_response(result: WorkflowResult) -> JarvisResponse:
         """Translate a WorkflowResult into a JarvisResponse (Phase 15,
-        Batch 3).
+        Batch 3; workflow_trace added Batch 4).
 
         Deliberately never sets tool_name/tool_input on the returned
         response, unlike the ordinary single-tool YELLOW-pending path: a
@@ -707,10 +707,12 @@ class JarvisOrchestrator:
             carries the real pending ApprovalRequest, no completion
             claim), or FAILED (not successful, blocked only when the
             terminal step's own ToolResult reports blocked, no fabricated
-            approval request).
+            approval request) - always carrying an honest, post-run
+            workflow_trace of every step actually attempted, in order.
         """
         last_outcome = result.step_outcomes[-1] if result.step_outcomes else None
         last_tool_result = last_outcome.tool_result if last_outcome else None
+        trace = JarvisOrchestrator._build_workflow_trace(result)
 
         if result.overall_status is StepStatus.WAITING:
             return JarvisResponse(
@@ -720,6 +722,7 @@ class JarvisOrchestrator:
                 tool_result=last_tool_result,
                 requires_confirmation=True,
                 approval_request=result.pending_approval_request,
+                workflow_trace=trace,
             )
 
         if result.overall_status is StepStatus.FAILED:
@@ -730,6 +733,7 @@ class JarvisOrchestrator:
                 plan=result.plan,
                 tool_result=last_tool_result,
                 blocked=blocked,
+                workflow_trace=trace,
             )
 
         final_output = last_tool_result.output if last_tool_result else ""
@@ -738,8 +742,56 @@ class JarvisOrchestrator:
             success=True,
             message=message,
             plan=result.plan,
+            workflow_trace=trace,
             tool_result=last_tool_result,
         )
+
+    @staticmethod
+    def _build_workflow_trace(
+        result: WorkflowResult,
+    ) -> tuple[WorkflowTraceStep, ...]:
+        """Build the honest, post-run execution trace for a WorkflowResult
+        (Phase 15, Batch 4).
+
+        Converts each WorkflowStepOutcome that was actually attempted into
+        a narrow, CLI-safe WorkflowTraceStep - never exposing
+        WorkflowStepOutcome, ToolResult, ApprovalRequest, or tool_input
+        directly. This is explicitly a record of what already happened by
+        the time WorkflowEngine.run()/resume() returned, not a live or
+        streaming progress feed: no entry exists here for a step that was
+        never reached, and no entry is ever fabricated.
+
+        Args:
+            result: The WorkflowResult to summarise.
+
+        Returns:
+            An ordered tuple of WorkflowTraceStep, one per attempted step,
+            in the exact order WorkflowEngine produced them.
+        """
+        total = len(result.plan.steps)
+        trace: list[WorkflowTraceStep] = []
+        for outcome in result.step_outcomes:
+            if outcome.status is StepStatus.WAITING:
+                message = (
+                    outcome.approval_request.reason
+                    if outcome.approval_request is not None
+                    else ""
+                )
+            elif outcome.tool_result is not None:
+                message = outcome.tool_result.output or outcome.tool_result.error or ""
+            else:
+                message = ""
+
+            trace.append(
+                WorkflowTraceStep(
+                    step_number=outcome.step.number,
+                    total_steps=total,
+                    description=outcome.step.description,
+                    status=outcome.status.value,
+                    message=message,
+                )
+            )
+        return tuple(trace)
 
     def handle_request(
         self, user_request: str, *, session_id: int | None = None

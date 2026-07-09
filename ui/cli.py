@@ -142,6 +142,19 @@ def format_response(response: JarvisResponse) -> str:
                 f"          {step.number}. [{step.tier.name}] {step.description}"
             )
 
+    # Phase 15, Batch 4: an honest, post-run execution trace for a workflow
+    # response - every step here already ran (or is now waiting) by the time
+    # this response was built. This is never a live or streaming progress
+    # feed; it is rendered once, after WorkflowEngine.run()/resume() has
+    # already returned, exactly like the plan section above it.
+    if response.workflow_trace:
+        lines.append("        workflow steps:")
+        for step in response.workflow_trace:
+            lines.append(
+                f"          {step.step_number}/{step.total_steps} "
+                f"[{step.status}] {step.description} - {step.message}"
+            )
+
     # Advisory only: the AI suggestion is shown for the user's information. It
     # is produced after the outcome is already decided and never affects it.
     if response.ai_suggestion:

@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from approval.approval_manager import ApprovalManager
-from approval.approval_models import ApprovalDecision, ApprovalRequest
+from approval.approval_models import ApprovalDecision, ApprovalError, ApprovalRequest
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
 from tools.base_tool import ToolResult
@@ -129,6 +129,7 @@ class _PausedWorkflow:
     completed_outcomes: tuple[WorkflowStepOutcome, ...]
     waiting_step_index: int
     resolved_tool_input: dict[str, object]
+    request_id: str
 
 
 class WorkflowEngine:
@@ -184,11 +185,51 @@ class WorkflowEngine:
 
         Returns:
             True only if that exact id is this instance's own currently
-            paused workflow. A different WorkflowEngine instance's paused
-            workflow, an unknown id, or a terminal (completed/failed) id
-            are all reported as False.
+            paused workflow, and its approval request is still genuinely
+            pending. A different WorkflowEngine instance's paused
+            workflow, an unknown id, a terminal (completed/failed) id, or
+            a paused id whose approval window has since expired (Phase
+            15, Batch 4) are all reported as False.
         """
+        self._reap_stale_paused()
         return workflow_id in self._paused
+
+    def _reap_stale_paused(self) -> None:
+        """Clear a paused workflow whose approval request has genuinely
+        expired (Phase 15, Batch 4).
+
+        Closes an in-memory leak directly caused by Phase 15's own
+        integration: ApprovalManager's existing YELLOW timeout policy
+        already expires an unanswered approval request on its own, but
+        nothing previously told WorkflowEngine to give up its own paused
+        state when that happened. Since Phase 15 permits only one
+        active/paused workflow at a time, an expired approval would
+        otherwise permanently block every future run() call for the
+        remaining lifetime of this instance.
+
+        Careful distinction: ApprovalManager.has_pending() also returns
+        False the moment a request is legitimately approved/declined
+        (Approval Manager's own _decide() removes it from pending
+        immediately, before resume() is ever called) - reaping on
+        has_pending() alone would incorrectly discard a paused workflow
+        exactly when resume() is about to use it. A request is only
+        genuinely stale here if it is neither still pending NOR has a
+        recorded decision at all - true expiry never creates a decision
+        (ApprovalManager._sweep_expired()'s own contract: "Expiry never
+        creates an ApprovalDecision"). This never fabricates a decision or
+        executes anything - it only forgets a paused workflow whose
+        approval window is genuinely gone.
+        """
+        stale_ids = []
+        for workflow_id, paused in self._paused.items():
+            if self._approvals.has_pending(paused.request_id):
+                continue
+            try:
+                self._approvals.get_decision(paused.request_id)
+            except ApprovalError:
+                stale_ids.append(workflow_id)
+        for workflow_id in stale_ids:
+            del self._paused[workflow_id]
 
     def run(self, plan: Plan, *, session_id: int | None = None) -> WorkflowResult:
         """Execute plan.steps in order, starting from the first step.
@@ -216,6 +257,7 @@ class WorkflowEngine:
                 15's one-workflow-at-a-time contract), or if the plan does
                 not have a valid executable shape.
         """
+        self._reap_stale_paused()
         if self._paused:
             raise WorkflowError(
                 "Another workflow is already paused awaiting approval; "
@@ -443,6 +485,7 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes[:-1]),
                     waiting_step_index=index,
                     resolved_tool_input=tool_input,
+                    request_id=approval_request.request_id,
                 )
                 return WorkflowResult(
                     plan=plan,

@@ -376,3 +376,94 @@ def test_orchestrator_module_has_no_workflow_router_or_plan_builder_class() -> N
     assert "WorkflowRouter" not in class_names
     assert "PlanBuilder" not in class_names
     assert "WorkflowRegistry" not in class_names
+
+
+# --- Phase 15, Batch 4: workflow_trace / JarvisResponse compatibility --------
+
+
+def test_jarvis_response_workflow_trace_defaults_to_empty_tuple() -> None:
+    """Every existing Phase 1-14 JarvisResponse construction site (none of
+    which name workflow_trace) is unaffected."""
+    from core.request_models import JarvisResponse
+
+    response = JarvisResponse(success=True, message="ok")
+    assert response.workflow_trace == ()
+
+
+def test_non_workflow_response_never_carries_a_trace() -> None:
+    orchestrator, _ = _build_orchestrator()
+    response = orchestrator.handle_request("remember this: Plain save")
+    assert response.workflow_trace == ()
+
+
+def test_completed_workflow_trace_has_two_entries_in_order() -> None:
+    orchestrator, _ = _build_orchestrator()
+    response = orchestrator.handle_request(
+        "remember this and show it back: Trace content"
+    )
+    assert len(response.workflow_trace) == 2
+    assert response.workflow_trace[0].step_number == 1
+    assert response.workflow_trace[0].total_steps == 2
+    assert response.workflow_trace[0].status == "completed"
+    assert response.workflow_trace[1].step_number == 2
+    assert response.workflow_trace[1].status == "completed"
+    assert "Trace content" in response.workflow_trace[1].message
+
+
+def test_waiting_workflow_trace_has_completed_then_waiting_only() -> None:
+    orchestrator, _ = _build_orchestrator()
+    response = orchestrator.handle_request(
+        "remember this and forget it: Waiting trace content"
+    )
+    assert len(response.workflow_trace) == 2
+    assert response.workflow_trace[0].status == "completed"
+    assert response.workflow_trace[1].status == "waiting"
+    # No fabricated PENDING entry for a step never reached (there is none,
+    # since this workflow only ever has two steps).
+    statuses = [s.status for s in response.workflow_trace]
+    assert "pending" not in statuses
+    assert "running" not in statuses
+    assert "skipped" not in statuses
+
+
+def test_blocked_workflow_trace_shows_failed_status_and_stops_the_workflow() -> (
+    None
+):
+    """Engine-level proof (no third user-facing command invented): a
+    directly-constructed Plan with a RED second step produces a trace
+    whose second entry is "failed", never a fabricated third entry."""
+    from planner.plan_models import Plan, PlanStep
+    from config.constants import SecurityTier
+
+    orchestrator, memory = _build_orchestrator()
+    plan = Plan(
+        user_request="engine-level RED proof",
+        steps=(
+            PlanStep(
+                number=1,
+                description="List memories.",
+                action="list memories",
+                tier=SecurityTier.GREEN,
+                reason="Listing is safe.",
+                tool_name="memory",
+                tool_input={"operation": "list"},
+            ),
+            PlanStep(
+                number=2,
+                description="Attempt a bulk forget.",
+                action="forget all memories",
+                tier=SecurityTier.GREEN,  # deliberately wrong display metadata
+                reason="placeholder",
+                tool_name="memory_forget",
+                tool_input={"all": True},
+            ),
+        ),
+    )
+    result = orchestrator._workflow_engine.run(plan, session_id=None)
+    response = orchestrator._workflow_result_to_response(result)
+
+    assert response.success is False
+    assert response.blocked is True
+    assert len(response.workflow_trace) == 2
+    assert response.workflow_trace[0].status == "completed"
+    assert response.workflow_trace[1].status == "failed"

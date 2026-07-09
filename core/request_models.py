@@ -38,6 +38,41 @@ class JarvisRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowTraceStep:
+    """One line of a Phase 15 workflow's post-run execution trace.
+
+    This is a presentation model, not a domain model: JarvisOrchestrator
+    translates a WorkflowStepOutcome (workflow.workflow_models) into this
+    narrow, CLI-safe shape - never exposing WorkflowStepOutcome,
+    ToolResult, ApprovalRequest, or PlanStep.tool_input directly on a
+    JarvisResponse. It is honestly a record of what already happened by
+    the time WorkflowEngine.run()/resume() returned - not a live or
+    streaming progress update of any kind.
+
+    Attributes:
+        step_number: The step's 1-based position within its workflow.
+        total_steps: The total number of steps in the workflow's plan.
+        description: The step's own human-readable description (from
+            PlanStep.description) - never raw tool_input.
+        status: A short, fixed status word taken directly from
+            StepStatus.value: "completed", "waiting", or "failed". Phase
+            15 never produces "pending"/"running"/"paused"/"skipped" here,
+            since only steps that were actually attempted appear at all.
+        message: A short, already user-facing outcome message reused from
+            the step's own ToolResult.output/error or its pending-approval
+            reason - never raw tool_input, never memory/file content
+            beyond what the tool's own existing output already discloses
+            for that exact operation.
+    """
+
+    step_number: int
+    total_steps: int
+    description: str
+    status: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class JarvisResponse:
     """The structured result of handling a request.
 
@@ -65,6 +100,12 @@ class JarvisResponse:
             a result. It is informational only: it never affects routing,
             classification, approval, or execution, all of which are decided by
             the Planner, SecurityManager, ToolExecutor, and ApprovalManager.
+        workflow_trace: An ordered, post-run execution trace for a Phase 15
+            workflow response (Batch 4) - empty for every non-workflow
+            response, and for a workflow response, holding exactly the
+            steps WorkflowEngine.run()/resume() actually attempted, in
+            order. Never a live or streaming feed: it reflects only what
+            has already happened by the time the response was built.
     """
 
     success: bool
@@ -77,3 +118,4 @@ class JarvisResponse:
     tool_name: str | None = None
     tool_input: dict[str, object] = field(default_factory=dict)
     ai_suggestion: str | None = None
+    workflow_trace: tuple[WorkflowTraceStep, ...] = field(default_factory=tuple)
