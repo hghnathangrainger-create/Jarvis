@@ -55,7 +55,7 @@ from ai.memory_selection import (
 )
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
-from config.constants import EventOutcome, SecurityTier
+from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse
 from memory.memory_manager import MemoryManager
@@ -70,6 +70,12 @@ from security.security_manager import (
 from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
+from workflow.engine import WorkflowEngine
+from workflow.workflow_models import WorkflowResult
+from workflow.workflow_plan_factory import (
+    build_remember_and_forget_plan,
+    build_remember_and_show_plan,
+)
 
 
 class _AuditLogger(Protocol):
@@ -386,6 +392,7 @@ class JarvisOrchestrator:
         reasoning_engine: AIReasoningEngine | None = None,
         security_manager: SecurityManager | None = None,
         memory_manager: MemoryManager | None = None,
+        workflow_engine: WorkflowEngine | None = None,
         logger: _AuditLogger | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
@@ -413,6 +420,15 @@ class JarvisOrchestrator:
                 approval_manager/security_manager, MemoryManager requires a
                 real store, so there is no safe stateless default; when
                 omitted, memory-summary requests fail honestly instead.
+            workflow_engine: An optional WorkflowEngine, used only by the two
+                explicit Phase 15 workflow commands ("remember this and show
+                it back: <text>" / "remember this and forget it: <text>",
+                Batch 3). No new instance is ever created here if omitted -
+                like memory_manager, a WorkflowEngine requires real
+                collaborators of its own, so there is no safe stateless
+                default; when omitted, workflow commands fail honestly
+                instead. Every existing construction site that omits this
+                parameter continues to behave exactly as before Phase 15.
             logger: Optional audit logger for the unexpected-action verdict.
                 The verdict is always evaluated; when logger is omitted,
                 nothing is recorded, matching how approval_manager behaves
@@ -426,6 +442,7 @@ class JarvisOrchestrator:
         self._reasoning = reasoning_engine
         self._security = security_manager or SecurityManager()
         self._memory_manager = memory_manager
+        self._workflow_engine = workflow_engine
         self._logger = logger
 
     @property
@@ -451,6 +468,16 @@ class JarvisOrchestrator:
         classifies the action, so a RED action can never be run this way even
         if a decision is supplied.
 
+        Phase 15, Batch 3: if `response` carries the approval request for a
+        step paused by a Phase 15 workflow, this delegates to
+        WorkflowEngine.resume() instead of re-running a single tool - the
+        public signature of this method is unchanged, and every non-workflow
+        call site behaves exactly as before. This method never records the
+        approval decision itself in either case: by the time it is called,
+        the caller (the CLI, via self.approvals.approve()/decline()) has
+        already recorded it - execute_approved only ever acts on an
+        already-decided ApprovalDecision.
+
         Args:
             response: The original response that carried the approval request,
                 including the tool name and input to run.
@@ -462,6 +489,19 @@ class JarvisOrchestrator:
             has no tool to run, or the decision is not approved, a response is
             returned that explains that nothing was executed.
         """
+        workflow_id = self._paused_workflow_id_for(response)
+        if workflow_id is not None:
+            result = self._workflow_engine.resume(
+                workflow_id,
+                decision,
+                session_id=(
+                    response.approval_request.session_id
+                    if response.approval_request is not None
+                    else None
+                ),
+            )
+            return self._workflow_result_to_response(result)
+
         if not decision.is_approved:
             return JarvisResponse(
                 success=False,
@@ -523,6 +563,182 @@ class JarvisOrchestrator:
             message=result.output,
             plan=plan,
             tool_result=result,
+        )
+
+    def _paused_workflow_id_for(self, response: JarvisResponse) -> str | None:
+        """Return the workflow id response's approval request is paused on,
+        if any (Phase 15, Batch 3).
+
+        Uses only the existing ApprovalRequest.metadata mechanism - no new
+        field is added anywhere. Treats metadata as untrusted: a missing,
+        empty, or malformed "workflow_id" entry, or one that does not
+        correspond to a workflow this engine instance actually has paused
+        right now, is never treated as workflow-linked. This is what
+        prevents an unrelated approval that happens to carry workflow-like
+        metadata, or a stale/already-resumed workflow id, from redirecting
+        execution anywhere.
+
+        Args:
+            response: The response being resumed via execute_approved().
+
+        Returns:
+            The workflow id, only if self._workflow_engine is configured,
+            response.approval_request is present, its metadata names a
+            non-empty "workflow_id", and that id is currently paused.
+            None otherwise.
+        """
+        if self._workflow_engine is None:
+            return None
+        if response.approval_request is None:
+            return None
+
+        workflow_id = response.approval_request.metadata.get("workflow_id")
+        if not workflow_id:
+            return None
+        if not self._workflow_engine.has_paused(workflow_id):
+            return None
+        return workflow_id
+
+    def _handle_remember_and_show_back_workflow_request(
+        self, content: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "remember this and show it back: <text>" request
+        (Phase 15, Batch 3).
+
+        Builds the fixed, all-GREEN two-step Plan via
+        workflow.workflow_plan_factory.build_remember_and_show_plan() and
+        executes it through WorkflowEngine - never executing a tool,
+        classifying security, or creating an approval directly itself.
+
+        Args:
+            content: The raw trailing text extracted by
+                CommandRouter.match_remember_and_show_back_workflow -
+                possibly empty or whitespace-only.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, or an
+            honest failure if WorkflowEngine is not configured.
+        """
+        plan = build_remember_and_show_plan(content)
+        return self._handle_workflow_request(plan, session_id=session_id)
+
+    def _handle_remember_and_forget_workflow_request(
+        self, content: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "remember this and forget it: <text>" request
+        (Phase 15, Batch 3).
+
+        Builds the fixed, GREEN-then-YELLOW two-step Plan via
+        workflow.workflow_plan_factory.build_remember_and_forget_plan() and
+        executes it through WorkflowEngine - never executing a tool,
+        classifying security, or creating an approval directly itself. The
+        YELLOW pause on step 2 arises naturally from the existing
+        ToolExecutor/SecurityManager path inside WorkflowEngine, exactly as
+        it would for any other "forget memory" action.
+
+        Args:
+            content: The raw trailing text extracted by
+                CommandRouter.match_remember_and_forget_workflow -
+                possibly empty or whitespace-only.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, or an
+            honest failure if WorkflowEngine is not configured.
+        """
+        plan = build_remember_and_forget_plan(content)
+        return self._handle_workflow_request(plan, session_id=session_id)
+
+    def _handle_workflow_request(
+        self, plan: Plan, *, session_id: int | None
+    ) -> JarvisResponse:
+        """Run a deterministically-built Phase 15 workflow Plan and
+        translate its result.
+
+        Shared by both workflow handlers - the only difference between them
+        is which workflow_plan_factory function built `plan`. Never
+        executes a tool, classifies an action, or creates an approval
+        itself: WorkflowEngine.run() owns all of that, reusing the existing
+        ToolExecutor/ApprovalManager path unchanged.
+
+        Args:
+            plan: The fixed two-step Plan built by workflow_plan_factory.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, or an
+            honest failure if WorkflowEngine is not configured (mirroring
+            how a missing memory_manager fails the memory-summary
+            workflows honestly rather than raising).
+        """
+        if self._workflow_engine is None:
+            return JarvisResponse(
+                success=False,
+                message="Workflow execution is not available.",
+                plan=plan,
+            )
+
+        result = self._workflow_engine.run(plan, session_id=session_id)
+        return self._workflow_result_to_response(result)
+
+    @staticmethod
+    def _workflow_result_to_response(result: WorkflowResult) -> JarvisResponse:
+        """Translate a WorkflowResult into a JarvisResponse (Phase 15,
+        Batch 3).
+
+        Deliberately never sets tool_name/tool_input on the returned
+        response, unlike the ordinary single-tool YELLOW-pending path: a
+        workflow response is always resumed through
+        execute_approved()'s own workflow-linked branch
+        (_paused_workflow_id_for), never through the ordinary
+        single-tool re-execution path below it. Leaving tool_name/tool_input
+        unset means that even if that recognition were ever to fail, the
+        existing "no runnable tool" fallback would apply harmlessly,
+        instead of risking a second, out-of-sequence tool execution.
+
+        Args:
+            result: The WorkflowResult returned by WorkflowEngine.run() or
+                .resume().
+
+        Returns:
+            A JarvisResponse honestly reflecting COMPLETED (success, no
+            approval request), WAITING (not successful, not blocked,
+            carries the real pending ApprovalRequest, no completion
+            claim), or FAILED (not successful, blocked only when the
+            terminal step's own ToolResult reports blocked, no fabricated
+            approval request).
+        """
+        last_outcome = result.step_outcomes[-1] if result.step_outcomes else None
+        last_tool_result = last_outcome.tool_result if last_outcome else None
+
+        if result.overall_status is StepStatus.WAITING:
+            return JarvisResponse(
+                success=False,
+                message=result.message,
+                plan=result.plan,
+                tool_result=last_tool_result,
+                requires_confirmation=True,
+                approval_request=result.pending_approval_request,
+            )
+
+        if result.overall_status is StepStatus.FAILED:
+            blocked = bool(last_tool_result and last_tool_result.blocked)
+            return JarvisResponse(
+                success=False,
+                message=result.message,
+                plan=result.plan,
+                tool_result=last_tool_result,
+                blocked=blocked,
+            )
+
+        final_output = last_tool_result.output if last_tool_result else ""
+        message = f"{result.message} {final_output}".strip()
+        return JarvisResponse(
+            success=True,
+            message=message,
+            plan=result.plan,
+            tool_result=last_tool_result,
         )
 
     def handle_request(
@@ -658,6 +874,44 @@ class JarvisOrchestrator:
         if memory_set_summary_raw_ids is not None:
             return self._handle_memory_set_summary_request(
                 memory_set_summary_raw_ids, user_request, session_id
+            )
+
+        # Phase 15, Batch 3: the two exact deterministic workflow commands are
+        # checked here, in the same pre-_handle_request_core dispatch position
+        # every Phase 8-14 special-case matcher already occupies. This is
+        # load-bearing: "remember this and show it back: ..." and "remember
+        # this and forget it: ..." both start with "remember this", which
+        # _build_memory_input's own generic save-parsing branch
+        # (lowered.startswith("remember this")) would otherwise silently
+        # capture and misinterpret as a plain "remember this: ..." save,
+        # discarding the "and show it back"/"and forget it" wording entirely
+        # (confirmed by direct inspection before this batch - see
+        # docs/phase_15_implementation_plan.md's Batch 3 investigation).
+        # Checking these here, before the fallback to _handle_request_core
+        # (which is the only path that ever reaches match()/
+        # _build_memory_input), prevents that collision entirely. Neither new
+        # matcher collides with any of the seven existing special-case
+        # matchers above (none of which share the "remember" leading word),
+        # so this position relative to them is not itself a correctness
+        # requirement - only its position relative to the generic fallback is.
+        remember_and_show_back_content = (
+            self._command_router.match_remember_and_show_back_workflow(
+                user_request.strip()
+            )
+        )
+        if remember_and_show_back_content is not None:
+            return self._handle_remember_and_show_back_workflow_request(
+                remember_and_show_back_content, session_id
+            )
+
+        remember_and_forget_content = (
+            self._command_router.match_remember_and_forget_workflow(
+                user_request.strip()
+            )
+        )
+        if remember_and_forget_content is not None:
+            return self._handle_remember_and_forget_workflow_request(
+                remember_and_forget_content, session_id
             )
 
         response = self._handle_request_core(user_request, session_id=session_id)

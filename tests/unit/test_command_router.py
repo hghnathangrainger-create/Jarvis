@@ -1205,3 +1205,210 @@ def test_match_memory_recent_count_summary_does_not_change_existing_routing(
     assert router.match_memory_recent_summary("summarise recent memories") is True
     assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
+
+
+# --- Phase 15, Batch 3: workflow command matchers ----------------------------
+
+
+def test_match_remember_and_show_back_workflow_exact_command(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "remember this and show it back: Buy milk"
+        )
+        == "Buy milk"
+    )
+
+
+def test_match_remember_and_show_back_workflow_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "REMEMBER THIS AND SHOW IT BACK: Buy milk"
+        )
+        == "Buy milk"
+    )
+
+
+def test_match_remember_and_show_back_workflow_preserves_unicode_text(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "remember this and show it back: héllo wörld 你好"
+        )
+        == "héllo wörld 你好"
+    )
+
+
+def test_match_remember_and_show_back_workflow_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "remember this and show it back:    Buy milk   "
+        )
+        == "Buy milk"
+    )
+
+
+def test_match_remember_and_show_back_workflow_empty_text_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    """The prefix matches; the empty trailing text is the orchestrator's own
+    responsibility to reject honestly - the router never silently invents
+    or rejects content itself."""
+    assert router.match_remember_and_show_back_workflow(
+        "remember this and show it back:"
+    ) == ""
+
+
+def test_match_remember_and_show_back_workflow_whitespace_only_text_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "remember this and show it back:      "
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "remember this and show it back",  # missing colon
+        "remember and show it back: Buy milk",  # missing "this"
+        "remember this then show it back: Buy milk",  # wrong connector
+        "remember this and show: Buy milk",  # missing "it back"
+        "remember this and show it back and forget it: Buy milk",  # trailing qualifier before colon differs
+        "remember this: Buy milk; show it back",  # semicolon-separated
+        "remember this and then show it back: Buy milk",  # "and then" syntax
+        "show it back: Buy milk",  # missing leading phrase entirely
+        "remember this",  # no workflow language at all
+        "",
+    ],
+)
+def test_match_remember_and_show_back_workflow_rejects_malformed_grammar(
+    router: CommandRouter, request_text: str
+) -> None:
+    assert router.match_remember_and_show_back_workflow(request_text) is None
+
+
+def test_match_remember_and_forget_workflow_exact_command(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_forget_workflow(
+            "remember this and forget it: Temporary note"
+        )
+        == "Temporary note"
+    )
+
+
+def test_match_remember_and_forget_workflow_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_forget_workflow(
+            "Remember This And Forget It: Temporary note"
+        )
+        == "Temporary note"
+    )
+
+
+def test_match_remember_and_forget_workflow_preserves_unicode_text(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_forget_workflow(
+            "remember this and forget it: héllo wörld 你好"
+        )
+        == "héllo wörld 你好"
+    )
+
+
+def test_match_remember_and_forget_workflow_empty_text_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_forget_workflow("remember this and forget it:")
+        == ""
+    )
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "remember this and forget it",  # missing colon
+        "remember and forget it: Temporary note",  # missing "this"
+        "remember this then forget it: Temporary note",  # wrong connector
+        "remember this and forget: Temporary note",  # missing "it"
+        "remember this: Temporary note; forget it",  # semicolon-separated
+        "remember this and then forget it: Temporary note",  # "and then" syntax
+        "forget it: Temporary note",  # missing leading phrase entirely
+        "remember this",  # no workflow language at all
+        "",
+    ],
+)
+def test_match_remember_and_forget_workflow_rejects_malformed_grammar(
+    router: CommandRouter, request_text: str
+) -> None:
+    assert router.match_remember_and_forget_workflow(request_text) is None
+
+
+def test_workflow_matchers_do_not_collide_with_each_other(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_remember_and_forget_workflow(
+            "remember this and show it back: Buy milk"
+        )
+        is None
+    )
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "remember this and forget it: Temporary note"
+        )
+        is None
+    )
+
+
+def test_workflow_matchers_do_not_change_existing_routing(
+    router: CommandRouter,
+) -> None:
+    """Adding the two Phase 15 workflow matchers must not change match()'s
+    own routing, any existing summary-family matcher, or the ordinary
+    generic "remember this: ..." save command."""
+    assert router.match("remember this: Buy milk") == "memory"
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert (
+        router.match_memory_query_summary("summarise memories about security")
+        == "security"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+    assert router.match_memory_recent_summary("summarise recent memories") is True
+    assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
+    assert (
+        router.match_memory_recent_count_summary("summarise latest 5 memories")
+        == "5"
+    )
+    # And, critically, the collision this batch's own investigation found:
+    # the generic "remember this" save command must still work exactly as
+    # before for ordinary requests that are not one of the two new exact
+    # workflow phrases.
+    assert (
+        router.match_remember_and_show_back_workflow("remember this: Buy milk")
+        is None
+    )
+    assert (
+        router.match_remember_and_forget_workflow("remember this: Buy milk") is None
+    )

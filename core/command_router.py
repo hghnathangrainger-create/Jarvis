@@ -196,6 +196,34 @@ _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memories",
 )
 
+#: The exact, complete leading phrase for the Phase 15 all-GREEN workflow
+#: command "remember this and show it back: <text>" (Retrieval Workflow
+#: Maintenance's sibling capability turn - Phase 15, Batch 3). Includes the
+#: mandatory trailing colon: the colon is part of the required grammar, not
+#: a separator checked separately, so "remember this and show it back"
+#: (no colon), "remember and show it back: ..." (missing "this"), "remember
+#: this then show it back: ..." (wrong connector), and "remember this and
+#: show: ..." (missing "it back") all correctly fail to match at all -
+#: falling through to whatever the existing, unrelated generic "remember
+#: this" handling in _build_memory_input already does with them, never
+#: silently becoming this workflow. This prefix is checked in
+#: JarvisOrchestrator.handle_request() before the fallback to
+#: _handle_request_core()/match() - the same dispatch position every
+#: Phase 8-14 special-case matcher already occupies - because
+#: "remember this and show it back: ..." would otherwise be captured by
+#: match()'s own generic memory-keyword routing and misinterpreted as a
+#: plain "remember this: ..." save (docs/phase_15_implementation_plan.md,
+#: Batch 3 investigation).
+_REMEMBER_AND_SHOW_BACK_WORKFLOW_PREFIX = "remember this and show it back:"
+
+#: The exact, complete leading phrase for the Phase 15 GREEN-then-YELLOW
+#: workflow command "remember this and forget it: <text>". Same exact-
+#: grammar and dispatch-ordering rationale as
+#: _REMEMBER_AND_SHOW_BACK_WORKFLOW_PREFIX above: the trailing colon is
+#: mandatory, and this must be checked before the fallback to
+#: _handle_request_core()/match() for the same reason.
+_REMEMBER_AND_FORGET_WORKFLOW_PREFIX = "remember this and forget it:"
+
 #: The exact, complete recent-memory-summary commands (Phase 13, Batch 2).
 #: Unlike every other summary-family command, this one carries no trailing
 #: free-text argument at all - there is no query, category, or id list to
@@ -673,6 +701,60 @@ class CommandRouter:
             return None
 
         return text[len(prefix) :].strip()
+
+    def match_remember_and_show_back_workflow(self, text: str) -> str | None:
+        """Match the exact "remember this and show it back: <text>" command.
+
+        Recognises only this exact, complete leading phrase (Phase 15,
+        Batch 3), including its mandatory trailing colon, matched
+        case-insensitively. Like match_memory_summary and its siblings,
+        this never names a registered tool for the orchestrator to execute
+        directly - a workflow command is a multi-step execution handled by
+        its own dedicated Orchestrator handler, not a single tool_name
+        dispatched through match()/build_input(). Only the raw trailing
+        text is extracted; whether it is empty or whitespace-only after
+        stripping is the orchestrator's responsibility to reject honestly,
+        exactly as the Phase 11 query matcher defers empty-query rejection
+        to its own handler.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing text if the text starts with the
+            exact required phrase (case-insensitively) - possibly empty or
+            whitespace-only - or None if the text does not match this
+            command's grammar at all.
+        """
+        lowered = text.casefold()
+        if not lowered.startswith(_REMEMBER_AND_SHOW_BACK_WORKFLOW_PREFIX):
+            return None
+
+        return text[len(_REMEMBER_AND_SHOW_BACK_WORKFLOW_PREFIX) :].strip()
+
+    def match_remember_and_forget_workflow(self, text: str) -> str | None:
+        """Match the exact "remember this and forget it: <text>" command.
+
+        Recognises only this exact, complete leading phrase (Phase 15,
+        Batch 3), including its mandatory trailing colon, matched
+        case-insensitively. Mirrors
+        match_remember_and_show_back_workflow exactly, for the
+        GREEN-then-YELLOW sibling workflow.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing text if the text starts with the
+            exact required phrase (case-insensitively) - possibly empty or
+            whitespace-only - or None if the text does not match this
+            command's grammar at all.
+        """
+        lowered = text.casefold()
+        if not lowered.startswith(_REMEMBER_AND_FORGET_WORKFLOW_PREFIX):
+            return None
+
+        return text[len(_REMEMBER_AND_FORGET_WORKFLOW_PREFIX) :].strip()
 
     def build_input(self, tool_name: str, text: str) -> dict[str, object]:
         """Build the input dictionary for the matched tool.

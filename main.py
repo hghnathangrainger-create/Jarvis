@@ -59,6 +59,7 @@ from tools.builtin import (
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
+from workflow.engine import WorkflowEngine
 
 
 def build_orchestrator() -> JarvisOrchestrator:
@@ -128,6 +129,18 @@ def build_orchestrator() -> JarvisOrchestrator:
     # so the Core coordinates rather than performing command-matching itself.
     command_router = CommandRouter(registry)
 
+    # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same
+    # ToolExecutor, ApprovalManager, and EventLogger instances already built
+    # above - no duplicate execution, approval, or logging authority is ever
+    # constructed. Powers only the two explicit Phase 15 workflow commands
+    # ("remember this and show it back: <text>" / "remember this and forget
+    # it: <text>"); every other request path is completely unaffected.
+    workflow_engine = WorkflowEngine(
+        executor=executor,
+        approvals=approvals,
+        logger=logger,
+    )
+
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
     # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and
     # AIReasoningEngine are constructed - previously main.py never built
@@ -165,6 +178,9 @@ def build_orchestrator() -> JarvisOrchestrator:
         # "summarise memory <id>" workflow can retrieve a memory directly,
         # exactly as the plan requires.
         memory_manager=memory,
+        # Phase 15, Batch 3: the same WorkflowEngine instance already built
+        # above (not a second one) powers the two explicit workflow commands.
+        workflow_engine=workflow_engine,
         logger=logger,
     )
 
