@@ -70,18 +70,21 @@ def _build_orchestrator(
     logger: object | None = None,
     *,
     workflow_logger: object | None = None,
+    tool_executor_logger: object | None = None,
 ) -> tuple[JarvisOrchestrator, MemoryManager]:
     """Build a real orchestrator.
 
-    `logger` is used for ToolExecutor/ApprovalManager/Orchestrator (always
-    a healthy, working logger in every test in this file - none of these
-    collaborators' own logger isolation is under test here; that is
-    ToolExecutor's/ApprovalManager's own established, separately-tested
-    responsibility). `workflow_logger`, when supplied, is used only for
-    WorkflowEngine's own workflow_* audit family, so a test can prove that
-    family's own isolation without confounding it with ToolExecutor's own,
-    separate, unguarded logger.emit() calls (see this batch's own
-    ToolExecutor logger-failure investigation).
+    `logger` is used for ApprovalManager/Orchestrator (always a healthy,
+    working logger in every test in this file unless a test is
+    specifically about ApprovalManager's own logger behaviour, which is
+    out of this batch's scope and not exercised here). `workflow_logger`,
+    when supplied, is used only for WorkflowEngine's own workflow_* audit
+    family (Batch 4). `tool_executor_logger`, when supplied, is used only
+    for ToolExecutor's own tool_call audit events - isolating exactly the
+    boundary Phase 15 Batch 4A's corrective fix
+    (tools/executor.py::_emit_audit_event) closes, without conflating it
+    with ApprovalManager's own separate, unguarded, out-of-scope
+    audit-decision logging.
     """
     logger = logger or _RecordingLogger()
     memory = _memory_manager()
@@ -89,7 +92,11 @@ def _build_orchestrator(
     registry = ToolRegistry()
     registry.register_tool(MemoryTool(memory))
     registry.register_tool(MemoryForgetTool(memory))
-    executor = ToolExecutor(registry=registry, security_manager=security, logger=logger)  # type: ignore[arg-type]
+    executor = ToolExecutor(
+        registry=registry,
+        security_manager=security,
+        logger=tool_executor_logger or logger,
+    )  # type: ignore[arg-type]
     approvals = ApprovalManager(audit_logger=logger)  # type: ignore[arg-type]
     workflow_engine = WorkflowEngine(
         executor=executor, approvals=approvals, logger=workflow_logger or logger
@@ -339,3 +346,90 @@ def test_real_cli_workflow_engine_logger_failure_does_not_alter_waiting_result()
         ],
     )
     assert "NEEDS APPROVAL" in output
+
+
+# --- ToolExecutor logger-failure isolation, proven through real Phase 15 ---
+# workflows (Phase 15 Batch 4A corrective closure). Unlike the
+# WorkflowEngine-only tests above (Batch 4), these give the *shared*
+# ToolExecutor/ApprovalManager logger itself a failing implementation - the
+# exact boundary Batch 4's own investigation found unguarded and Batch 4A's
+# corrective fix (tools/executor.py::_emit_audit_event) now isolates.
+
+
+def test_real_cli_all_green_workflow_survives_raising_toolexecutor_logger() -> (
+    None
+):
+    orchestrator, memory = _build_orchestrator(tool_executor_logger=_FailingLogger())
+
+    output = _run_cli(
+        orchestrator,
+        [
+            "remember this and show it back: Survives ToolExecutor logger failure",
+            "exit",
+        ],
+    )
+
+    assert "[OK]" in output
+    assert any(
+        r.content == "Survives ToolExecutor logger failure"
+        for r in memory.list_recent(limit=5)
+    )
+    assert "Survives ToolExecutor logger failure" in output
+
+
+def test_real_cli_waiting_workflow_survives_raising_toolexecutor_logger() -> None:
+    orchestrator, memory = _build_orchestrator(tool_executor_logger=_FailingLogger())
+
+    output = _run_cli(
+        orchestrator,
+        [
+            "remember this and forget it: Waiting despite ToolExecutor logger failure",
+            "no",
+            "exit",
+        ],
+    )
+
+    assert "NEEDS APPROVAL" in output
+    assert any(
+        r.content == "Waiting despite ToolExecutor logger failure"
+        for r in memory.list_recent(limit=5)
+    )
+
+
+def test_real_cli_approved_resume_survives_raising_toolexecutor_logger() -> None:
+    orchestrator, memory = _build_orchestrator(tool_executor_logger=_FailingLogger())
+
+    output = _run_cli(
+        orchestrator,
+        [
+            "remember this and forget it: Approved despite ToolExecutor logger failure",
+            "yes",
+            "exit",
+        ],
+    )
+
+    assert "[APPROVED]" in output
+    assert "[OK]" in output
+    assert not any(
+        r.content == "Approved despite ToolExecutor logger failure"
+        for r in memory.list_recent(limit=5)
+    )
+
+
+def test_real_cli_declined_resume_survives_raising_toolexecutor_logger() -> None:
+    orchestrator, memory = _build_orchestrator(tool_executor_logger=_FailingLogger())
+
+    output = _run_cli(
+        orchestrator,
+        [
+            "remember this and forget it: Declined despite ToolExecutor logger failure",
+            "no",
+            "exit",
+        ],
+    )
+
+    assert "[DECLINED]" in output
+    assert any(
+        r.content == "Declined despite ToolExecutor logger failure"
+        for r in memory.list_recent(limit=5)
+    )

@@ -143,9 +143,7 @@ class ToolExecutor:
             A failed ToolResult describing the unknown tool.
         """
         message = f"No tool named '{request.tool_name}' is registered."
-        self._logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=EventOutcome.FAILURE,
             detail=f"unknown_tool={request.tool_name}",
             session_id=request.session_id,
@@ -166,9 +164,7 @@ class ToolExecutor:
         Returns:
             A blocked ToolResult.
         """
-        self._logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=EventOutcome.BLOCKED,
             detail=f"tool={request.tool_name} reason={reason}",
             security_tier=SecurityTier.RED,
@@ -206,9 +202,7 @@ class ToolExecutor:
         if declined:
             detail += " decision=declined"
 
-        self._logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=EventOutcome.PENDING,
             detail=detail,
             security_tier=SecurityTier.YELLOW,
@@ -256,9 +250,7 @@ class ToolExecutor:
             result = tool.run(request)
         except Exception as exc:  # noqa: BLE001 - isolate tool failures
             duration_ms = self._elapsed_ms(start)
-            self._logger.emit(
-                source=_SOURCE,
-                action_type=_ACTION_TYPE,
+            self._emit_audit_event(
                 outcome=EventOutcome.FAILURE,
                 detail=f"tool={request.tool_name} error={exc}",
                 security_tier=tier,
@@ -278,9 +270,7 @@ class ToolExecutor:
         detail = f"tool={request.tool_name} success={result.success}"
         if approval_decision is not None:
             detail += f" approved_by={approval_decision.decided_by}"
-        self._logger.emit(
-            source=_SOURCE,
-            action_type=_ACTION_TYPE,
+        self._emit_audit_event(
             outcome=outcome,
             detail=detail,
             security_tier=tier,
@@ -288,6 +278,65 @@ class ToolExecutor:
             session_id=request.session_id,
         )
         return result
+
+    def _emit_audit_event(
+        self,
+        *,
+        outcome: EventOutcome,
+        detail: str,
+        security_tier: SecurityTier | None = None,
+        duration_ms: int | None = None,
+        session_id: int | None,
+    ) -> None:
+        """Emit one tool_call audit event, isolating a failing logger so it
+        can never alter the already-authoritative ToolResult about to be
+        returned (Retrieval Workflow Maintenance-adjacent closure, Phase 15
+        Batch 4A).
+
+        Every one of ToolExecutor's five emit sites (unknown tool, RED
+        blocked, YELLOW needs-confirmation, tool-raised failure, and the
+        ordinary success/failure return) now calls this one helper instead
+        of self._logger.emit() directly. The event name (action_type),
+        outcome, detail, security_tier, duration_ms, and session_id passed
+        in are byte-for-byte identical to what each call site already
+        built before this change - only the emit() call itself is now
+        wrapped, exactly matching the narrow, established observability-
+        isolation pattern already used elsewhere in this codebase (e.g.
+        core.orchestrator._emit_memory_acquisition_event,
+        workflow.engine.WorkflowEngine._emit,
+        approval.approval_manager.ApprovalManager._audit). No new event is
+        created, renamed, or removed; no EventOutcome mapping changes; no
+        detail content changes.
+
+        The one and only behavioural change: a logger exception no longer
+        escapes ToolExecutor.execute(). This does intentionally accept
+        losing that one audit event when the logger genuinely fails - the
+        standing invariant is that observability failure must never alter
+        an authoritative execution outcome, not that logging can never
+        fail. Nothing is retried, buffered, or written to a fallback
+        destination.
+
+        Args:
+            outcome: The EventOutcome to record.
+            detail: The already-built detail string.
+            security_tier: The tier to record, if applicable.
+            duration_ms: The duration to record, if applicable.
+            session_id: Optional session identifier.
+        """
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                duration_ms=duration_ms,
+                security_tier=security_tier,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative tool-execution outcome already decided.
+            pass
 
     @staticmethod
     def _record_approval(

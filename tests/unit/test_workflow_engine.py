@@ -1021,30 +1021,30 @@ def test_legitimate_pending_approval_is_not_reaped() -> None:
     assert len(yellow.calls) == 1
 
 
-# --- ToolExecutor logger-failure investigation (Phase 15, Batch 4) ----------
+# --- ToolExecutor logger-failure isolation (Phase 15, Batch 4 investigation,
+# --- Batch 4A corrective closure) --------------------------------------------
 #
-# Honest documentation of a real, pre-existing (not Phase-15-introduced)
-# characteristic: ToolExecutor.execute()'s own logger.emit() calls are not
-# wrapped in any try/except at all (unlike WorkflowEngine's own new workflow_*
-# events, or the narrow, optional-audit isolation pattern used elsewhere in
-# this codebase, e.g. core.orchestrator._emit_memory_acquisition_event). A
-# raising ToolExecutor logger therefore propagates, uncaught, out of
-# WorkflowEngine.run()/resume() (and out of the pre-existing single-step
-# _handle_request_core path too - this is not new to Phase 15). This is
-# classified as pre-existing architectural debt exposed - not caused, and not
-# fixed - by Phase 15's own integration; see the Batch 4 report for the full
-# classification. This test proves the actual, current behaviour rather than
-# asserting isolation that does not exist.
+# Batch 4 empirically proved a real, pre-existing (not Phase-15-introduced)
+# defect: ToolExecutor.execute()'s own logger.emit() calls were not wrapped in
+# any try/except at all, so a raising ToolExecutor logger propagated, uncaught,
+# out of WorkflowEngine.run()/resume() (and out of the pre-existing
+# single-step _handle_request_core path too). Batch 4A closed this narrowly at
+# the shared ToolExecutor boundary itself (tools/executor.py::
+# _emit_audit_event) - see tests/unit/test_tool_executor_logger_isolation.py
+# for the focused proof at the ToolExecutor level. This test now proves the
+# fix holds through WorkflowEngine specifically: a raising ToolExecutor
+# logger no longer escapes engine.run() at all.
 
 
-def test_toolexecutor_logger_failure_propagates_uncaught_through_workflow_engine() -> (
+def test_toolexecutor_logger_failure_no_longer_propagates_through_workflow_engine() -> (
     None
 ):
-    """Honest finding, not a regression test for a fix: this failure mode
-    is real, pre-existing, and out of Batch 4's authorised scope to change.
-    A raising ToolExecutor logger is NOT isolated - it propagates all the
-    way out of WorkflowEngine.run(), exactly as it already does out of the
-    pre-existing single-step orchestrator path."""
+    """Historical note: before Phase 15 Batch 4A's corrective fix, this
+    exact scenario raised RuntimeError uncaught (the finding Batch 4's own
+    investigation documented). ToolExecutor._emit_audit_event() now
+    isolates every one of its five emit sites, so a raising ToolExecutor
+    logger no longer alters the authoritative GREEN result WorkflowEngine
+    returns."""
     security = _security()
     registry = _registry(_GreenTool("a"))
     executor = ToolExecutor(
@@ -1053,5 +1053,5 @@ def test_toolexecutor_logger_failure_propagates_uncaught_through_workflow_engine
     approvals = ApprovalManager()
     engine = WorkflowEngine(executor=executor, approvals=approvals, logger=_RecordingLogger())
 
-    with pytest.raises(RuntimeError, match="simulated logger failure"):
-        engine.run(_plan(_step(1, "a")))
+    result = engine.run(_plan(_step(1, "a")))
+    assert result.overall_status is StepStatus.COMPLETED
