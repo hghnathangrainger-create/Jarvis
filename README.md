@@ -16,6 +16,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 10 complete: Multi-Memory Retrieval and Selection for Advisory AI.**
 **Phase 11 complete: Deterministic Query-Based Memory Selection for Advisory AI.**
 **Phase 12 complete: Deterministic Category-Based Memory Selection for Advisory AI.**
+**Phase 13 complete: Deterministic Recency-Based Automatic Memory Selection for Advisory AI.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -33,9 +34,11 @@ Phase 11 answers the question Phase 10 left open: an explicit `summarise memorie
 
 Phase 12 extends automatic selection to a second, complementary dimension: an explicit `summarise memories in <category>` command deterministically looks up stored memories already filed under one of your known categories (`general`, `personal`, `project`, `preference`, `note`) and combines them the same way Phase 10 already does. An unrecognised category is honestly rejected — it is never silently treated as a request for your general-category memories. See the Phase 12 section below.
 
+Phase 13 adds a third, complementary dimension: an explicit `summarise recent memories` command deterministically selects the **newest** up to 10 stored memories across all of your categories and combines them the same way Phase 10 already does. "Recent" here means exactly the newest stored memory records, in deterministic newest-first order — not a time window such as "last 24 hours" or "today." See the Phase 13 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **1267 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–12 test, including all of Phase 12's batches.
+> **Verified:** `poetry run pytest -v` — **1384 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–13 test, including all of Phase 13's batches.
 
 ---
 
@@ -327,6 +330,32 @@ Semantic or vector memory retrieval, embeddings, similarity ranking, AI-selected
 
 ---
 
+## Phase 13 — Deterministic Recency-Based Automatic Memory Selection for Advisory AI (complete)
+
+Phase 13 answers the question left open at the close of Phase 12: an explicit `summarise recent memories` command deterministically selects the **newest** up to 10 stored memory records, across every category, and combines them for the advisory AI, reusing Phase 10's own combination architecture unchanged. Unlike the query- and category-based commands, this one takes **no argument at all** — "recent" is defined honestly as the newest stored records under the repository's own deterministic ordering, never a calendar or time-window meaning. See `docs/phase_13_completion_report.md` for the full write-up.
+
+- **Batch 1 — Deterministic recent-memory selection foundation.** A new selector deterministically retrieves the newest up to 10 stored memory records across all categories, using the repository's existing `list_recent()` ordering, and preserves that newest-first order exactly — no ranking, no re-sorting, no reversal.
+- **Batch 2 — Recent-memory command and orchestrator wiring.** An explicit, **exact-match** `summarise recent memories` (or `summarize recent memories`) command — the first summary command with no trailing text to interpret at all, so extra words after it (for example "... about security") are never silently accepted as this command.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against real, multiple saved memories across every known category, including a real budget-pressure case showing why newest-first order matters, a genuine stored-content injection attempt, this README section, and `docs/phase_13_completion_report.md`.
+
+### Recent-memory summary command
+
+| Command | What it does |
+|---|---|
+| `summarise recent memories` / `summarize recent memories` | Deterministically selects the newest stored memories across all categories (GREEN, the same authority as other read-only memory commands), up to 10 records, and asks the advisory AI to summarise them together. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI recent memory summary - advisory only]`. **"Recent" means newest stored memories, deterministic newest-first selection — not a time window.** Jarvis does not interpret this as "last 24 hours," "today," "this week," or any other calendar meaning; it selects exactly the newest up to 10 records currently in storage, in the same deterministic order the store already uses (newest first, with ties broken deterministically). If nothing is stored yet, or the lookup itself could not run, Jarvis says so plainly rather than presenting an empty or failed lookup as if it were a real summary.
+
+### Safety note: recency selects, it never trusts, executes, or claims a time window
+
+Selecting the newest stored memories is exactly as safe (GREEN, read-only) as every other read-only memory command already is. Every selected memory's content remains untrusted, exactly as it already is for every other summary command — a memory being *recent* does not make it trusted. As in Phase 7 through 12, any AI-suggested action arising from a recent-memory summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 13
+
+Time-window retrieval ("last 24 hours," "today," "this week"), calendar or relative-date interpretation, timezone-aware filtering, user-controlled recency counts, semantic or vector memory retrieval, embeddings, similarity ranking, AI-selected or AI-ranked memory ids, autonomous memory discovery, recently-accessed or recently-modified semantics, any change to `MemoryManager`, `MemoryTool`, or `EpisodicMemoryStore`, any new AI execution authority, and any new approval gate for looking up or summarising recent memories. Recency here is deterministic newest-N selection only — it is never treated as an instruction, and it never changes what Jarvis is allowed to do.
+
+---
+
 ## Example Session
 
 ```
@@ -404,8 +433,8 @@ jarvis/
 │                   typed trusted/untrusted AIContextBlock model,
 │                   file-content and single/multi-memory ingestion for the
 │                   AI reasoning path (ai/file_ingestion.py,
-│                   ai/memory_ingestion.py), and deterministic query-based
-│                   and category-based memory selection
+│                   ai/memory_ingestion.py), and deterministic query-based,
+│                   category-based, and recency-based memory selection
 │                   (ai/memory_selection.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
@@ -435,10 +464,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 12 is complete**: Jarvis can now deterministically look up stored memories by a known category and have the advisory AI summarise the matches together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_12_completion_report.md`, is **recency-based automatic memory selection** ("summarise my most recent memories" or similar) — its own narrow, separately-scoped design review, reusing Phase 10's combination architecture rather than reinventing it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
+**Phase 13 is complete**: Jarvis can now deterministically select the newest stored memories across all categories and have the advisory AI summarise them together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. Deterministic selection now exists in four forms — explicit ids (Phase 10), query search (Phase 11), category (Phase 12), and recency (Phase 13) — all sharing the same seam: a strategy produces an ordered list of memory ids, and Phase 10's `ingest_memories_for_ai()` combines them, unchanged. What comes next, per `docs/phase_13_completion_report.md`, is either a user-controlled recency count ("latest 5 memories") or genuinely time-windowed retrieval — the latter first requiring a review of a disclosed, non-blocking timestamp-representation limitation (persisted timestamps are observed naive, not timezone-aware, once read back from SQLite). Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
 
 Resumable approvals and deeper but still-advisory AI assistance remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, and Phase 12 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, and Phase 13 are complete for their defined scope, not yet tagged. None is a finished product.*

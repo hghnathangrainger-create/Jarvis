@@ -46,8 +46,10 @@ from ai.memory_ingestion import (
 from ai.memory_selection import (
     CategorySelectionResult,
     QuerySelectionResult,
+    RecentSelectionResult,
     select_memory_ids_by_category,
     select_memory_ids_by_query,
+    select_recent_memory_ids,
 )
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
@@ -233,6 +235,49 @@ _MEMORY_CATEGORY_EMPTY_MESSAGE = (
 #: None), so the field is omitted entirely rather than carrying the raw,
 #: unvalidated input or a fabricated "general" value.
 _MEMORY_CATEGORY_SELECTION_ACTION_TYPE = "memory_category_selection"
+
+#: Advisory label for a recent-memory-summary response's message (Phase 13,
+#: Batch 2). Distinct from the other summary labels for the same reason
+#: each of those is distinct from the others: this marks a response whose
+#: entire content *is* the AI's own advisory output about a deterministically
+#: recency-selected set of memories, not an annotation appended to an
+#: already-decided response.
+_MEMORY_RECENT_SUMMARY_LABEL = "[AI recent memory summary - advisory only]"
+_MEMORY_RECENT_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise these memories' contents."
+)
+_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for these memories right now."
+)
+_MEMORY_RECENT_MANAGER_NOT_AVAILABLE_MESSAGE = (
+    "Memory access is not available, so I can't look up recent memories."
+)
+#: Honest rejection message for a valid lookup that returned nothing stored
+#: at all (docs/phase_13_implementation_plan.md, Section 9). Unlike the
+#: query/category workflows, there is no user-supplied criterion to name in
+#: this wording - "recent" carries no query text or category label - so this
+#: message names only the actual, honest fact: the store is empty.
+_MEMORY_RECENT_ZERO_RECORDS_MESSAGE = "No memories are stored yet."
+#: Fallback lookup-failure wording, used only if a future caller ever
+#: constructs a RecentSelectionResult.failed with no `error` set (never true
+#: for select_recent_memory_ids() itself, which always sets `error` for this
+#: state) - mirrors the same defensive `or` pattern already used for the
+#: query/category workflows' own failure branches.
+_MEMORY_RECENT_LOOKUP_FAILURE_FALLBACK_MESSAGE = (
+    "Could not look up recent stored memories right now."
+)
+
+#: Action type for the orchestrator's own recency-selection audit event
+#: (Phase 13, Batch 2). Reports that a deterministic recent-memory lookup
+#: was attempted and its outcome, distinct from the per-id
+#: memory_acquisition events Phase 10's ingestion still emits afterward for
+#: the ids the lookup selected (docs/phase_13_implementation_plan.md,
+#: Section 13/14). Unlike the category-selection event, there is no
+#: criterion value to log at all (no query text, no category label) - the
+#: fixed selection ceiling (10) is a code-level constant with no per-request
+#: variance, so no `requested_count=` field is added either, mirroring the
+#: plan's own reasoning for why that field would be redundant.
+_MEMORY_RECENT_SELECTION_ACTION_TYPE = "memory_recent_selection"
 
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
@@ -448,11 +493,14 @@ class JarvisOrchestrator:
         Phase 9, Batch 2), query-based memory-summary request ("summarise
         memories about <query>", Phase 11, Batch 2), category-based
         memory-summary request ("summarise memories in <category>", Phase
-        12, Batch 2), or explicit-id multi-memory-summary request
-        ("summarise memories <ids>", Phase 10, Batch 2) is recognised first
-        and handled by its own terminal path (_handle_file_summary_request /
-        _handle_memory_summary_request / _handle_memory_query_summary_request
-        / _handle_memory_category_summary_request /
+        12, Batch 2), recent-memory-summary request ("summarise recent
+        memories", Phase 13, Batch 2), or explicit-id multi-memory-summary
+        request ("summarise memories <ids>", Phase 10, Batch 2) is
+        recognised first and handled by its own terminal path
+        (_handle_file_summary_request / _handle_memory_summary_request /
+        _handle_memory_query_summary_request /
+        _handle_memory_category_summary_request /
+        _handle_memory_recent_summary_request /
         _handle_memory_set_summary_request) - it never reaches the
         rule-based handler below or _attach_ai_suggestion, since its entire
         response *is* the AI's own advisory output, not an annotation
@@ -479,6 +527,16 @@ class JarvisOrchestrator:
         prefixes collide with one another), but they are grouped together
         here, immediately before the plural matcher they must both
         precede.
+
+        The recent-memory matcher (Phase 13) is checked immediately after
+        the category matcher, grouped narratively with the other
+        deterministic-selection commands, but - unlike the query/category
+        matchers - its position here is **not** a correctness requirement:
+        "summarise recent memories" places its qualifier ("recent") before
+        "memories" rather than after it, so it is not a superset-string of
+        any other summary-family prefix in either direction
+        (docs/phase_13_implementation_plan.md, Section 4.1/11). It would
+        route identically from any position in this dispatch block.
 
         Args:
             user_request: The user's request in natural language.
@@ -520,6 +578,11 @@ class JarvisOrchestrator:
         if memory_category_summary_raw_text is not None:
             return self._handle_memory_category_summary_request(
                 memory_category_summary_raw_text, user_request, session_id
+            )
+
+        if self._command_router.match_memory_recent_summary(user_request.strip()):
+            return self._handle_memory_recent_summary_request(
+                user_request, session_id
             )
 
         memory_set_summary_raw_ids = self._command_router.match_memory_set_summary(
@@ -1188,6 +1251,195 @@ class JarvisOrchestrator:
 
         return response
 
+    def _handle_memory_recent_summary_request(
+        self, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "summarise recent memories" request (Phase 13,
+        Batch 2).
+
+        This is a terminal response path, the direct architectural sibling
+        of _handle_memory_query_summary_request/
+        _handle_memory_category_summary_request, generalised from an
+        explicit query/category criterion to no criterion at all: the
+        command carries no trailing free-text argument, so there is no
+        empty-input pre-flight check to perform here (unlike the query/
+        category workflows) - CommandRouter.match_memory_recent_summary()
+        already proved the exact command text was used before this method
+        is ever called. It owns no memory-retrieval, selection, or
+        combination logic of its own:
+
+            1. A Plan is generated normally (Planner.create_plan), exactly
+               as every other summary workflow already does.
+            2. AI reasoning availability and memory-subsystem availability
+               (self._reasoning, self._memory_manager) are confirmed
+               available, each with its own honest failure - mirroring the
+               query/category workflows' own order.
+            3. ai.memory_selection.select_recent_memory_ids() performs the
+               one deterministic recency lookup, at the fixed Phase 13
+               selection ceiling (10), preserving the store's own
+               newest-first result order exactly. This method never calls
+               MemoryManager.list_recent() itself, never calls MemoryTool,
+               and never ranks, reorders, or deduplicates the selector's
+               result.
+            4. The Phase 13 selection outcome is audited once
+               (_audit_memory_recent_selection) - a new, narrow,
+               non-authoritative event distinct from Phase 10's per-id
+               acquisition events.
+            5. Zero stored memories and a genuine lookup failure each
+               return their own distinct, honest response - neither ever
+               reaches ingestion or AI reasoning.
+            6. On a non-empty selection, the ordered selected ids are
+               handed, unchanged and in exactly the same newest-first
+               order, into ai.memory_ingestion.ingest_memories_for_ai() -
+               the exact same Phase 10 primitive the explicit-id, query-
+               based, and category-based workflows already use, unmodified.
+               This method never constructs or combines an AIContextBlock
+               itself, and never reverses the selected set into
+               chronological order (docs/phase_13_implementation_plan.md,
+               Section 6) - Phase 10's combined-context budget is
+               streaming/order-sensitive, so reversing would invert which
+               of the selected records survive if that budget is exceeded.
+            7. The existing per-id acquisition audit
+               (_audit_memory_set_acquisition) fires exactly as it already
+               does for the other three memory-summary workflows.
+            8. If no id could be included, this fails honestly with the
+               ingestion result's own itemized error - the AI is never
+               consulted with no usable context.
+            9. On partial or full success, the one combined context_block
+               - already trust-tagged and labelled from the *included* set
+               by ingest_memories_for_ai - is forwarded, unchanged, into a
+               new AIReasoningRequest. No recency bookkeeping (selection
+               count, "recent" criterion) is ever included in this
+               context_block; it reaches the AI only as part of the live
+               user_input, exactly as every other summary command's own
+               text already does.
+            10. AIReasoningEngine.reason() is called exactly as it always
+                is; this method has no ability to execute anything
+                regardless of what the AI returns.
+            11. Every AI-suggested action is evaluated through the
+                existing, unmodified _evaluate_unexpected_actions/
+                _audit_unexpected_action methods.
+            12. The response honestly distinguishes two separate layers of
+                accounting: the Phase 13 recency-selection count (how many
+                of the newest stored memories were found) and Phase 10's
+                own itemized ingestion disclosure (not_found/
+                retrieval_errors/omitted_for_size/truncated_records) via
+                the existing, unmodified _build_memory_set_disclosure -
+                neither is ever mixed into, or fed back into, the
+                untrusted memory context the AI reasoned about. The
+                wording never claims a time window, calendar meaning, or
+                relevance ranking - only the fixed newest-N selection
+                actually performed (docs/phase_13_implementation_plan.md,
+                Section 16).
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            user_request: The original, full request text (the exact
+                recognised command itself, since there is no trailing
+                criterion to separate out).
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced from at least one genuinely retrieved memory;
+            otherwise success=False with an honest explanation of which
+            stage did not complete (AI reasoning disabled/unavailable,
+            memory subsystem unavailable, no stored memories at all, a
+            lookup failure, or no usable context after ingestion) - never
+            blocked or requiring confirmation, since looking up and reading
+            the newest stored memories is already GREEN and consulting
+            advisory AI about already-permitted content requires no new
+            approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._memory_manager is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_MANAGER_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        selection = select_recent_memory_ids(self._memory_manager)
+        self._audit_memory_recent_selection(selection, session_id)
+
+        if selection.zero_matches:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_ZERO_RECORDS_MESSAGE,
+                plan=plan,
+            )
+
+        if selection.failed:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    selection.error
+                    or _MEMORY_RECENT_LOOKUP_FAILURE_FALLBACK_MESSAGE
+                ),
+                plan=plan,
+            )
+
+        ingestion = ingest_memories_for_ai(self._memory_manager, selection.selected_ids)
+        self._audit_memory_set_acquisition(ingestion, session_id)
+
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read those memories.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        match_count = len(selection.selected_ids)
+        memory_noun = "memory" if match_count == 1 else "memories"
+        summary = (
+            f"{summary} Found {match_count} recent {memory_noun}."
+        )
+
+        disclosure = self._build_memory_set_disclosure(ingestion)
+        if disclosure:
+            summary = f"{summary} {disclosure}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_MEMORY_RECENT_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
     def _handle_memory_set_summary_request(
         self, raw_ids_text: str, user_request: str, session_id: int | None
     ) -> JarvisResponse:
@@ -1717,6 +1969,86 @@ class JarvisOrchestrator:
             # the authoritative category-based memory-summary workflow
             # already in progress - same precedent as
             # _audit_memory_query_selection and AIRouter._emit_audit_event.
+            pass
+
+    def _audit_memory_recent_selection(
+        self,
+        selection: RecentSelectionResult,
+        session_id: int | None,
+    ) -> None:
+        """Record the recency-based selection outcome (Phase 13, Batch 2).
+
+        A new, narrow, non-authoritative audit event distinct from Phase
+        10's per-id memory_acquisition events: this one describes the
+        recency-lookup step itself (was a lookup attempted, what was its
+        outcome, how many/which ids did it select) exactly once per
+        recent-memory request, never repeating information the subsequent
+        per-id acquisition events already carry during ingestion
+        (docs/phase_13_implementation_plan.md, Section 13/15).
+
+        Unlike _audit_memory_query_selection (which logs `query_length`)
+        and _audit_memory_category_selection (which logs `category`), this
+        event carries no criterion-describing field at all: recency
+        selection takes no caller-supplied criterion beyond the fixed
+        selection ceiling, so there is nothing else here to log. No
+        `requested_count=` field is added either - the ceiling (10) is a
+        fixed, code-level constant with no per-request variance, so
+        logging it on every single event would be a constant, redundant
+        value carrying no review-time information (docs/phase_13_
+        implementation_plan.md, Section 13).
+
+        `success` and `zero_matches` are distinguished from a genuine
+        `failed` lookup by an `outcome=` field inside detail, not by a new
+        EventOutcome member: both `zero_matches` and `failed` map to the
+        existing EventOutcome.FAILURE value, mirroring
+        _audit_memory_query_selection's own convention.
+
+        When no logger is configured, this is a no-op, matching every
+        other optional-audit call site in this class. A raising logger is
+        caught here, scoped only around the emit() call itself, so a
+        failing audit event can never break the authoritative selection
+        outcome, the subsequent Phase 10 ingestion, or the AI reasoning
+        result already computed or about to be computed - the same
+        precedent as _audit_memory_query_selection,
+        _audit_memory_category_selection, and AIRouter._emit_audit_event.
+
+        Args:
+            selection: The result of select_recent_memory_ids().
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        if selection.success:
+            outcome = EventOutcome.SUCCESS
+            outcome_label = "success"
+        elif selection.zero_matches:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "zero_records"
+        else:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "failure"
+
+        detail = (
+            f"outcome={outcome_label} "
+            f"match_count={len(selection.selected_ids)} "
+            f"selected_ids={','.join(str(i) for i in selection.selected_ids)}"
+        )
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_MEMORY_RECENT_SELECTION_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=SecurityTier.GREEN,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative recent-memory-summary workflow already in
+            # progress - same precedent as _audit_memory_category_selection
+            # and AIRouter._emit_audit_event.
             pass
 
     def _emit_memory_acquisition_event(

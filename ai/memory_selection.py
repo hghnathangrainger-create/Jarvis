@@ -5,9 +5,11 @@ Deterministic, non-id-based memory selection for the Jarvis AI Operating
 System. Query-based selection was added in Phase 11, Batch 1
 (Deterministic Query-Based Memory Selection Foundation); category-based
 selection was added in Phase 12, Batch 1 (Deterministic Category-Based
-Memory Selection Foundation) as a sibling capability in this same module,
-mirroring how ai/memory_ingestion.py already houses both its single- and
-multi-record ingestion responsibilities together.
+Memory Selection Foundation); recency-based selection was added in Phase
+13, Batch 1 (Deterministic Recent-Memory Selection Foundation) - all three
+as sibling capabilities in this same module, mirroring how
+ai/memory_ingestion.py already houses both its single- and multi-record
+ingestion responsibilities together.
 
 Responsibilities:
     - Query selection: accept an explicit, caller-supplied query string
@@ -22,10 +24,21 @@ Responsibilities:
       MemoryManager.list_by_category() or normalize_category(), and
       invoke list_by_category() with the fixed Phase 12 selection ceiling
       (docs/phase_12_implementation_plan.md, Section 7.2: limit=10).
-    - Preserve MemoryManager.search()'s/list_by_category()'s own result
-      order exactly for both selectors - no re-sorting, no deduplication,
-      no candidate-pool reduction (Phase 11 plan, Section 5.2; Phase 12
-      plan, Section 7.1).
+    - Recency selection: accept no caller-supplied criterion at all beyond
+      the fixed selection ceiling, and invoke the existing, unmodified
+      MemoryManager.list_recent() - across all categories, never scoped to
+      one - with the fixed Phase 13 selection ceiling
+      (docs/phase_13_implementation_plan.md, Section 5.1/7: limit=10).
+      "Recent" means exactly what list_recent() already means: the newest
+      up-to-10 stored records in the store's own order - never an
+      invented time-window (last 24 hours, today, this week, or
+      otherwise), since no such capability exists anywhere in the store
+      this module calls (Phase 13 plan, Section 2).
+    - Preserve MemoryManager.search()'s/list_by_category()'s/
+      list_recent()'s own result order exactly for all three selectors -
+      no re-sorting, no deduplication, no candidate-pool reduction (Phase
+      11 plan, Section 5.2; Phase 12 plan, Section 7.1; Phase 13 plan,
+      Section 6).
     - Extract only the ordered memory ids from the results, never their
       content.
     - Represent every outcome as data, mirroring ai/memory_ingestion.py's
@@ -39,7 +52,12 @@ Responsibilities:
       empty search query: reusing MemoryManager.list_by_category()
       directly with an unvalidated category would let
       normalize_category() silently substitute "general" rather than
-      failing, honestly or otherwise (Phase 12 plan, Section 2.1).
+      failing, honestly or otherwise (Phase 12 plan, Section 2.1). Recency
+      selection has three distinct, never-collapsed states (success, zero
+      matches, lookup failure - Phase 13 plan, Section 5.2), the same
+      shape as query selection, because recency takes no caller-supplied
+      criterion that could itself be invalid - there is no fourth
+      "invalid input" state to represent.
 
 Does NOT (query selection, Phase 11):
     - Reject, strip, normalise, or otherwise pre-validate the query
@@ -83,7 +101,32 @@ Does NOT (category selection, Phase 12):
       The fixed Phase 12 selection ceiling (10) is always passed
       explicitly.
 
-Does NOT (both selectors):
+Does NOT (recency selection, Phase 13):
+    - Infer, filter by, or otherwise represent any time window (last 24
+      hours, today, yesterday, this week, a user-defined period, or any
+      other calendar/relative-date meaning). No such capability exists in
+      MemoryManager.list_recent()/EpisodicMemoryStore.list_recent(), and
+      none is introduced here - "recent" means only "the newest up-to-10
+      stored records in the store's own order" (Phase 13 plan, Section 2).
+    - Scope the lookup to a single category. list_recent() is always
+      called with no category argument (its own default, None), so
+      records from every known category remain eligible purely on
+      newest-first order - recency selection is not category selection
+      and does not reuse select_memory_ids_by_category() (Phase 13 plan,
+      Section 8).
+    - Reverse, chronologically re-order, or otherwise reinterpret
+      list_recent()'s own newest-first result for readability or any
+      other reason. The store's own order is preserved exactly, because
+      Phase 10's combined-context budget is streaming/order-sensitive and
+      reversing would invert which records are kept when the budget is
+      exceeded (Phase 13 plan, Section 6).
+    - Accept a caller-supplied count or time period. The selection
+      ceiling is a fixed, code-level constant; no user-tunable parameter
+      is exposed (Phase 13 plan, Section 3, Candidate A).
+    - Rely on MemoryManager.list_recent()'s own default limit (20). The
+      fixed Phase 13 selection ceiling (10) is always passed explicitly.
+
+Does NOT (all three selectors):
     - Retrieve memory content, construct an AIContextBlock, assign
       ContentTrust, or call PromptBuilder, AIRouter, AIReasoningEngine, or
       any AI provider. This module answers exactly one question per
@@ -92,27 +135,29 @@ Does NOT (both selectors):
       AI-facing context remains exclusively
       ai/memory_ingestion.py's ingest_memories_for_ai(), called
       afterward, unchanged, by a future orchestrator caller (Phase 11
-      plan, Sections 11, 12; Phase 12 plan, Section 11).
+      plan, Sections 11, 12; Phase 12 plan, Section 11; Phase 13 plan,
+      Section 11).
     - Duplicate any part of MemorySetIngestionResult,
       ingest_memories_for_ai(), _truncate(), combined-context
       framing/budgeting, whole-record omission, or partial-success
       accounting - all of that remains Phase 10's, untouched and reused
       unchanged by a future caller.
-    - Emit any audit/observability event. Both the memory_query_selection
-      and memory_category_selection audit events are
-      orchestrator/workflow concerns, assigned to their respective Batch 2
-      (Phase 11 plan, Section 12.2; Phase 12 plan, Section 12), not this
-      primitive.
+    - Emit any audit/observability event. The memory_query_selection,
+      memory_category_selection, and memory_recent_selection audit events
+      are all orchestrator/workflow concerns, assigned to their respective
+      Batch 2 (Phase 11 plan, Section 12.2; Phase 12 plan, Section 12;
+      Phase 13 plan, Section 13), not this primitive.
     - Retry, rank, or otherwise second-guess a lookup-layer exception - a
       raised exception is caught once, at this module's own boundary, for
       the one call it wraps, and represented as a single, honest failure
       state.
 
-This module's only new production component in Phase 12 Batch 1 is the
-category-selection primitive; the existing Phase 11 query-selection
-primitive (select_memory_ids_by_query/QuerySelectionResult) is untouched
-in behaviour, per the explicit instruction not to generalise or rename
-Phase 11 APIs merely for symmetry.
+This module's only new production component in Phase 13 Batch 1 is the
+recency-selection primitive; the existing Phase 11 query-selection
+primitive (select_memory_ids_by_query/QuerySelectionResult) and Phase 12
+category-selection primitive (select_memory_ids_by_category/
+CategorySelectionResult) are untouched in behaviour, per the explicit
+instruction not to generalise or rename existing APIs merely for symmetry.
 """
 
 from __future__ import annotations
@@ -521,3 +566,171 @@ def select_memory_ids_by_category(
 
     selected_ids = tuple(record.id for record in records)
     return CategorySelectionResult(selected_ids=selected_ids, category=canonical)
+
+
+# ---------------------------------------------------------------------------
+# Recency-based selection (Phase 13, Batch 1)
+# ---------------------------------------------------------------------------
+
+#: The fixed Phase 13 selection ceiling (docs/phase_13_implementation_plan.md,
+#: Section 7). Deliberately identical in value to _SELECTION_LIMIT and
+#: _CATEGORY_SELECTION_LIMIT above, and to Phase 10's own max_records
+#: default, for the same reason already established twice: the
+#: recency-lookup limit and the Phase 10 selection ceiling are equal by
+#: explicit design, not by coincidence, and remain two independently
+#: configurable numbers, never conflated as one concept in code.
+_RECENT_SELECTION_LIMIT = 10
+
+#: Honest, generic failure message for a genuine list_recent() exception.
+#: Deliberately does not embed the raised exception's own text, mirroring
+#: _SEARCH_FAILURE_MESSAGE's/_CATEGORY_LOOKUP_FAILURE_MESSAGE's own
+#: convention above.
+_RECENT_LOOKUP_FAILURE_MESSAGE = (
+    "Could not look up recent stored memories right now."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RecentSelectionResult:
+    """The result of a deterministic, recency-based memory-id selection.
+
+    Exactly one of three states applies, distinguished by the `success`,
+    `zero_matches`, and `failed` properties below - never collapsed into a
+    single generic outcome, the same three-state shape as
+    QuerySelectionResult (docs/phase_13_implementation_plan.md, Section
+    5.2). Unlike QuerySelectionResult (which carries `query_length`) and
+    CategorySelectionResult (which carries `category`), this result carries
+    no criterion-describing field at all: recency selection takes no
+    caller-supplied input beyond the fixed selection ceiling, so there is
+    nothing else here to represent, log, or validate.
+
+    Attributes:
+        selected_ids: The ids of the records MemoryManager.list_recent()
+            returned, in exactly the order it returned them - never
+            re-sorted, deduplicated, or reordered here (created_at DESC,
+            id DESC, per the current store implementation). Empty when the
+            lookup completed but the store held no memories, or when it
+            failed.
+        error: A human-readable failure reason, set only when the
+            underlying list_recent() call itself raised. None when the
+            lookup call completed, whether or not it returned any
+            records.
+    """
+
+    selected_ids: tuple[int, ...] = ()
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject any construction that does not represent a coherent outcome.
+
+        Raises:
+            ValueError: If `error` is set alongside a non-empty
+                `selected_ids` - a represented lookup failure never claims
+                that any ids were actually selected.
+        """
+        if self.error is not None and self.selected_ids:
+            raise ValueError(
+                "RecentSelectionResult cannot carry both selected_ids and "
+                "an error - a represented lookup failure never claims "
+                "that any ids were actually selected."
+            )
+
+    @property
+    def success(self) -> bool:
+        """Return whether the lookup completed and returned at least one record.
+
+        Returns:
+            True only when `error` is None and `selected_ids` is
+            non-empty.
+        """
+        return self.error is None and bool(self.selected_ids)
+
+    @property
+    def zero_matches(self) -> bool:
+        """Return whether the lookup completed but the store held no memories.
+
+        Distinct from `failed`: the lookup operation itself succeeded - it
+        is a valid, deterministic fact that no memories are currently
+        stored, not an infrastructure problem.
+
+        Returns:
+            True only when `error` is None and `selected_ids` is empty.
+        """
+        return self.error is None and not self.selected_ids
+
+    @property
+    def failed(self) -> bool:
+        """Return whether the underlying list_recent() call itself raised.
+
+        Returns:
+            True only when `error` is set.
+        """
+        return self.error is not None
+
+    @property
+    def match_count(self) -> int:
+        """Return the number of selected ids.
+
+        Returns:
+            len(selected_ids).
+        """
+        return len(self.selected_ids)
+
+
+def select_recent_memory_ids(
+    memory_manager: MemoryManager,
+    *,
+    limit: int = _RECENT_SELECTION_LIMIT,
+) -> RecentSelectionResult:
+    """Select the ordered ids of the newest stored memories, deterministically.
+
+    Calls memory_manager.list_recent(limit=limit) exactly once - the sole
+    call site - across all categories (list_recent()'s own `category`
+    parameter is never supplied, so its default of None applies, and every
+    known category remains eligible) - and extracts only the ids of the
+    returned records, in exactly the order list_recent() returned them.
+    Applies no ranking, no re-sorting, no deduplication, and no
+    candidate-pool reduction: whatever order and whichever up-to-`limit`
+    records MemoryManager.list_recent()/EpisodicMemoryStore.list_recent()
+    returns is exactly what this function reports (created_at DESC, id
+    DESC, per the current store implementation - see
+    docs/phase_13_implementation_plan.md, Section 6). This function never
+    reverses the selected set into chronological order: the store's own
+    newest-first order is preserved exactly, because Phase 10's
+    combined-context budget processes ids in supplied order and reversing
+    would invert which of the selected records are kept if that budget is
+    ever exceeded (Phase 13 plan, Section 6).
+
+    "Recent" means exactly what the repository's own list_recent() already
+    means: the newest up-to-`limit` stored memory records, in the store's
+    own order. This function does not filter by, or infer, any time window
+    (last 24 hours, today, this week, or otherwise) - no such capability
+    exists anywhere in the store this function calls, and none is
+    introduced here (docs/phase_13_implementation_plan.md, Section 2).
+
+    Args:
+        memory_manager: The MemoryManager used to perform the lookup.
+        limit: The maximum number of records memory_manager.list_recent()
+            may return. Defaults to the fixed Phase 13 selection ceiling
+            (10). Production callers should not override this; it exists
+            as a parameter only so tests can exercise the limit explicitly
+            without relying on the module-level default.
+
+    Returns:
+        A RecentSelectionResult. On a successful lookup that returned at
+        least one record, `selected_ids` carries the ordered ids and
+        `error` is None (`.success` is True). On a successful lookup that
+        returned nothing (an empty store), `selected_ids` is empty and
+        `error` is None (`.zero_matches` is True). If
+        memory_manager.list_recent() itself raises, `selected_ids` is
+        empty and `error` carries an honest, generic failure message
+        (`.failed` is True) - the raised exception's own text is never
+        embedded in the returned error.
+    """
+    try:
+        records = memory_manager.list_recent(limit=limit)
+    except Exception:
+        return RecentSelectionResult(error=_RECENT_LOOKUP_FAILURE_MESSAGE)
+
+    selected_ids = tuple(record.id for record in records)
+    return RecentSelectionResult(selected_ids=selected_ids)

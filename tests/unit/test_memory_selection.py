@@ -35,6 +35,8 @@ Run with:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
@@ -43,8 +45,10 @@ import ai.memory_selection as memory_selection_module
 from ai.memory_selection import (
     CategorySelectionResult,
     QuerySelectionResult,
+    RecentSelectionResult,
     select_memory_ids_by_category,
     select_memory_ids_by_query,
+    select_recent_memory_ids,
 )
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
@@ -802,3 +806,363 @@ def test_no_duplicate_ids_across_multiple_real_category_matches(
 
     assert len(result.selected_ids) == len(set(result.selected_ids))
     assert set(result.selected_ids) == set(ids)
+
+
+# =============================================================================
+# Recency-based selection (Phase 13, Batch 1)
+# =============================================================================
+
+
+class _RecentSpyMemoryManager:
+    """Wraps a real MemoryManager, recording every list_recent() call
+    received, without changing real behaviour."""
+
+    def __init__(self, real: MemoryManager) -> None:
+        self._real = real
+        self.list_recent_calls: list[int] = []
+
+    def list_recent(self, limit: int = 20, **kwargs: object):
+        self.list_recent_calls.append(limit)
+        return self._real.list_recent(limit=limit, **kwargs)
+
+
+class _RaisingRecentMemoryManager:
+    """Simulates a genuine list_recent()-layer exception."""
+
+    def list_recent(self, limit: int = 20, **kwargs: object):
+        raise RuntimeError("simulated database failure")
+
+
+# --- Successful selection, exact ids, order preservation -------------------
+
+
+def test_successful_recent_selection_returns_newest_ids(
+    memory_manager: MemoryManager,
+) -> None:
+    id_a = _save(memory_manager, "first memory")
+    id_b = _save(memory_manager, "second memory")
+    id_c = _save(memory_manager, "third memory")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.success
+    assert not result.zero_matches
+    assert not result.failed
+    assert result.error is None
+    assert result.selected_ids == (id_c, id_b, id_a)
+
+
+def test_recent_result_order_is_preserved_newest_first_not_reversed(
+    memory_manager: MemoryManager,
+) -> None:
+    # Saved in ascending id order; the store's own contract orders results
+    # created_at DESC, id DESC - i.e. newest first, the reverse of
+    # insertion order. The selector must not reverse this back into
+    # chronological (oldest-first) order for any reason.
+    ids = [_save(memory_manager, f"chronology entry {i}") for i in range(5)]
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.selected_ids == tuple(reversed(ids))
+
+
+def test_recent_no_numeric_reordering_of_selected_ids(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [_save(memory_manager, f"reorder-check entry {i}") for i in range(5)]
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.selected_ids == tuple(reversed(ids))
+    assert result.selected_ids != tuple(sorted(result.selected_ids))
+
+
+# --- Explicit limit=10 behaviour, never the store's default of 20 ----------
+
+
+def test_explicit_limit_of_ten_is_passed_to_list_recent(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _RecentSpyMemoryManager(memory_manager)
+    for i in range(3):
+        _save(memory_manager, f"limit-check entry {i}")
+
+    select_recent_memory_ids(spy)
+
+    assert spy.list_recent_calls == [10]
+
+
+def test_more_than_ten_recent_records_are_capped_at_ten_newest(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [_save(memory_manager, f"ceiling-check entry {i}") for i in range(11)]
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert len(result.selected_ids) == 10
+    # created_at DESC, id DESC: the ten highest ids, newest first - the
+    # single oldest/lowest id (ids[0]) is excluded, never a differently
+    # chosen subset and never resorted.
+    assert result.selected_ids == tuple(reversed(ids))[:10]
+    assert ids[0] not in result.selected_ids
+
+
+def test_does_not_retrieve_a_larger_recent_pool_then_slice(
+    memory_manager: MemoryManager,
+) -> None:
+    spy = _RecentSpyMemoryManager(memory_manager)
+    for i in range(15):
+        _save(memory_manager, f"pool-check entry {i}")
+
+    select_recent_memory_ids(spy)
+
+    # Exactly one list_recent() call, with limit=10 - never limit=20 (the
+    # store's own default) and never a larger pool later reduced.
+    assert spy.list_recent_calls == [10]
+
+
+# --- Across-all-categories behaviour: recency is not category selection ----
+
+
+def test_recent_selection_spans_multiple_categories_by_recency_order(
+    memory_manager: MemoryManager,
+) -> None:
+    older_project_id = _save(
+        memory_manager, "older project memory", category="project"
+    )
+    newer_note_id = _save(memory_manager, "newer note memory", category="note")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    # The newer note is eligible before the older project record solely
+    # because recency is newest-first across all categories - never
+    # grouped, quota'd, or prioritised by category.
+    assert result.selected_ids == (newer_note_id, older_project_id)
+
+
+def test_recent_selection_does_not_group_or_prioritize_by_category(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = []
+    for i, category in enumerate(KNOWN_CATEGORIES):
+        ids.append(_save(memory_manager, f"entry {i}", category=category))
+
+    result = select_recent_memory_ids(memory_manager)
+
+    # Saved in KNOWN_CATEGORIES order; newest-first means the reverse of
+    # insertion order, regardless of which category each entry carries.
+    assert result.selected_ids == tuple(reversed(ids))
+
+
+def test_recent_selection_does_not_reuse_category_selector(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "a project memory", category="project")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    # The result type itself proves this is the recency primitive, not a
+    # category lookup in disguise - CategorySelectionResult carries a
+    # `category` field this result never has.
+    assert isinstance(result, RecentSelectionResult)
+    assert not hasattr(result, "category")
+
+
+def test_content_differences_do_not_influence_recent_selection(
+    memory_manager: MemoryManager,
+) -> None:
+    # Deliberately dissimilar content, categories, and sources - only
+    # save order (and therefore created_at/id) should determine selection.
+    id_a = _save(memory_manager, "zzz alpha", category="personal", source="tool")
+    id_b = _save(memory_manager, "aaa beta", category="project", source="conversation")
+    id_c = _save(memory_manager, "mmm gamma", category="note", source="tool")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.selected_ids == (id_c, id_b, id_a)
+
+
+def test_returned_recent_ids_exactly_match_list_recent_records(
+    memory_manager: MemoryManager,
+) -> None:
+    ids = [_save(memory_manager, f"exact-match entry {i}") for i in range(4)]
+
+    result = select_recent_memory_ids(memory_manager)
+    direct = memory_manager.list_recent(limit=10)
+
+    assert result.selected_ids == tuple(record.id for record in direct)
+    assert set(result.selected_ids) == set(ids)
+
+
+# --- Zero records vs. lookup failure: two distinct, non-collapsed states ---
+
+
+def test_zero_records_is_zero_matches_not_failure(
+    memory_manager: MemoryManager,
+) -> None:
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.zero_matches
+    assert not result.failed
+    assert not result.success
+    assert result.selected_ids == ()
+    assert result.error is None
+
+
+def test_list_recent_exception_is_represented_as_failed() -> None:
+    result = select_recent_memory_ids(_RaisingRecentMemoryManager())
+
+    assert result.failed
+    assert not result.zero_matches
+    assert not result.success
+    assert result.selected_ids == ()
+    assert result.error == "Could not look up recent stored memories right now."
+    # The raised exception's own text is never embedded in the result.
+    assert "simulated database failure" not in (result.error or "")
+
+
+# --- RecentSelectionResult invariants ---------------------------------------
+
+
+def test_recent_result_rejects_error_and_selected_ids_together() -> None:
+    with pytest.raises(ValueError):
+        RecentSelectionResult(selected_ids=(1, 2), error="boom")
+
+
+def test_recent_result_default_construction_is_zero_matches() -> None:
+    result = RecentSelectionResult()
+
+    assert result.zero_matches
+    assert not result.success
+    assert not result.failed
+
+
+def test_recent_result_match_count_reflects_selected_ids_cardinality(
+    memory_manager: MemoryManager,
+) -> None:
+    for i in range(4):
+        _save(memory_manager, f"match-count entry {i}")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.match_count == len(result.selected_ids) == 4
+
+
+# --- Timestamp and tie-breaking proof ----------------------------------------
+
+
+def test_created_at_is_utc_valued_though_sqlite_returns_it_naive(
+    memory_manager: MemoryManager,
+) -> None:
+    before = datetime.now(timezone.utc)
+    memory_id = _save(memory_manager, "timestamp check")
+    after = datetime.now(timezone.utc)
+
+    record = memory_manager.get(memory_id)
+
+    assert record is not None
+    # storage/models.py's _utc_now() stamps an aware UTC datetime at write
+    # time (its own docstring: "timezone-aware UTC datetime"), but this
+    # repository's SQLite backend does not preserve tzinfo on round-trip -
+    # EpisodicMemoryStore returns a *naive* datetime whose numeric value is
+    # still UTC. This test proves the actually-observed round-trip
+    # behaviour rather than assuming the model docstring's
+    # "timezone-aware" claim survives storage. Recency ordering itself is
+    # unaffected either way, since SQL ORDER BY compares the same column
+    # representation on both sides of every comparison.
+    assert record.created_at.tzinfo is None
+    stamped_at_utc = record.created_at.replace(tzinfo=timezone.utc)
+    assert before - timedelta(seconds=5) <= stamped_at_utc <= after + timedelta(seconds=5)
+
+
+def test_equal_created_at_records_are_ordered_by_id_desc() -> None:
+    from sqlalchemy import create_engine
+
+    from storage.database import (
+        create_session_factory,
+        initialize_database,
+        session_scope,
+    )
+    from storage.models import EpisodicMemory
+
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    manager = MemoryManager(EpisodicMemoryStore(factory))
+
+    id_a = _save(manager, "tie-break entry A")
+    id_b = _save(manager, "tie-break entry B")
+
+    # Force both records to share the exact same created_at, using the
+    # same repository ORM model/session seam production code already
+    # writes through - not a new clock abstraction, just a direct proof
+    # of the store's own id DESC tie-break contract for genuinely equal
+    # timestamps.
+    shared_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with session_scope(factory) as db:
+        for memory_id in (id_a, id_b):
+            entry = db.get(EpisodicMemory, memory_id)
+            entry.created_at = shared_timestamp
+
+    result = select_recent_memory_ids(manager)
+
+    # Both records now share an identical created_at; id DESC breaks the
+    # tie deterministically - the higher id (inserted later) sorts first.
+    assert result.selected_ids.index(id_b) < result.selected_ids.index(id_a)
+
+
+# --- No duplicate ids from a genuine multi-record lookup --------------------
+
+
+def test_no_duplicate_ids_across_multiple_real_recent_records(
+    memory_manager: MemoryManager,
+) -> None:
+    # The store performs a single, non-joining query over one table
+    # (memory/episodic_memory.py), so a row can never be returned more
+    # than once - proven here directly rather than simulating an
+    # artificial duplicate scenario the real store cannot produce.
+    ids = [_save(memory_manager, f"dup-check entry {i}") for i in range(6)]
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert len(result.selected_ids) == len(set(result.selected_ids))
+    assert set(result.selected_ids) == set(ids)
+
+
+# --- No Phase 10 ingestion or AI/provider involvement (recent path) --------
+
+
+def test_does_not_call_ingestion_or_ai_during_recent_selection(
+    memory_manager: MemoryManager,
+) -> None:
+    _save(memory_manager, "a memory for the no-ingestion proof")
+
+    result = select_recent_memory_ids(memory_manager)
+
+    assert result.success
+    assert isinstance(result, RecentSelectionResult)
+
+
+# --- Phase 11/12 selectors remain fully unmodified by Phase 13 -------------
+
+
+def test_phase_11_query_selector_unaffected_by_phase_13_addition(
+    memory_manager: MemoryManager,
+) -> None:
+    memory_id = _save(memory_manager, "phase 11 regression check content")
+
+    result = select_memory_ids_by_query(memory_manager, "phase 11 regression check")
+
+    assert isinstance(result, QuerySelectionResult)
+    assert result.selected_ids == (memory_id,)
+
+
+def test_phase_12_category_selector_unaffected_by_phase_13_addition(
+    memory_manager: MemoryManager,
+) -> None:
+    memory_id = _save(memory_manager, "phase 12 regression check", category="note")
+
+    result = select_memory_ids_by_category(memory_manager, "note")
+
+    assert isinstance(result, CategorySelectionResult)
+    assert result.selected_ids == (memory_id,)

@@ -194,6 +194,26 @@ _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memories",
 )
 
+#: The exact, complete recent-memory-summary commands (Phase 13, Batch 2).
+#: Unlike every other summary-family command, this one carries no trailing
+#: free-text argument at all - there is no query, category, or id list to
+#: extract - so it is matched as a complete phrase, never as a prefix.
+#: Because the qualifier ("recent") sits between "summarise"/"summarize" and
+#: "memories" rather than after "memories" (contrast
+#: _MEMORY_QUERY_SUMMARY_PREFIXES's "about" and
+#: _MEMORY_CATEGORY_SUMMARY_PREFIXES's "in", both of which follow
+#: "memories"), neither phrase here is a superset-string of
+#: _MEMORY_SET_SUMMARY_PREFIXES ("summarise memories") in either direction,
+#: and neither is a superset-string of _MEMORY_SUMMARY_PREFIXES ("summarise
+#: memory") either - confirmed by direct string comparison, not merely
+#: assumed (docs/phase_13_implementation_plan.md, Section 4.1). This means,
+#: unlike Phase 11/12, dispatch-order placement relative to the other four
+#: summary-family matchers does not affect correctness.
+_MEMORY_RECENT_SUMMARY_EXACT: tuple[str, ...] = (
+    "summarise recent memories",
+    "summarize recent memories",
+)
+
 
 class CommandRouter:
     """Matches request text to a registered tool and builds its input.
@@ -472,6 +492,42 @@ class CommandRouter:
             return None
 
         return text[len(prefix) :].strip()
+
+    def match_memory_recent_summary(self, text: str) -> bool:
+        """Match the exact, complete recent-memory-summary command.
+
+        Recognises only the exact phrases "summarise recent memories" and
+        "summarize recent memories" (Phase 13, Batch 2), matched
+        case-insensitively after stripping surrounding whitespace - never
+        as a prefix. Unlike match_memory_summary/match_memory_query_summary/
+        match_memory_category_summary/match_memory_set_summary, this
+        command carries no trailing free-text argument at all: there is no
+        query, category, or id list to extract, so there is nothing for
+        this method to return except whether the exact command was used.
+        Any extra trailing text - "summarise recent memories about
+        security", "summarise recent memories in project", "summarise
+        recent memories 5", "summarise very recent memories" - names a
+        different, unrecognised command; it is never silently accepted as
+        this one with the extra tokens ignored
+        (docs/phase_13_implementation_plan.md, Section 4.2).
+
+        This method does not collide with match_memory_summary (singular),
+        match_memory_query_summary, match_memory_category_summary, or
+        match_memory_set_summary in either direction (Section 4.1) - its
+        position relative to those checks in the caller's dispatch order
+        does not affect correctness, unlike the query/category matchers'
+        genuine ordering requirement relative to the plural matcher.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            True if text is exactly one of the two recognised phrases
+            (case-insensitively, ignoring only surrounding whitespace),
+            False otherwise - including when extra trailing text is
+            present.
+        """
+        return text.strip().casefold() in _MEMORY_RECENT_SUMMARY_EXACT
 
     def match_memory_set_summary(self, text: str) -> str | None:
         """Match an explicit multi-memory-summary request and extract its
