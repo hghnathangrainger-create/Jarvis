@@ -18,6 +18,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 12 complete: Deterministic Category-Based Memory Selection for Advisory AI.**
 **Phase 13 complete: Deterministic Recency-Based Automatic Memory Selection for Advisory AI.**
 **Phase 14 complete: User-Controlled Bounded Recent-Memory Count for Advisory AI.**
+**Phase 15 complete: Sequential Workflow Execution — Minimal Multi-Step Planner and Workflow Engine.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -39,9 +40,11 @@ Phase 13 adds a third, complementary dimension: an explicit `summarise recent me
 
 Phase 14 lets you choose exactly how many recent memories to summarise: an explicit `summarise latest <count> memories` command deterministically selects the newest **N** stored memories, where N is a number you supply (1–10). An invalid count (zero, above 10, or not a whole number) is honestly rejected rather than silently rounded or clamped. The original `summarise recent memories` command is unchanged and still means exactly the newest 10. See the Phase 14 section below.
 
+Phase 15 is a genuinely new kind of capability, not another memory selector: Jarvis can now run a short, fixed, two-step **workflow** — a real multi-step job, not just a single reply — through a new Sequential Workflow Engine, with every step still individually classified and gated by the same Security Manager and Tool Executor as always. Two exact commands exist today: `remember this and show it back: <text>` (save, then immediately read back what was saved) and `remember this and forget it: <text>` (save, then forget — which asks for approval first, exactly like `forget memory <id>` already does). Nothing about this is AI-planned, general-purpose, or user-definable — see the Phase 15 section below for exactly what it is and is not.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **1546 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–14 test, including all of Phase 14's batches.
+> **Verified:** `poetry run pytest -v` — **1815 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–15 test.
 
 ---
 
@@ -385,6 +388,35 @@ Time-window retrieval, calendar or relative-date interpretation, counts above 10
 
 ---
 
+## Phase 15 — Sequential Workflow Execution — Minimal Multi-Step Planner and Workflow Engine (complete)
+
+Every request before Phase 15 was a single, immediate step: the Planner produced exactly one `PlanStep`, and Jarvis ran at most one tool call (or one AI-advisory reply) per request. Phase 15 adds a real, narrow **Sequential Workflow Engine**: a small, fixed set of already-existing actions can now run one after another, in order, as one job — with every single step still individually classified by the Security Manager and gated by the Tool Executor, exactly as before. This is the first time Jarvis's `workflow/` package (empty since Phase 1) holds real code. See `docs/phase_15_completion_report.md` for the full write-up.
+
+- **Batch 1 — Minimal multi-step plan and workflow models.** `PlanStep` gains three optional fields (`tool_name`, `tool_input`, `input_from_previous_step`) that default safely for every existing single-step command; two new runtime models (`WorkflowStepOutcome`, `WorkflowResult`) describe a workflow's outcome using only the existing `StepStatus` vocabulary.
+- **Batch 2 — Headless Sequential Workflow Engine.** `WorkflowEngine` executes a plan's steps strictly in order, delegating every single one to the existing, unmodified Tool Executor — it never classifies an action itself, never calls a tool directly, and never trusts a step's own display tier.
+- **Batch 3 — Deterministic workflow commands and Orchestrator wiring.** The two exact commands below, each built from a small, fixed, deterministic plan factory — never natural-language planning, never AI-authored.
+- **Batch 4 — CLI workflow trace and end-to-end proof.** An honest, after-the-fact execution trace (not live progress) shown alongside the existing plan display, plus full end-to-end proof through the real approval flow.
+- **Batch 4A/4B — Observability closure.** Two narrow, pre-existing gaps (not new to Phase 15, but exposed by its extra step-level activity) were found and fixed: a failing audit logger could previously escape the Tool Executor or the Approval Manager and disrupt an otherwise-valid outcome. Both are now isolated exactly like every other optional audit call in Jarvis — a lost log line is accepted; a distorted result is not.
+
+### Workflow commands
+
+| Command | What it does |
+|---|---|
+| `remember this and show it back: <text>` | Saves `<text>` as a new memory, then immediately reads that exact memory back by the id it was just given. Both steps are GREEN. |
+| `remember this and forget it: <text>` | Saves `<text>` as a new memory, then forgets that exact memory. The forget step is YELLOW and **asks for approval** first, exactly like `forget memory <id>` already does — approve to forget it, decline to keep it. |
+
+Both commands require the mandatory colon shown above and are matched case-insensitively; no other phrasing (missing colon, "and then", semicolons, or any other connector) is recognised as a workflow — it falls through to ordinary command handling instead, exactly as before Phase 15.
+
+### Safety note: every step is still classified on its own, live, every time
+
+A workflow is not classified once as a whole. Each step, when it actually runs, is independently classified by the same Security Manager rule table every other Jarvis action already goes through — a step's own display tier in the plan is shown for transparency only and is never trusted for the real decision. If a step is GREEN, it runs automatically; if a step is YELLOW, the workflow pauses and asks for your approval through the exact same approval flow every other sensitive action already uses, before continuing; a step that would be blocked (RED) stops the workflow immediately and no later step ever runs. Declining an approval, a failed step, or a blocked step all stop the workflow the same way — nothing is retried, and nothing already done is undone.
+
+### What is deliberately NOT included in Phase 15
+
+General-purpose or natural-language workflow creation, AI-authored or AI-selected workflows, user-defined command sequences, arbitrary tool chaining, dependency graphs, branching, retries, parallel steps, more than one active workflow at a time, durable or crash-recoverable workflow state (a paused workflow is forgotten if Jarvis restarts before you answer), scheduled or background workflows, and live/streaming progress display (the workflow trace is shown after each step or the whole job finishes, not while it runs). A workflow step can only ever hand its own stored-memory id forward to the very next step — never any other data, and never to any step further ahead. Any new AI execution authority, and any new approval gate beyond the existing one, are equally out of scope.
+
+---
+
 ## Example Session
 
 ```
@@ -471,6 +503,8 @@ jarvis/
 │                   file_read (GREEN); file_create, file_append,
 │                   memory_update, memory_forget (YELLOW, approval-gated)
 ├── approval/       Approval models and the Approval Manager
+├── workflow/       Sequential Workflow Engine and the deterministic
+│                   two-step workflow plan factory
 ├── core/           Orchestrator that wires everything together, plus the
 │                   CommandRouter that matches request text to a tool
 ├── ui/             Command-line interface and approval prompts
@@ -493,10 +527,12 @@ jarvis/
 
 ## Next Phase
 
-**Phase 14 is complete**: Jarvis can now deterministically select a user-chosen number of the newest stored memories and have the advisory AI summarise them together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. Deterministic selection now exists in five forms — explicit ids (Phase 10), query search (Phase 11), category (Phase 12), fixed recency (Phase 13), and count-bounded recency (Phase 14) — all sharing the same seam: a strategy produces an ordered list of memory ids, and Phase 10's `ingest_memories_for_ai()` combines them, unchanged. Phase 14 also closed the one concrete architectural debt the Phase 10–13 retrieval-family review identified: a new, narrow, structural test now proves Jarvis's AI-facing memory code only ever calls known read-only `MemoryManager` methods, converting five phases of manual review into one checkable invariant. What comes next, per `docs/phase_14_completion_report.md`, is genuinely time-windowed retrieval — first requiring a review of a disclosed, non-blocking timestamp-representation limitation (persisted timestamps are observed naive, not timezone-aware, once read back from SQLite) — or a narrow, separately-scoped internal refactor of the now five-times-repeated post-selection workflow shape. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
+**Phase 15 is complete**: Jarvis can now run a short, fixed, two-step workflow through a new headless Sequential Workflow Engine, with every step still individually classified by the Security Manager and gated by the Tool Executor exactly as before — see `docs/phase_15_completion_report.md` for the full closure write-up, including the two narrow observability-isolation defects (Tool Executor, Approval Manager) found and fixed along the way.
 
-Resumable approvals and deeper but still-advisory AI assistance remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
+Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. The next architectural direction has not been chosen and requires its own fresh review after this closure, in the same way every prior phase boundary has: what a general-purpose workflow syntax, AI-assisted or AI-authored planning, scheduled or background execution, or durable/crash-recoverable workflow state would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 15 unlocking the underlying engine; each remains a separately-scoped decision.
+
+Resumable approvals beyond a single paused workflow, and deeper but still-advisory AI assistance, remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, and Phase 14 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, and Phase 15 are complete for their defined scope, not yet tagged. None is a finished product.*
