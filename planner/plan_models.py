@@ -34,7 +34,48 @@ class PlanStep:
         description: A short, human-readable description of what the step does.
         action: The action string that was classified by the Security Manager.
         tier: The security tier assigned to the step (GREEN, YELLOW, or RED).
+            This is display/transparency metadata only, produced once at
+            planning time - it is never authoritative for execution. Any
+            future executable-workflow code (Phase 15, Batch 2) must
+            re-classify a step's actual tool action via
+            SecurityManager.classify_action() at the moment it runs, exactly
+            as ToolExecutor already does today for every single-step
+            request; it must never branch on this field.
         reason: The Security Manager's explanation for the assigned tier.
+        tool_name: The name of the registered tool this step calls, if this
+            step represents an executable workflow step (Phase 15). None for
+            every existing Phase 1-14 single-step plan, which continues to
+            resolve its tool separately via CommandRouter.match(), exactly as
+            before. This field is plain, unvalidated data: it is never
+            checked against ToolRegistry and never used to derive a security
+            tier here - tool availability and classification are execution-
+            time concerns owned by later code (ToolExecutor / a future
+            WorkflowEngine), not by this immutable model.
+        tool_input: The input this step's tool call should run with, if
+            tool_name is set. Empty for every existing Phase 1-14 plan. A
+            plain, unvalidated mapping - the same shape as
+            tools.base_tool.ToolRequest.input_data - with no schema,
+            template language, or expression support.
+        input_from_previous_step: Declares only the intent that this step's
+            execution input is derived from the immediately preceding
+            completed step's result, according to a rule a future
+            WorkflowEngine (Phase 15, Batch 2) applies at execution time.
+            False for every existing Phase 1-14 plan and for any step with
+            no such dependency.
+
+            This field is declarative only. It does not name a variable,
+            does not identify a source field, and does not itself move any
+            data. Explicit limitations, by design:
+                - refers only to the immediately previous step, never an
+                  arbitrary earlier one;
+                - has no dependency-graph semantics (Plan.steps' own tuple
+                  order remains the sole ordering authority);
+                - defines no transformation, template, or expression
+                  language (no "${step1.result}"-style reference exists
+                  anywhere in this model);
+                - is never interpreted or populated by an AI - only
+                  deterministic, code-owned logic in a future WorkflowEngine
+                  may act on it.
     """
 
     number: int
@@ -42,6 +83,9 @@ class PlanStep:
     action: str
     tier: SecurityTier
     reason: str
+    tool_name: str | None = None
+    tool_input: dict[str, object] = field(default_factory=dict)
+    input_from_previous_step: bool = False
 
     @property
     def is_blocked(self) -> bool:
