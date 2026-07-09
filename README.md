@@ -14,6 +14,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 8 complete: Real External-Content Ingestion.**
 **Phase 9 complete: Stored-Memory Ingestion for Advisory AI.**
 **Phase 10 complete: Multi-Memory Retrieval and Selection for Advisory AI.**
+**Phase 11 complete: Deterministic Query-Based Memory Selection for Advisory AI.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -27,9 +28,11 @@ Phase 9 is the second real use of that same trust boundary: an explicit `summari
 
 Phase 10 extends that same trust boundary to more than one memory at once: an explicit `summarise memories <ids>` command reads a small, user-named set of already-stored memories by id and combines them into one typed, untrusted context for the advisory AI — still scanned, still audited, still never able to gain new authority. Every memory must be named explicitly; nothing is selected automatically. See the Phase 10 section below.
 
+Phase 11 answers the question Phase 10 left open: an explicit `summarise memories about <query>` command deterministically **searches** stored memory content for a query, selects up to 10 matching memories, and combines them the same way Phase 10 already does — still a plain, case-insensitive content-pattern match, not semantic search or AI-selected memory, and still scanned, still audited, still never able to gain new authority. See the Phase 11 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **1007 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–10 test, including all of Phase 10's batches.
+> **Verified:** `poetry run pytest -v` — **1124 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–11 test, including all of Phase 11's batches.
 
 ---
 
@@ -269,6 +272,32 @@ Automatic memory selection of any kind (recency-based, category-based, or search
 
 ---
 
+## Phase 11 — Deterministic Query-Based Memory Selection for Advisory AI (complete)
+
+Phase 11 answers the question Phase 10 deliberately left open: how Jarvis turns an explicit user query about stored memory into a deterministic, bounded, explainable set of memory records for AI reasoning — without pretending that keyword/database search is semantic intelligence, and without giving the AI any authority to choose its own context. It requires **an explicit query for every request**; it reuses Phase 10's own combination architecture completely unchanged, delivered in three controlled batches. See `docs/phase_11_completion_report.md` for the full write-up.
+
+- **Batch 1 — Deterministic query-based memory selection foundation.** A new, narrow module deterministically searches stored memories by content, using the repository's existing `MemoryManager.search()` exactly as it already behaves, capped at 10 matches, preserving the store's own result order exactly.
+- **Batch 2 — Query command and orchestrator wiring.** An explicit `summarise memories about <query>` (or `summarize memories about <query>`) command. A concrete command-routing collision — this command's own prefix is a superset of Phase 10's explicit-id command prefix — was found during planning and fixed by checking the more specific query command first, so both commands keep working exactly as intended.
+- **Batch 3 — End-to-end verification and documentation.** A consolidated integration test proving the complete path against real, multiple saved memories, including a genuine stored-content injection attempt, this README section, and `docs/phase_11_completion_report.md`.
+
+### Query-based memory summary command
+
+| Command | What it does |
+|---|---|
+| `summarise memories about <query>` / `summarize memories about <query>` | Deterministically searches stored memory content for matching memories (GREEN, same authority as `search memories for <query>`), selects up to 10 matches, and asks the advisory AI to summarise them together. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI query-based memory summary - advisory only]`. This is a **deterministic content search** — a plain, case-insensitive content-pattern (substring) match over stored memory content, ordered newest-first — never semantic search, embeddings, vector retrieval, or any form of AI-selected memory. If no stored memory matches your query, or the search itself could not run, Jarvis says so plainly rather than presenting an empty or failed search as if it were a real summary. Up to 10 matching memories are selected; if more than 10 match, Jarvis says so honestly rather than claiming to have compared or ranked them by relevance.
+
+### Safety note: search selects, it never trusts or executes
+
+Searching stored memory is exactly as safe (GREEN, read-only) as searching already is via `search memories for <query>`. Every matched memory's content remains untrusted, exactly as it already is for `summarise memory <id>` and `summarise memories <ids>` — a memory being *found* by your search query does not make it trusted. The query itself is never mixed into that untrusted memory content; it is only ever used to search, and it reaches the advisory AI the same way any other typed request text already does. As in Phase 7, 8, 9, and 10, any AI-suggested action arising from a query-based summary is only ever a policy/audit observation — it can never execute, approve itself, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 11
+
+Semantic or vector memory retrieval, embeddings, similarity ranking, AI-selected or AI-ranked memory ids, autonomous memory discovery, recency-based or category-based automatic selection, query rewriting or synonym expansion, any change to `MemoryManager`, `MemoryTool`, or `EpisodicMemoryStore`, any new AI execution authority, and any new approval gate for searching or summarising memories. A query is deterministic content search only — it is never treated as an instruction, and it never changes what Jarvis is allowed to do.
+
+---
+
 ## Example Session
 
 ```
@@ -343,10 +372,11 @@ jarvis/
 ├── memory/         Memory Engine: save, list, search, categories, update, forget
 ├── ai/             Provider interface, Claude provider, advisory reasoning
 │                   routed through one AIRouter/PromptBuilder path, the
-│                   typed trusted/untrusted AIContextBlock model, and
+│                   typed trusted/untrusted AIContextBlock model,
 │                   file-content and single/multi-memory ingestion for the
 │                   AI reasoning path (ai/file_ingestion.py,
-│                   ai/memory_ingestion.py)
+│                   ai/memory_ingestion.py), and deterministic query-based
+│                   memory selection (ai/memory_selection.py)
 ├── planner/        Turns requests into structured plans
 ├── tools/          Tool registry, executor, and built-in tools
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
@@ -375,10 +405,10 @@ jarvis/
 
 ## Next Phase
 
-**Phase 10 is complete**: Jarvis can now retrieve a small, explicitly-named set of real stored memories by id and have the advisory AI summarise them together, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_10_completion_report.md`, is **recency-based, category-based, or search-based automatic memory selection** — the first capability that requires a real answer to "which memories should be selected automatically," now that safe combination of multiple memories has been proven. Any such work must reuse this phase's combination architecture, not reinvent it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
+**Phase 11 is complete**: Jarvis can now deterministically search stored memories by content and have the advisory AI summarise the matches together, reusing Phase 10's own combination architecture unchanged, entirely through Phase 7's trust and injection-defence pipeline, with no new AI authority and no new approval gate. What comes next, per `docs/phase_11_completion_report.md`, is **recency-based or category-based automatic memory selection** — each its own narrow, separately-scoped design review, reusing this phase's and Phase 10's combination architecture rather than reinventing it. Semantic/vector retrieval, AI-selected memories, and web/browser ingestion remain explicitly further out, each requiring its own separately-scoped design and security review before being started.
 
-Resumable approvals, deeper but still-advisory AI assistance, and optional smarter search over memory remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
+Resumable approvals and deeper but still-advisory AI assistance remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, and Phase 10 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, and Phase 11 are complete for their defined scope, not yet tagged. None is a finished product.*

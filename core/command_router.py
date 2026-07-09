@@ -140,13 +140,33 @@ _MEMORY_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memory",
 )
 
+#: Leading phrases that indicate an explicit query-based memory-summary
+#: request (Phase 11, Batch 2). The text after the phrase is treated as the
+#: raw, unparsed trailing query text. This prefix is a strict
+#: superset-string of _MEMORY_SET_SUMMARY_PREFIXES below ("summarise
+#: memories about" starts with "summarise memories"), so the caller
+#: (JarvisOrchestrator.handle_request) MUST check match_memory_query_summary
+#: before match_memory_set_summary, or a query-based request would be
+#: incorrectly swallowed by the plural explicit-id matcher and rejected as
+#: an invalid id list (docs/phase_11_implementation_plan.md, Section
+#: 3.1/3.2.1 - a concrete collision verified, not hypothetical). This
+#: prefix does not collide with _MEMORY_SUMMARY_PREFIXES (singular) in
+#: either direction: "summarise memory" and "summarise memories" diverge at
+#: the word's 6th character ('y' vs 'i').
+_MEMORY_QUERY_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise memories about",
+    "summarize memories about",
+)
+
 #: Leading phrases that indicate an explicit multi-memory-summary request
 #: (Phase 10, Batch 2). The text after the phrase is treated as the raw,
 #: unparsed trailing id-list text. Deliberately a separate, narrow match from
 #: _MEMORY_SUMMARY_PREFIXES: "memory" and "memories" diverge at their 5th
 #: character, so the two can never collide as prefixes of one another in
 #: either direction - verified directly, not merely assumed - so checking
-#: order between the singular and plural matchers does not matter.
+#: order between the singular and plural matchers does not matter. This
+#: prefix DOES collide with _MEMORY_QUERY_SUMMARY_PREFIXES above (it is a
+#: strict prefix of it) - see the ordering requirement documented there.
 _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarise memories",
     "summarize memories",
@@ -337,6 +357,50 @@ class CommandRouter:
         """
         lowered = text.casefold()
         prefix = self._file_prefix(lowered, _MEMORY_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
+
+    def match_memory_query_summary(self, text: str) -> str | None:
+        """Match an explicit query-based memory-summary request and extract
+        its raw query text.
+
+        Recognises "summarise memories about <query>" and "summarize
+        memories about <query>" (Phase 11, Batch 2) - the query-based
+        sibling of match_memory_summary()/match_memory_set_summary(). Only
+        the raw trailing text is extracted here, exactly as those methods
+        already do: query parsing, empty/whitespace-query rejection, and
+        deterministic search selection are the orchestrator's
+        responsibility (docs/phase_11_implementation_plan.md, Section
+        3/6), not this router's. This method never interprets the query
+        semantically, never escapes or normalises it, and never performs
+        natural-language routing of any kind - the only input it
+        recognises is the literal, required "about" grammar plus whatever
+        text follows it.
+
+        The caller MUST check this method before match_memory_set_summary():
+        "summarise memories about" is a strict superset-string of
+        "summarise memories", so checking the plural explicit-id matcher
+        first would incorrectly swallow a query-based request
+        (docs/phase_11_implementation_plan.md, Section 3.1/3.2.1). This
+        method does not collide with match_memory_summary() (singular) in
+        either direction: "summarise memory" and "summarise memories"
+        diverge at the word's 6th character ('y' vs 'i'), confirmed
+        non-colliding, so its position relative to that check does not
+        affect correctness.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing query text if the text matches a
+            query-based memory-summary command - possibly empty, if the
+            phrase was used with no query text at all - or None if the
+            text does not match this command at all.
+        """
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _MEMORY_QUERY_SUMMARY_PREFIXES)
         if prefix is None:
             return None
 

@@ -43,6 +43,7 @@ from ai.memory_ingestion import (
     ingest_memories_for_ai,
     ingest_memory_for_ai,
 )
+from ai.memory_selection import QuerySelectionResult, select_memory_ids_by_query
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from config.constants import EventOutcome, SecurityTier
@@ -150,6 +151,42 @@ _MAX_MEMORY_SET_SIZE = 10
 #: generic "tool_call" event ToolExecutor would otherwise emit for free; this
 #: is the explicit, disclosed replacement (Phase 9 plan, Section 15).
 _MEMORY_ACQUISITION_ACTION_TYPE = "memory_acquisition"
+
+#: Advisory label for a query-based memory-summary response's message
+#: (Phase 11, Batch 2). Distinct from the other three summary labels for
+#: the same reason each of those is distinct from the others: this marks a
+#: response whose entire content *is* the AI's own advisory output about a
+#: deterministically-searched set of memories, not an annotation appended
+#: to an already-decided response.
+_MEMORY_QUERY_SUMMARY_LABEL = "[AI query-based memory summary - advisory only]"
+_MEMORY_QUERY_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise these memories' contents."
+)
+_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for these memories right now."
+)
+_MEMORY_QUERY_MANAGER_NOT_AVAILABLE_MESSAGE = (
+    "Memory access is not available, so I can't search your memories."
+)
+#: Honest rejection message for a query-based summary request with no query
+#: text at all (docs/phase_11_implementation_plan.md, Section 8, category
+#: 1 - "invalid query", rejected before select_memory_ids_by_query() is
+#: ever called, mirroring _parse_memory_id/_parse_memory_ids's own
+#: pre-acquisition rejection of malformed input).
+_MEMORY_QUERY_EMPTY_MESSAGE = (
+    "Please provide a query to search your memories for, for example "
+    "'summarise memories about the budget review'."
+)
+
+#: Action type for the orchestrator's own query-selection audit event
+#: (Phase 11, Batch 2). Reports that a deterministic search was attempted
+#: and its outcome, distinct from the per-id memory_acquisition events
+#: Phase 10's ingestion still emits afterward for the ids that search
+#: selected (docs/phase_11_implementation_plan.md, Section 12.2/13). Never
+#: embeds the raw query text - only its length, matching
+#: ai/prompt_builder.py's own audit_suspicious_injection convention of
+#: logging text_length rather than text.
+_MEMORY_QUERY_SELECTION_ACTION_TYPE = "memory_query_selection"
 
 # The unexpected-action verdict is observability only in Batch 4 (nothing lets
 # an AI suggestion execute yet). ESCALATE and BLOCK reuse existing
@@ -361,23 +398,37 @@ class JarvisOrchestrator:
         """Handle a user request and return a structured response.
 
         An explicit file-summary request ("summarise file <path>", Phase 8,
-        Batch 2), memory-summary request ("summarise memory <id>", Phase 9,
-        Batch 2), or multi-memory-summary request ("summarise memories
-        <ids>", Phase 10, Batch 2) is recognised first and handled by its
-        own terminal path (_handle_file_summary_request /
-        _handle_memory_summary_request /
+        Batch 2), singular memory-summary request ("summarise memory <id>",
+        Phase 9, Batch 2), query-based memory-summary request ("summarise
+        memories about <query>", Phase 11, Batch 2), or explicit-id
+        multi-memory-summary request ("summarise memories <ids>", Phase 10,
+        Batch 2) is recognised first and handled by its own terminal path
+        (_handle_file_summary_request / _handle_memory_summary_request /
+        _handle_memory_query_summary_request /
         _handle_memory_set_summary_request) - it never reaches the
-        rule-based handler below or _attach_ai_suggestion,
-        since its entire response *is* the AI's own advisory output, not an
-        annotation appended to an already-decided one. Every other request is
-        a thin wrapper around
-        the rule-based request handler: the response is produced entirely by
-        the existing Planner, SecurityManager, ToolExecutor, and
-        ApprovalManager path. Only after that authoritative response is
-        built is an *advisory* AI suggestion optionally attached, and only
-        when a reasoning engine is active. The AI never changes the outcome:
-        routing, classification, approval, and execution are all already
-        decided before the AI is consulted.
+        rule-based handler below or _attach_ai_suggestion, since its entire
+        response *is* the AI's own advisory output, not an annotation
+        appended to an already-decided one. Every other request is a thin
+        wrapper around the rule-based request handler: the response is
+        produced entirely by the existing Planner, SecurityManager,
+        ToolExecutor, and ApprovalManager path. Only after that
+        authoritative response is built is an *advisory* AI suggestion
+        optionally attached, and only when a reasoning engine is active.
+        The AI never changes the outcome: routing, classification,
+        approval, and execution are all already decided before the AI is
+        consulted.
+
+        Dispatch precedence is significant and deliberately ordered
+        (docs/phase_11_implementation_plan.md, Section 3.2.1): the
+        query-based matcher is checked BEFORE the explicit-id plural
+        matcher, because "summarise memories about" is a strict
+        superset-string of "summarise memories" - checking the plural
+        matcher first would incorrectly swallow a query-based request and
+        reject it as an invalid id list. The query-based matcher's
+        position relative to the singular matcher does not affect
+        correctness (their prefixes never collide), but it is placed
+        after it here to keep the singular-then-plural-id family visually
+        adjacent to its own new query-based sibling.
 
         Args:
             user_request: The user's request in natural language.
@@ -401,6 +452,14 @@ class JarvisOrchestrator:
         if memory_summary_raw_id is not None:
             return self._handle_memory_summary_request(
                 memory_summary_raw_id, user_request, session_id
+            )
+
+        memory_query_summary_raw_text = (
+            self._command_router.match_memory_query_summary(user_request.strip())
+        )
+        if memory_query_summary_raw_text is not None:
+            return self._handle_memory_query_summary_request(
+                memory_query_summary_raw_text, user_request, session_id
             )
 
         memory_set_summary_raw_ids = self._command_router.match_memory_set_summary(
@@ -649,6 +708,196 @@ class JarvisOrchestrator:
         response = JarvisResponse(
             success=True,
             message=f"{_MEMORY_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
+    def _handle_memory_query_summary_request(
+        self, raw_query_text: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarise memories about <query>" request
+        (Phase 11, Batch 2).
+
+        This is a terminal response path, the query-based sibling of
+        _handle_memory_set_summary_request, generalised from a small,
+        explicit, user-named id set to a deterministic search selection.
+        It owns no search invocation beyond the one call to
+        ai.memory_selection.select_memory_ids_by_query(), no memory
+        retrieval/combination beyond reusing
+        ai.memory_ingestion.ingest_memories_for_ai() unchanged, and no
+        unexpected-action logic of its own - every one of those
+        responsibilities stays inside the components it calls, or in the
+        existing, unmodified Phase 7 Batch 4 methods:
+
+            1. A Plan is generated normally, exactly as for every other
+               request.
+            2. The raw trailing query text CommandRouter.match_memory_
+               query_summary extracted is checked for emptiness here
+               (docs/phase_11_implementation_plan.md, Section 8, category
+               1) - a query-command phrase with no trailing text at all
+               fails honestly with no search attempted, no audit event,
+               and no AI ever consulted. Any other query text, including
+               punctuation-only text, is passed on unchanged: this method
+               performs no semantic validation of the query.
+            3. Required collaborators (AI reasoning, then the
+               memory_manager) are confirmed available, each with its own
+               honest failure - mirroring the explicit-id workflow's own
+               order.
+            4. ai.memory_selection.select_memory_ids_by_query() performs
+               the one deterministic search call, at the fixed Phase 11
+               selection ceiling (10), preserving the store's own result
+               order exactly. This method never calls
+               MemoryManager.search() itself and never ranks, reorders,
+               or deduplicates its result.
+            5. The Phase 11 selection outcome is audited once
+               (_audit_memory_query_selection) - a new, narrow,
+               non-authoritative event distinct from Phase 10's per-id
+               acquisition events.
+            6. Zero matches and a genuine search failure each return their
+               own distinct, honest response - neither ever reaches
+               ingestion or AI reasoning.
+            7. On a non-empty selection, the ordered selected ids are
+               handed, unchanged and in the same order, into
+               ai.memory_ingestion.ingest_memories_for_ai() - the exact
+               same Phase 10 primitive the explicit-id workflow already
+               uses, unmodified. This method never constructs or combines
+               an AIContextBlock itself.
+            8. The existing per-id acquisition audit
+               (_audit_memory_set_acquisition) fires exactly as it already
+               does for the explicit-id workflow.
+            9. If no id could be included, this fails honestly with the
+               ingestion result's own itemized error - the AI is never
+               consulted with no usable context.
+            10. On partial or full success, the one combined context_block
+                - already trust-tagged and labelled from the *included*
+                set by ingest_memories_for_ai - is forwarded, unchanged,
+                into a new AIReasoningRequest. The raw search query is
+                never included in this context_block; it reaches the AI
+                only as part of the live user_input, exactly as every
+                other summary command's own trailing text already does
+                (docs/phase_11_implementation_plan.md, Section 6.1).
+            11. AIReasoningEngine.reason() is called exactly as it always
+                is; this method has no ability to execute anything
+                regardless of what the AI returns.
+            12. Every AI-suggested action is evaluated through the
+                existing, unmodified _evaluate_unexpected_actions/
+                _audit_unexpected_action methods.
+            13. The response honestly distinguishes two separate layers of
+                accounting: the Phase 11 search-selection count (how many
+                memories matched the query) and Phase 10's own itemized
+                ingestion disclosure (not_found/retrieval_errors/
+                omitted_for_size/truncated_records) via the existing,
+                unmodified _build_memory_set_disclosure - neither is ever
+                mixed into, or fed back into, the untrusted memory context
+                the AI reasoned about.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller.
+
+        Args:
+            raw_query_text: The raw, unparsed trailing text extracted by
+                CommandRouter.match_memory_query_summary - possibly empty.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced from at least one genuinely retrieved memory;
+            otherwise success=False with an honest explanation of which
+            stage did not complete (empty query, AI reasoning
+            disabled/unavailable, memory subsystem unavailable, zero
+            search matches, a search failure, or no usable context after
+            ingestion) - never blocked or requiring confirmation, since
+            searching and reading memories is already GREEN and consulting
+            advisory AI about already-permitted content requires no new
+            approval gate.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+
+        query = raw_query_text.strip()
+        if not query:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_QUERY_EMPTY_MESSAGE,
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_QUERY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._memory_manager is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_QUERY_MANAGER_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        selection = select_memory_ids_by_query(self._memory_manager, query)
+        self._audit_memory_query_selection(selection, session_id)
+
+        if selection.zero_matches:
+            return JarvisResponse(
+                success=False,
+                message=f"No stored memories matched '{query}'.",
+                plan=plan,
+            )
+
+        if selection.failed:
+            return JarvisResponse(
+                success=False,
+                message=selection.error or "Could not search stored memories right now.",
+                plan=plan,
+            )
+
+        ingestion = ingest_memories_for_ai(self._memory_manager, selection.selected_ids)
+        self._audit_memory_set_acquisition(ingestion, session_id)
+
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not read those memories.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        match_count = len(selection.selected_ids)
+        memory_noun = "memory" if match_count == 1 else "memories"
+        summary = f"{summary} Found {match_count} matching {memory_noun} for '{query}'."
+
+        disclosure = self._build_memory_set_disclosure(ingestion)
+        if disclosure:
+            summary = f"{summary} {disclosure}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_MEMORY_QUERY_SUMMARY_LABEL} {summary}",
             plan=plan,
         )
 
@@ -1023,6 +1272,81 @@ class JarvisOrchestrator:
                 session_id=session_id,
                 reason="omitted_for_size",
             )
+
+    def _audit_memory_query_selection(
+        self,
+        selection: QuerySelectionResult,
+        session_id: int | None,
+    ) -> None:
+        """Record the query-based selection outcome (Phase 11, Batch 2).
+
+        A new, narrow, non-authoritative audit event distinct from Phase
+        10's per-id memory_acquisition events: this one describes the
+        search step itself (was a search attempted, what was its outcome,
+        how many ids did it select) exactly once per query-based request,
+        never repeating information the subsequent per-id acquisition
+        events already carry during ingestion
+        (docs/phase_11_implementation_plan.md, Section 12.2/13).
+
+        Never embeds the raw query text - only its length
+        (`selection.query_length`), mirroring
+        ai/prompt_builder.py's audit_suspicious_injection convention of
+        logging text_length rather than the text itself. `success` and
+        `zero_matches` are distinguished from a genuine `failed` search by
+        an `outcome=` field inside detail, not by a new EventOutcome
+        member: both `zero_matches` and `failed` map to the existing
+        EventOutcome.FAILURE value, mirroring how
+        _emit_memory_acquisition_event already distinguishes not_found/
+        retrieval_error/omitted_for_size failures via a `reason=` field
+        inside one shared FAILURE outcome.
+
+        When no logger is configured, this is a no-op, matching every
+        other optional-audit call site in this class. A raising logger is
+        caught here, scoped only around the emit() call itself, so a
+        failing audit event can never break the authoritative selection
+        outcome, the subsequent Phase 10 ingestion, or the AI reasoning
+        result already computed or about to be computed - the same
+        precedent as AIRouter._emit_audit_event and
+        _emit_memory_acquisition_event.
+
+        Args:
+            selection: The result of select_memory_ids_by_query().
+            session_id: Optional session identifier for the event.
+        """
+        if self._logger is None:
+            return
+
+        if selection.success:
+            outcome = EventOutcome.SUCCESS
+            outcome_label = "success"
+        elif selection.zero_matches:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "zero_matches"
+        else:
+            outcome = EventOutcome.FAILURE
+            outcome_label = "failure"
+
+        detail = (
+            f"outcome={outcome_label} query_length={selection.query_length} "
+            f"match_count={len(selection.selected_ids)} "
+            f"selected_ids={','.join(str(i) for i in selection.selected_ids)}"
+        )
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type=_MEMORY_QUERY_SELECTION_ACTION_TYPE,
+                outcome=outcome,
+                detail=detail,
+                security_tier=SecurityTier.GREEN,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative query-based memory-summary workflow
+            # already in progress - same precedent as
+            # _emit_memory_acquisition_event and AIRouter._emit_audit_event.
+            pass
 
     def _emit_memory_acquisition_event(
         self,

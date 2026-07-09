@@ -538,3 +538,151 @@ def test_match_memory_set_summary_does_not_change_existing_routing(
     assert router.match("forget memory 3") == "memory_forget"
     assert router.match_memory_summary("summarise memory 42") == "42"
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
+
+
+# --- match_memory_query_summary(): query-based memory-summary command (Phase 11, Batch 2)
+
+
+def test_match_memory_query_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_query_summary("summarise memories about Jarvis security")
+        == "Jarvis security"
+    )
+
+
+def test_match_memory_query_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_query_summary("summarize memories about Jarvis security")
+        == "Jarvis security"
+    )
+
+
+def test_match_memory_query_summary_extracts_exact_raw_query_text(
+    router: CommandRouter,
+) -> None:
+    """The extracted text is the raw trailing query, unparsed and
+    unnormalised beyond the leading/trailing whitespace strip every other
+    summary matcher already applies - punctuation, wildcard characters, and
+    internal whitespace are all preserved exactly."""
+    assert (
+        router.match_memory_query_summary("summarise memories about the budget review")
+        == "the budget review"
+    )
+    assert router.match_memory_query_summary("summarise memories about %") == "%"
+    assert router.match_memory_query_summary("summarise memories about _at") == "_at"
+    assert (
+        router.match_memory_query_summary("summarise memories about O'Brien's notes")
+        == "O'Brien's notes"
+    )
+    assert (
+        router.match_memory_query_summary(
+            "summarise memories about '; DROP TABLE episodic_memories; --"
+        )
+        == "'; DROP TABLE episodic_memories; --"
+    )
+
+
+def test_match_memory_query_summary_requires_the_about_grammar(
+    router: CommandRouter,
+) -> None:
+    """Without the literal "about" grammar, this is not a query-based
+    request at all - it falls through to the plural explicit-id matcher
+    (proven in the orchestrator-level workflow tests), never silently
+    treated as a query."""
+    assert router.match_memory_query_summary("summarise memories") is None
+    assert router.match_memory_query_summary("summarise memories 3, 7, 12") is None
+    assert router.match_memory_query_summary("summarise memory 42") is None
+
+
+def test_match_memory_query_summary_with_no_query_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_query_summary("summarise memories about") == ""
+    assert router.match_memory_query_summary("summarise memories about   ") == ""
+
+
+def test_match_memory_query_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_memory_query_summary("summarise memories about   security   ")
+        == "security"
+    )
+
+
+def test_match_memory_query_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_query_summary("summarise the plan for me") is None
+    assert router.match_memory_query_summary("show memory 42") is None
+    assert router.match_memory_query_summary("forget memory 42") is None
+    assert router.match_memory_query_summary("summarise file report.txt") is None
+    assert router.match_memory_query_summary("do a backflip") is None
+
+
+def test_match_memory_query_summary_does_not_require_any_registered_tool() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert (
+        router.match_memory_query_summary("summarise memories about security")
+        == "security"
+    )
+
+
+def test_match_memory_query_summary_does_not_collide_with_plural_explicit_id(
+    router: CommandRouter,
+) -> None:
+    """The concrete collision found during planning: without the required
+    "about" grammar, the query matcher must return None so the plural
+    explicit-id matcher can recognise its own command unchanged."""
+    assert router.match_memory_query_summary("summarise memories 27, 12, 18") is None
+    assert router.match_memory_set_summary("summarise memories 27, 12, 18") == (
+        "27, 12, 18"
+    )
+    assert (
+        router.match_memory_query_summary("summarise memories about Jarvis security")
+        == "Jarvis security"
+    )
+
+
+def test_plural_matcher_alone_would_also_match_query_text_proving_the_collision(
+    router: CommandRouter,
+) -> None:
+    """Documents the concrete collision this batch's dispatch-order fix
+    resolves: match_memory_set_summary(), considered in isolation, DOES
+    also match "summarise memories about <query>" (its prefix is a plain
+    string prefix of the whole text), returning the wrong raw text
+    ("about Jarvis security", not a valid id list). Disambiguation is not
+    performed by either matcher unilaterally - it is the caller
+    (JarvisOrchestrator.handle_request) checking the more specific
+    query matcher first that resolves this, proven end-to-end in
+    test_memory_query_summary_workflow.py."""
+    assert router.match_memory_set_summary(
+        "summarise memories about Jarvis security"
+    ) == "about Jarvis security"
+
+
+def test_match_memory_query_summary_does_not_collide_with_singular_command(
+    router: CommandRouter,
+) -> None:
+    assert router.match_memory_query_summary("summarise memory 42") is None
+    assert router.match_memory_summary("summarise memories about security") is None
+
+
+def test_match_memory_query_summary_does_not_change_existing_routing(
+    router: CommandRouter,
+) -> None:
+    """Adding match_memory_query_summary must not change match()'s own
+    routing, match_memory_summary()'s own recognition,
+    match_memory_set_summary()'s own recognition, or
+    match_file_summary()'s own recognition (broad generic memory path
+    compatibility)."""
+    assert router.match("show memory 5") == "memory"
+    assert router.match("forget memory 3") == "memory_forget"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert router.match_memory_set_summary("summarise memories 3, 7, 12") == "3, 7, 12"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
