@@ -1057,43 +1057,19 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
-        reasoning_request = AIReasoningRequest(
-            user_input=user_request,
-            context_block=ingestion.context,
-            session_id=session_id,
-        )
-        result = self._reasoning.reason(reasoning_request)
-        if result is None:
-            return JarvisResponse(
-                success=False,
-                message=_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE,
-                plan=plan,
-            )
-
-        summary = result.summary
-        if result.has_suggestions:
-            steps = "; ".join(a.description for a in result.suggested_actions)
-            summary = f"{result.summary} Suggested steps: {steps}"
-
         match_count = len(selection.selected_ids)
         memory_noun = "memory" if match_count == 1 else "memories"
-        summary = f"{summary} Found {match_count} matching {memory_noun} for '{query}'."
+        selection_sentence = f"Found {match_count} matching {memory_noun} for '{query}'."
 
-        disclosure = self._build_memory_set_disclosure(ingestion)
-        if disclosure:
-            summary = f"{summary} {disclosure}"
-
-        response = JarvisResponse(
-            success=True,
-            message=f"{_MEMORY_QUERY_SUMMARY_LABEL} {summary}",
+        return self._build_memory_summary_response(
+            ingestion=ingestion,
+            user_request=user_request,
+            session_id=session_id,
             plan=plan,
+            ai_unavailable_message=_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE,
+            label=_MEMORY_QUERY_SUMMARY_LABEL,
+            selection_sentence=selection_sentence,
         )
-
-        # Reused, not duplicated: the exact same Batch 4 policy/audit method
-        # every other request's advisory suggestion already goes through.
-        self._evaluate_unexpected_actions(response, result, session_id)
-
-        return response
 
     def _handle_memory_category_summary_request(
         self, raw_category_text: str, user_request: str, session_id: int | None
@@ -1275,46 +1251,22 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
-        reasoning_request = AIReasoningRequest(
-            user_input=user_request,
-            context_block=ingestion.context,
-            session_id=session_id,
-        )
-        result = self._reasoning.reason(reasoning_request)
-        if result is None:
-            return JarvisResponse(
-                success=False,
-                message=_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE,
-                plan=plan,
-            )
-
-        summary = result.summary
-        if result.has_suggestions:
-            steps = "; ".join(a.description for a in result.suggested_actions)
-            summary = f"{result.summary} Suggested steps: {steps}"
-
         match_count = len(selection.selected_ids)
         memory_noun = "memory" if match_count == 1 else "memories"
-        summary = (
-            f"{summary} Found {match_count} {memory_noun} in category "
+        selection_sentence = (
+            f"Found {match_count} {memory_noun} in category "
             f"'{selection.category}'."
         )
 
-        disclosure = self._build_memory_set_disclosure(ingestion)
-        if disclosure:
-            summary = f"{summary} {disclosure}"
-
-        response = JarvisResponse(
-            success=True,
-            message=f"{_MEMORY_CATEGORY_SUMMARY_LABEL} {summary}",
+        return self._build_memory_summary_response(
+            ingestion=ingestion,
+            user_request=user_request,
+            session_id=session_id,
             plan=plan,
+            ai_unavailable_message=_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE,
+            label=_MEMORY_CATEGORY_SUMMARY_LABEL,
+            selection_sentence=selection_sentence,
         )
-
-        # Reused, not duplicated: the exact same Batch 4 policy/audit method
-        # every other request's advisory suggestion already goes through.
-        self._evaluate_unexpected_actions(response, result, session_id)
-
-        return response
 
     def _handle_memory_recent_summary_request(
         self, user_request: str, session_id: int | None
@@ -1465,45 +1417,19 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
-        reasoning_request = AIReasoningRequest(
-            user_input=user_request,
-            context_block=ingestion.context,
-            session_id=session_id,
-        )
-        result = self._reasoning.reason(reasoning_request)
-        if result is None:
-            return JarvisResponse(
-                success=False,
-                message=_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE,
-                plan=plan,
-            )
-
-        summary = result.summary
-        if result.has_suggestions:
-            steps = "; ".join(a.description for a in result.suggested_actions)
-            summary = f"{result.summary} Suggested steps: {steps}"
-
         match_count = len(selection.selected_ids)
         memory_noun = "memory" if match_count == 1 else "memories"
-        summary = (
-            f"{summary} Found {match_count} recent {memory_noun}."
-        )
+        selection_sentence = f"Found {match_count} recent {memory_noun}."
 
-        disclosure = self._build_memory_set_disclosure(ingestion)
-        if disclosure:
-            summary = f"{summary} {disclosure}"
-
-        response = JarvisResponse(
-            success=True,
-            message=f"{_MEMORY_RECENT_SUMMARY_LABEL} {summary}",
+        return self._build_memory_summary_response(
+            ingestion=ingestion,
+            user_request=user_request,
+            session_id=session_id,
             plan=plan,
+            ai_unavailable_message=_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE,
+            label=_MEMORY_RECENT_SUMMARY_LABEL,
+            selection_sentence=selection_sentence,
         )
-
-        # Reused, not duplicated: the exact same Batch 4 policy/audit method
-        # every other request's advisory suggestion already goes through.
-        self._evaluate_unexpected_actions(response, result, session_id)
-
-        return response
 
     def _handle_memory_recent_count_summary_request(
         self, raw_count_text: str, user_request: str, session_id: int | None
@@ -1679,43 +1605,19 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
-        reasoning_request = AIReasoningRequest(
-            user_input=user_request,
-            context_block=ingestion.context,
-            session_id=session_id,
-        )
-        result = self._reasoning.reason(reasoning_request)
-        if result is None:
-            return JarvisResponse(
-                success=False,
-                message=_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE,
-                plan=plan,
-            )
-
-        summary = result.summary
-        if result.has_suggestions:
-            steps = "; ".join(a.description for a in result.suggested_actions)
-            summary = f"{result.summary} Suggested steps: {steps}"
-
         match_count = selection.match_count
         memory_noun = "memory" if match_count == 1 else "memories"
-        summary = f"{summary} Found {match_count} recent {memory_noun}."
+        selection_sentence = f"Found {match_count} recent {memory_noun}."
 
-        disclosure = self._build_memory_set_disclosure(ingestion)
-        if disclosure:
-            summary = f"{summary} {disclosure}"
-
-        response = JarvisResponse(
-            success=True,
-            message=f"{_MEMORY_RECENT_COUNT_SUMMARY_LABEL} {summary}",
+        return self._build_memory_summary_response(
+            ingestion=ingestion,
+            user_request=user_request,
+            session_id=session_id,
             plan=plan,
+            ai_unavailable_message=_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE,
+            label=_MEMORY_RECENT_COUNT_SUMMARY_LABEL,
+            selection_sentence=selection_sentence,
         )
-
-        # Reused, not duplicated: the exact same Batch 4 policy/audit method
-        # every other request's advisory suggestion already goes through.
-        self._evaluate_unexpected_actions(response, result, session_id)
-
-        return response
 
     def _handle_memory_set_summary_request(
         self, raw_ids_text: str, user_request: str, session_id: int | None
@@ -1850,6 +1752,113 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
+        return self._build_memory_summary_response(
+            ingestion=ingestion,
+            user_request=user_request,
+            session_id=session_id,
+            plan=plan,
+            ai_unavailable_message=_MEMORY_SET_AI_REASONING_UNAVAILABLE_MESSAGE,
+            label=_MEMORY_SET_SUMMARY_LABEL,
+            selection_sentence="",
+        )
+
+    def _build_memory_summary_response(
+        self,
+        *,
+        ingestion: MemorySetIngestionResult,
+        user_request: str,
+        session_id: int | None,
+        plan: Plan,
+        ai_unavailable_message: str,
+        label: str,
+        selection_sentence: str,
+    ) -> JarvisResponse:
+        """Build the shared post-selection AI-summary response common to
+        every memory-summary workflow (Phases 10-14), reused, not
+        duplicated (Retrieval Workflow Maintenance, Batch 1 - see
+        docs/retrieval_workflow_maintenance_plan.md, Sections 6/7).
+
+        Precondition, enforced by every caller, never by this method: the
+        caller has already run selector invocation, selector audit,
+        selector-state early returns, ingest_memories_for_ai(), and
+        _audit_memory_set_acquisition() - and has already confirmed
+        `ingestion.success` is True - before ever calling this method. This
+        method owns none of that; it begins only at the point every
+        existing handler's own post-ingestion-success tail was previously
+        byte-for-byte identical (docs/retrieval_workflow_maintenance_plan.md,
+        Section 4).
+
+        Owns, in this exact order, unchanged from every handler's own
+        prior inline code:
+            1. AIReasoningRequest construction (user_input=user_request,
+               context_block=ingestion.context, session_id=session_id -
+               the same three fields, from the same three sources, every
+               handler already used).
+            2. self._reasoning.reason(...) - if it returns None, an honest
+               failure response carrying the caller-supplied
+               `ai_unavailable_message` is returned immediately; this
+               method never fabricates a success in that case.
+            3. Suggested-step formatting, byte-for-byte identical to every
+               handler's own prior inline code.
+            4. Appending `selection_sentence` - already fully resolved,
+               selector-specific text the caller computed itself (this
+               method never generates or infers selector-specific wording)
+               - only when non-empty, so Phase 10's own "no selection
+               sentence at all" behaviour is reproduced exactly by passing
+               an empty string, never a placeholder or a doubled space.
+            5. Appending self._build_memory_set_disclosure(ingestion) -
+               the existing, unmodified Phase 10 formatter - unchanged.
+            6. Constructing the final successful JarvisResponse, applying
+               the caller-supplied `label` exactly as every handler
+               already did.
+            7. Calling self._evaluate_unexpected_actions(response, result,
+               session_id) exactly once, immediately after response
+               construction - the same existing, unmodified Batch 4
+               policy/audit method every handler already called at this
+               exact point, never skipped, never called twice.
+
+        Does NOT own: selector invocation, selector audit, selector-state
+        branching, ingest_memories_for_ai(), acquisition auditing, or the
+        ingestion-success check - all of that remains visibly explicit in
+        each calling handler (docs/retrieval_workflow_maintenance_plan.md,
+        Section 9), because the audit-then-check sequence is a genuine
+        decision boundary, not incidental repetition. Does NOT understand
+        QuerySelectionResult, CategorySelectionResult, RecentSelectionResult,
+        or RecentCountSelectionResult - it never receives a selector result
+        of any kind, only an already-successful `ingestion` and a
+        precomputed string. Does NOT receive selected ids, a MemoryManager,
+        or any selector function - structurally incapable of selecting,
+        reordering, or requesting additional memory. Does NOT construct,
+        alter, or inspect an AIContextBlock, its trust, or its
+        source/provenance - `ingestion.context` is forwarded to
+        AIReasoningRequest unchanged, exactly as every handler already
+        forwarded it.
+
+        Args:
+            ingestion: The result of ingest_memories_for_ai(), already
+                confirmed successful by the caller.
+            user_request: The original, full request text, forwarded
+                unchanged into AIReasoningRequest.user_input.
+            session_id: Optional session identifier for the audit trail.
+            plan: The Plan already generated by the caller, carried
+                through unchanged on every returned JarvisResponse.
+            ai_unavailable_message: The caller's own existing
+                phase-specific "AI reasoning could not produce a summary"
+                constant, used unchanged if reason() returns None.
+            label: The caller's own existing phase-specific advisory
+                label (e.g. "[AI query-based memory summary - advisory
+                only]"), applied exactly as every handler already did.
+            selection_sentence: The caller's own already-formatted,
+                selector-specific selection-count sentence (e.g. "Found 3
+                matching memories for 'x'."), or an empty string for
+                Phase 10, which has no such sentence at all.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary was
+            produced; otherwise success=False with the caller-supplied
+            `ai_unavailable_message` - never blocked or requiring
+            confirmation, matching every existing handler's own contract.
+        """
         reasoning_request = AIReasoningRequest(
             user_input=user_request,
             context_block=ingestion.context,
@@ -1859,7 +1868,7 @@ class JarvisOrchestrator:
         if result is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_SET_AI_REASONING_UNAVAILABLE_MESSAGE,
+                message=ai_unavailable_message,
                 plan=plan,
             )
 
@@ -1868,13 +1877,16 @@ class JarvisOrchestrator:
             steps = "; ".join(a.description for a in result.suggested_actions)
             summary = f"{result.summary} Suggested steps: {steps}"
 
+        if selection_sentence:
+            summary = f"{summary} {selection_sentence}"
+
         disclosure = self._build_memory_set_disclosure(ingestion)
         if disclosure:
             summary = f"{summary} {disclosure}"
 
         response = JarvisResponse(
             success=True,
-            message=f"{_MEMORY_SET_SUMMARY_LABEL} {summary}",
+            message=f"{label} {summary}",
             plan=plan,
         )
 
