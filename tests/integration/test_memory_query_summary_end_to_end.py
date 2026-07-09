@@ -1194,3 +1194,57 @@ def test_routing_collision_fix_does_not_capture_plural_explicit_id_command() -> 
     assert response.success is True
     assert response.message.startswith("[AI multi-memory summary - advisory only]")
     assert "not a valid list of memory ids" not in response.message
+
+
+# --- Budget-pressure ordering regression (Phase 14 checkpoint closure) -----
+
+
+def test_query_selection_order_survives_context_budget_pressure_end_to_end() -> (
+    None
+):
+    """Closes the coverage gap the Phase 10-13 architecture checkpoint
+    identified: Phase 13's own newest-first budget-pressure proof
+    (test_newest_first_order_survives_context_budget_pressure_end_to_end
+    in test_memory_recent_summary_end_to_end.py) has no Phase 11 analogue
+    until now. Ten real, large matching records exceed Phase 10's own
+    max_total_chars=20,000 default; because select_memory_ids_by_query()
+    hands its own created_at DESC, id DESC order to ingest_memories_for_ai()
+    unchanged (never reordered), Phase 10's existing streaming omission
+    drops the *oldest* of the ten matching records first - the newest
+    survive, exactly as the recency workflow already proves. No production
+    code is changed by this regression proof."""
+    memory = _memory_manager()
+    ids = [
+        _save(memory, f"budget-check-query-{i:02d} " + ("x" * 2480))
+        for i in range(10)
+    ]
+    logger = _RecordingLogger()
+    orchestrator, provider, recorder = _build_orchestrator(
+        "Summary.\nStep 1: note the key points",
+        logger,
+        memory,
+        record_context=True,
+    )
+
+    response = orchestrator.handle_request(
+        "summarise memories about budget-check-query"
+    )
+
+    assert response.success is True
+    assert recorder is not None
+    assert recorder.received_context is not None
+    included_ids = [
+        int(i) for i in recorder.received_context.source.split(":")[1].split(",")
+    ]
+    # Newest-first order preserved in the combined source label - never
+    # reordered before ingestion.
+    assert included_ids == list(reversed(ids))[: len(included_ids)]
+    # Fewer than all 10 matches fit the combined budget - proving the
+    # budget-pressure scenario is genuinely exercised, not vacuous.
+    assert 0 < len(included_ids) < 10
+    # The newest match (highest id, last saved) survived; omission started
+    # from the oldest of the ten matches, per the store's own order.
+    assert ids[-1] in included_ids
+    assert ids[0] not in included_ids
+    assert "omitted to stay within the combined size limit" in response.message
+    assert str(ids[0]) in response.message
