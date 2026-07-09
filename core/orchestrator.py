@@ -134,10 +134,23 @@ _MEMORY_MANAGER_NOT_AVAILABLE_MESSAGE = (
 #: response shape, though all three share the same advisory-only authority
 #: boundary.
 _MEMORY_SET_SUMMARY_LABEL = "[AI multi-memory summary - advisory only]"
-_MEMORY_SET_AI_REASONING_NOT_ENABLED_MESSAGE = (
+#: Shared AI-reasoning availability messages for the multi-memory-summary
+#: family (Phase 10-14; Retrieval Workflow Maintenance, Batch 2). These five
+#: workflows share one meaning - a stored-memory-set summary could not be
+#: produced because AI reasoning is disabled or unavailable - previously
+#: five byte-identical, independently-declared copies (one per handler);
+#: this is now the sole authority for both messages, referenced from Phase
+#: 10 (memory set), Phase 11 (query), Phase 12 (category), Phase 13
+#: (recent), and Phase 14 (recent-count). Deliberately does not cover Phase
+#: 8's file-summary message or Phase 9's own singular memory-summary
+#: message (_AI_REASONING_*/_MEMORY_AI_REASONING_*): both are worded for a
+#: single file/memory ("this file's"/"this memory's contents"), not a set
+#: ("these memories' contents"), so they are separate messages for a
+#: separate workflow shape, not further copies of this one.
+_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE = (
     "AI reasoning is not enabled, so I can't summarise these memories' contents."
 )
-_MEMORY_SET_AI_REASONING_UNAVAILABLE_MESSAGE = (
+_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE = (
     "AI reasoning could not produce a summary for these memories right now."
 )
 _MEMORY_SET_MANAGER_NOT_AVAILABLE_MESSAGE = (
@@ -169,12 +182,10 @@ _MEMORY_ACQUISITION_ACTION_TYPE = "memory_acquisition"
 #: deterministically-searched set of memories, not an annotation appended
 #: to an already-decided response.
 _MEMORY_QUERY_SUMMARY_LABEL = "[AI query-based memory summary - advisory only]"
-_MEMORY_QUERY_AI_REASONING_NOT_ENABLED_MESSAGE = (
-    "AI reasoning is not enabled, so I can't summarise these memories' contents."
-)
-_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE = (
-    "AI reasoning could not produce a summary for these memories right now."
-)
+#: Uses the shared _MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE /
+#: _MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE (declared with Phase
+#: 10's own constants above) - not a separate copy (Retrieval Workflow
+#: Maintenance, Batch 2).
 _MEMORY_QUERY_MANAGER_NOT_AVAILABLE_MESSAGE = (
     "Memory access is not available, so I can't search your memories."
 )
@@ -205,12 +216,10 @@ _MEMORY_QUERY_SELECTION_ACTION_TYPE = "memory_query_selection"
 #: deterministically category-selected set of memories, not an annotation
 #: appended to an already-decided response.
 _MEMORY_CATEGORY_SUMMARY_LABEL = "[AI category memory summary - advisory only]"
-_MEMORY_CATEGORY_AI_REASONING_NOT_ENABLED_MESSAGE = (
-    "AI reasoning is not enabled, so I can't summarise these memories' contents."
-)
-_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE = (
-    "AI reasoning could not produce a summary for these memories right now."
-)
+#: Uses the shared _MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE /
+#: _MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE (declared with Phase
+#: 10's own constants above) - not a separate copy (Retrieval Workflow
+#: Maintenance, Batch 2).
 _MEMORY_CATEGORY_MANAGER_NOT_AVAILABLE_MESSAGE = (
     "Memory access is not available, so I can't look up memories by category."
 )
@@ -245,12 +254,10 @@ _MEMORY_CATEGORY_SELECTION_ACTION_TYPE = "memory_category_selection"
 #: recency-selected set of memories, not an annotation appended to an
 #: already-decided response.
 _MEMORY_RECENT_SUMMARY_LABEL = "[AI recent memory summary - advisory only]"
-_MEMORY_RECENT_AI_REASONING_NOT_ENABLED_MESSAGE = (
-    "AI reasoning is not enabled, so I can't summarise these memories' contents."
-)
-_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE = (
-    "AI reasoning could not produce a summary for these memories right now."
-)
+#: Uses the shared _MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE /
+#: _MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE (declared with Phase
+#: 10's own constants above) - not a separate copy (Retrieval Workflow
+#: Maintenance, Batch 2).
 _MEMORY_RECENT_MANAGER_NOT_AVAILABLE_MESSAGE = (
     "Memory access is not available, so I can't look up recent memories."
 )
@@ -290,17 +297,12 @@ _MEMORY_RECENT_SELECTION_ACTION_TYPE = "memory_recent_selection"
 _MEMORY_RECENT_COUNT_SUMMARY_LABEL = (
     "[AI recent-count memory summary - advisory only]"
 )
-#: Deliberately a fifth, independently-declared copy of the same wording
-#: every other memory-summary workflow already uses for these two
-#: messages (docs/phase_14_implementation_plan.md, Section 12) - not
-#: centralised in this batch, per the explicit instruction not to perform
-#: that refactor here.
-_MEMORY_RECENT_COUNT_AI_REASONING_NOT_ENABLED_MESSAGE = (
-    "AI reasoning is not enabled, so I can't summarise these memories' contents."
-)
-_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE = (
-    "AI reasoning could not produce a summary for these memories right now."
-)
+#: Previously a fifth, independently-declared copy of the same wording
+#: every other memory-summary workflow already used for these two messages
+#: (docs/phase_14_implementation_plan.md, Section 12); now uses the shared
+#: _MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE /
+#: _MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE (declared with Phase
+#: 10's own constants above) - Retrieval Workflow Maintenance, Batch 2.
 _MEMORY_RECENT_COUNT_MANAGER_NOT_AVAILABLE_MESSAGE = (
     "Memory access is not available, so I can't look up recent memories by count."
 )
@@ -1019,7 +1021,7 @@ class JarvisOrchestrator:
         if self._reasoning is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_QUERY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                message=_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
                 plan=plan,
             )
 
@@ -1066,7 +1068,7 @@ class JarvisOrchestrator:
             user_request=user_request,
             session_id=session_id,
             plan=plan,
-            ai_unavailable_message=_MEMORY_QUERY_AI_REASONING_UNAVAILABLE_MESSAGE,
+            ai_unavailable_message=_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
             label=_MEMORY_QUERY_SUMMARY_LABEL,
             selection_sentence=selection_sentence,
         )
@@ -1195,7 +1197,7 @@ class JarvisOrchestrator:
         if self._reasoning is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_CATEGORY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                message=_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
                 plan=plan,
             )
 
@@ -1263,7 +1265,7 @@ class JarvisOrchestrator:
             user_request=user_request,
             session_id=session_id,
             plan=plan,
-            ai_unavailable_message=_MEMORY_CATEGORY_AI_REASONING_UNAVAILABLE_MESSAGE,
+            ai_unavailable_message=_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
             label=_MEMORY_CATEGORY_SUMMARY_LABEL,
             selection_sentence=selection_sentence,
         )
@@ -1376,7 +1378,7 @@ class JarvisOrchestrator:
         if self._reasoning is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_RECENT_AI_REASONING_NOT_ENABLED_MESSAGE,
+                message=_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
                 plan=plan,
             )
 
@@ -1426,7 +1428,7 @@ class JarvisOrchestrator:
             user_request=user_request,
             session_id=session_id,
             plan=plan,
-            ai_unavailable_message=_MEMORY_RECENT_AI_REASONING_UNAVAILABLE_MESSAGE,
+            ai_unavailable_message=_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
             label=_MEMORY_RECENT_SUMMARY_LABEL,
             selection_sentence=selection_sentence,
         )
@@ -1551,7 +1553,7 @@ class JarvisOrchestrator:
         if self._reasoning is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_RECENT_COUNT_AI_REASONING_NOT_ENABLED_MESSAGE,
+                message=_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
                 plan=plan,
             )
 
@@ -1614,7 +1616,7 @@ class JarvisOrchestrator:
             user_request=user_request,
             session_id=session_id,
             plan=plan,
-            ai_unavailable_message=_MEMORY_RECENT_COUNT_AI_REASONING_UNAVAILABLE_MESSAGE,
+            ai_unavailable_message=_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
             label=_MEMORY_RECENT_COUNT_SUMMARY_LABEL,
             selection_sentence=selection_sentence,
         )
@@ -1731,7 +1733,7 @@ class JarvisOrchestrator:
         if self._reasoning is None:
             return JarvisResponse(
                 success=False,
-                message=_MEMORY_SET_AI_REASONING_NOT_ENABLED_MESSAGE,
+                message=_MEMORY_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
                 plan=plan,
             )
 
@@ -1757,7 +1759,7 @@ class JarvisOrchestrator:
             user_request=user_request,
             session_id=session_id,
             plan=plan,
-            ai_unavailable_message=_MEMORY_SET_AI_REASONING_UNAVAILABLE_MESSAGE,
+            ai_unavailable_message=_MEMORY_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
             label=_MEMORY_SET_SUMMARY_LABEL,
             selection_sentence="",
         )
