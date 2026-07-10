@@ -262,3 +262,84 @@ class ApprovalHistoryEntry(Base):
             f"<ApprovalHistoryEntry request_id={self.request_id!r} "
             f"status={self.status!r}>"
         )
+
+
+class WorkflowHistoryEntry(Base):
+    """A durable, append-only record of one workflow lifecycle transition.
+
+    Durable Workflow Lifecycle Foundation (prerequisite turn, not a
+    numbered phase). This table exists purely so a workflow's lifecycle
+    survives a restart and can be reviewed later; it does not make any
+    workflow resumable, replayable, or exactly-once. `WorkflowEngine`
+    remains fully synchronous and in-memory-only for actual execution
+    state - this table is a read-only history of what already happened,
+    written alongside (never instead of) the existing generic audit log.
+
+    One row is written per lifecycle transition (a single workflow_id can
+    and normally does have several rows over its lifetime - start, one or
+    more step transitions, and a terminal completed/failed/stopped row),
+    mirroring AuditLogEntry's own append-only convention rather than
+    ApprovalHistoryEntry's update-in-place convention, since a workflow's
+    transition count is not fixed at exactly two like an approval's is.
+
+    Deliberately excluded, by design, not oversight: there is no
+    tool_input column and no column capable of holding a serialised Plan
+    or resolved step input anywhere in this table. A row can describe
+    that a transition happened, for which workflow, at which step, but it
+    can never be used to reconstruct an executable resumption point -
+    there is nothing in the schema a future "resume after crash" feature
+    could read to do so by accident. Making workflows durably resumable
+    is an explicit, separate, and larger decision deferred to a future,
+    separately-authorized phase, with its own safety review.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        workflow_id: The workflow this transition belongs to (matches
+            WorkflowEngine's own per-run UUID). Not unique - many rows
+            share one workflow_id.
+        session_id: The session the workflow ran under; may be None.
+        status: One of WorkflowEngine's own seven lifecycle event names
+            (e.g. "workflow_started", "workflow_step_waiting"), stored
+            verbatim rather than a second, separately-defined vocabulary.
+        step_number: The 1-based step this transition concerns, or None
+            for a workflow-level transition (started/completed/stopped).
+        step_total: The total number of steps in the plan, for display
+            context; None where not applicable.
+        tool_name: The step's tool name only - never its input or any
+            memory/file content.
+        approval_request_id: Set only for a "workflow_step_waiting" row;
+            correlates with ApprovalHistoryEntry.request_id so a paused
+            workflow's history can be cross-referenced with its approval.
+        detail: Optional short, content-free human-readable text (for
+            example, the reason a workflow stopped).
+        created_at: Timestamp marking when this transition was recorded
+            (UTC).
+    """
+
+    __tablename__ = "workflow_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    step_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    step_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_request_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the entry by workflow_id and status.
+        """
+        return (
+            f"<WorkflowHistoryEntry workflow_id={self.workflow_id!r} "
+            f"status={self.status!r}>"
+        )
