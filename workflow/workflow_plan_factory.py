@@ -1,34 +1,43 @@
 """
 workflow_plan_factory.py
 
-Deterministic Plan construction for the two approved Phase 15 fixed
-workflow commands (Batch 3: Deterministic Workflow Commands and
-Planner/Orchestrator Wiring):
+Deterministic Plan construction for the approved fixed workflow commands:
 
-    remember this and show it back: <text>
-    remember this and forget it: <text>
+    remember this and show it back: <text>              (Phase 15)
+    remember this and forget it: <text>                 (Phase 15)
+    create file <path> with <content> and show it        (Phase 17)
+    update memory <id>: <content> and show it back        (Phase 17)
 
 Responsibilities:
-    - Build an exact, fixed, two-step Plan for each of the two approved
-      workflow commands, using only already-registered tool names
-      ("memory", "memory_forget") and the exact input shapes those tools
-      already require.
+    - Build an exact, fixed, two-step Plan for each approved workflow
+      command, using only already-registered tool names ("memory",
+      "memory_forget", "file_create", "file_read", "memory_update") and
+      the exact input shapes those tools already require.
 
 Does NOT:
     - Parse general natural language, or accept any tool name/argument
-      derived from user input beyond the free-text content to remember.
+      derived from user input beyond the free-text content/path the
+      command already carries. Parsing of the command text itself is
+      CommandRouter's responsibility (Phase 17, Batch 2); this module
+      only ever receives already-extracted, plain values.
     - Call AIReasoningEngine, Planner.create_plan(), SecurityManager,
       ToolExecutor, or ToolRegistry. This module has none of those
       dependencies.
     - Execute anything, or create an approval request.
-    - Access the result of any step. WorkflowEngine (Phase 15, Batch 2)
-      owns the runtime previous-step propagation seam entirely; this
-      factory only ever marks step 2's input_from_previous_step=True and
-      never inspects or guesses what step 1 will actually produce.
+    - Access the result of any step for the two Phase 17 workflows'
+      literal-sharing case (create_and_read): the same already-known
+      `path` value is placed directly into both steps' tool_input by
+      this factory itself - never propagated by WorkflowEngine, and
+      never read from FileCreateTool's own metadata["path"]. For
+      update_and_show, this factory marks step 2's
+      input_from_previous_step=True and never inspects or guesses what
+      step 1 will actually produce - identical to the two Phase 15
+      workflows' own established convention.
 
 This is a narrow, fixed-shape factory - not a general Plan-building
-framework. It creates Plans only for the two workflow types named above,
-each always exactly two steps, in a fixed order, using fixed tool names.
+framework. It creates Plans only for the four workflow types named
+above, each always exactly two steps, in a fixed order, using fixed
+tool names.
 """
 
 from __future__ import annotations
@@ -38,6 +47,9 @@ from planner.plan_models import Plan, PlanStep
 
 _MEMORY_TOOL_NAME = "memory"
 _MEMORY_FORGET_TOOL_NAME = "memory_forget"
+_MEMORY_UPDATE_TOOL_NAME = "memory_update"
+_FILE_CREATE_TOOL_NAME = "file_create"
+_FILE_READ_TOOL_NAME = "file_read"
 
 #: Display-only classification metadata, reused here only for PlanStep.tier
 #: transparency (matching planner.planner.Planner._classify's own existing
@@ -45,7 +57,8 @@ _MEMORY_FORGET_TOOL_NAME = "memory_forget"
 #: These are the exact, already-established, unconditional classifications
 #: security.security_manager's own rule table already assigns to these
 #: exact action strings ("save memory" -> GREEN, "show memory" -> GREEN,
-#: "forget memory" -> YELLOW) - confirmed by direct inspection, not
+#: "forget memory" -> YELLOW, "create text file" -> YELLOW, "read file" ->
+#: GREEN, "update memory" -> YELLOW) - confirmed by direct inspection, not
 #: guessed. This module never imports or calls SecurityManager itself:
 #: PlanStep.tier remains non-authoritative metadata regardless, and
 #: ToolExecutor re-classifies the real action fresh, at execution time,
@@ -57,6 +70,14 @@ _SHOW_TIER = SecurityTier.GREEN
 _SHOW_REASON = "Showing information is read-only and safe."
 _FORGET_TIER = SecurityTier.YELLOW
 _FORGET_REASON = "Forgetting a memory removes it and must be confirmed."
+_CREATE_FILE_TIER = SecurityTier.YELLOW
+_CREATE_FILE_REASON = "Creating a file changes state and must be confirmed."
+_READ_FILE_TIER = SecurityTier.GREEN
+_READ_FILE_REASON = "Reading a file is read-only and safe."
+_UPDATE_MEMORY_TIER = SecurityTier.YELLOW
+_UPDATE_MEMORY_REASON = (
+    "Updating a memory changes stored content and must be confirmed."
+)
 
 
 def build_remember_and_show_plan(content: str) -> Plan:
@@ -140,5 +161,101 @@ def build_remember_and_forget_plan(content: str) -> Plan:
     )
     return Plan(
         user_request=f"remember this and forget it: {content}",
+        steps=(step_1, step_2),
+    )
+
+
+def build_create_and_read_plan(path: str, content: str) -> Plan:
+    """Build the fixed, two-step Plan for "create file ... and show it".
+
+    Step 1 creates a new file at `path` with `content`. Step 2 reads that
+    exact same file back. Unlike the memory workflows above, this
+    workflow needs no runtime propagation at all: `path` is already
+    known in full before either step runs (Nathan supplied it directly
+    in his own command text), so this factory simply places the same
+    literal `path` value into both steps' tool_input itself.
+    input_from_previous_step is False on both steps - WorkflowEngine
+    never reads FileCreateTool's own metadata["path"], and this factory
+    never asks it to (Phase 17, Batch 1).
+
+    Args:
+        path: The raw, unvalidated file path to create and then read
+            back. Emptiness is not checked here - FileCreateTool already
+            rejects an empty path honestly at execution time.
+        content: The raw, unvalidated text to write into the new file.
+
+    Returns:
+        A two-step Plan ready for WorkflowEngine.run().
+    """
+    step_1 = PlanStep(
+        number=1,
+        description="Create this new file.",
+        action="create text file",
+        tier=_CREATE_FILE_TIER,
+        reason=_CREATE_FILE_REASON,
+        tool_name=_FILE_CREATE_TOOL_NAME,
+        tool_input={"path": path, "content": content},
+        input_from_previous_step=False,
+    )
+    step_2 = PlanStep(
+        number=2,
+        description="Show the file that was just created.",
+        action="read file",
+        tier=_READ_FILE_TIER,
+        reason=_READ_FILE_REASON,
+        tool_name=_FILE_READ_TOOL_NAME,
+        tool_input={"path": path},
+        input_from_previous_step=False,
+    )
+    return Plan(
+        user_request=f"create file {path} with {content} and show it",
+        steps=(step_1, step_2),
+    )
+
+
+def build_update_and_show_plan(memory_id: int, content: str) -> Plan:
+    """Build the fixed, two-step Plan for "update memory ... and show it back".
+
+    Step 1 updates the memory identified by `memory_id` to `content`.
+    Step 2 shows that same memory - its input_from_previous_step=True
+    marks that its "memory_id" input must come from step 1's own result,
+    via WorkflowEngine's existing, unmodified propagation mechanism; this
+    factory never computes, guesses, or reuses the originally-parsed
+    `memory_id` for step 2 itself (Phase 17, Batch 1).
+
+    Args:
+        memory_id: The id of the memory to update, as parsed from
+            Nathan's own command text.
+        content: The raw, unvalidated replacement content.
+
+    Returns:
+        A two-step Plan ready for WorkflowEngine.run().
+    """
+    step_1 = PlanStep(
+        number=1,
+        description="Update this memory's content.",
+        action="update memory",
+        tier=_UPDATE_MEMORY_TIER,
+        reason=_UPDATE_MEMORY_REASON,
+        tool_name=_MEMORY_UPDATE_TOOL_NAME,
+        tool_input={
+            "operation": "update",
+            "memory_id": memory_id,
+            "content": content,
+        },
+        input_from_previous_step=False,
+    )
+    step_2 = PlanStep(
+        number=2,
+        description="Show the memory that was just updated.",
+        action="show memory",
+        tier=_SHOW_TIER,
+        reason=_SHOW_REASON,
+        tool_name=_MEMORY_TOOL_NAME,
+        tool_input={"operation": "get"},
+        input_from_previous_step=True,
+    )
+    return Plan(
+        user_request=f"update memory {memory_id}: {content} and show it back",
         steps=(step_1, step_2),
     )
