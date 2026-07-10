@@ -254,6 +254,34 @@ _REMEMBER_AND_SHOW_BACK_WORKFLOW_PREFIX = "remember this and show it back:"
 #: _handle_request_core()/match() for the same reason.
 _REMEMBER_AND_FORGET_WORKFLOW_PREFIX = "remember this and forget it:"
 
+#: The exact, fixed trailing suffix for the Phase 17 "create file <path>
+#: with <content> and show it" workflow command. Unlike the two Phase 15
+#: workflow prefixes above (matched at the START of the text, before any
+#: free text begins, which makes them unambiguous by construction), this
+#: workflow's trigger phrase is a SUFFIX that comes AFTER Nathan's own
+#: free-form path/content text - a materially more fragile grammar shape.
+#: match_create_and_read_workflow() below checks this suffix via a real
+#: str.endswith() comparison against the fully stripped text (never a
+#: substring search), so an occurrence of these words in the MIDDLE of
+#: content never triggers anything. Disclosed, accepted limitation
+#: (docs/phase_17_implementation_plan.md, Section 5): if Nathan's own
+#: intended file content itself legitimately ends with the exact literal
+#: words "and show it", the workflow trigger is indistinguishable from
+#: that content and will always fire, stripping those trailing words from
+#: what is actually written. This is not fixed in Phase 17 - no quoting/
+#: escaping convention exists in this codebase, and inventing one (or
+#: guessing intent, or asking AI to disambiguate) was explicitly out of
+#: scope.
+_CREATE_AND_READ_WORKFLOW_SUFFIX = " and show it"
+
+#: The exact, fixed trailing suffix for the Phase 17 "update memory <id>:
+#: <content> and show it back" workflow command. Same suffix-shape
+#: rationale and same disclosed, accepted ambiguity as
+#: _CREATE_AND_READ_WORKFLOW_SUFFIX above, for replacement memory content
+#: that itself legitimately ends with the exact literal words "and show
+#: it back".
+_UPDATE_AND_SHOW_WORKFLOW_SUFFIX = " and show it back"
+
 #: The exact, complete recent-memory-summary commands (Phase 13, Batch 2).
 #: Unlike every other summary-family command, this one carries no trailing
 #: free-text argument at all - there is no query, category, or id list to
@@ -809,6 +837,106 @@ class CommandRouter:
             return None
 
         return text[len(_REMEMBER_AND_FORGET_WORKFLOW_PREFIX) :].strip()
+
+    def match_create_and_read_workflow(self, text: str) -> tuple[str, str] | None:
+        """Match the exact "create file <path> with <content> and show it"
+        command (Phase 17, Batch 2).
+
+        Requires BOTH an existing create-file prefix (_FILE_CREATE_PREFIXES)
+        AND the exact, fixed trailing suffix " and show it" (matched via
+        str.endswith on the fully stripped text, never a substring search,
+        so an occurrence of those words in the middle of content never
+        triggers anything). Returns None - a clean non-match, falling
+        through to the ordinary, completely unmodified generic
+        match()/build_input() -> file_create path - whenever either
+        condition is absent, so the standalone "create file <path> with
+        <content>" command (with no trailing suffix) is entirely
+        unaffected by this method's existence.
+
+        Once both conditions hold, the suffix is removed by length (not
+        by re-searching) and the remaining text is handed directly to the
+        existing, unmodified _extract_create_input() classmethod - no new
+        path/content-splitting logic exists here.
+
+        Disclosed, accepted limitation (docs/phase_17_implementation_plan.md,
+        Section 5): content that itself legitimately ends with the exact
+        literal words "and show it" cannot be distinguished from the
+        workflow trigger and will always be treated as this workflow,
+        with those trailing words stripped from what is actually written.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            A (path, content) tuple - each possibly empty, exactly as
+            _extract_create_input() already tolerates for the standalone
+            command - or None if the text does not match this workflow's
+            grammar at all.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        if self._file_prefix(lowered, _FILE_CREATE_PREFIXES) is None:
+            return None
+        if not lowered.endswith(_CREATE_AND_READ_WORKFLOW_SUFFIX):
+            return None
+
+        without_suffix = stripped[: len(stripped) - len(_CREATE_AND_READ_WORKFLOW_SUFFIX)]
+        return self._extract_create_input(without_suffix)
+
+    def match_update_and_show_workflow(
+        self, text: str
+    ) -> tuple[int | None, str] | None:
+        """Match the exact "update memory <id>: <content> and show it back"
+        command (Phase 17, Batch 2).
+
+        Requires BOTH the exact leading phrase "update memory" AND the
+        exact, fixed trailing suffix " and show it back" (matched via
+        str.endswith on the fully stripped text, never a substring
+        search). Returns None - a clean non-match, falling through to the
+        ordinary, completely unmodified _build_memory_update_input() path
+        - whenever either condition is absent, so the standalone "update
+        memory <id>: <content>" command (with no trailing suffix), and
+        its sibling "move memory <id> to <category>" command (which never
+        starts with "update memory" at all), are both entirely unaffected
+        by this method's existence.
+
+        Once both conditions hold, the suffix is removed by length, and
+        the same id-extraction and first-colon-split logic
+        _build_memory_update_input()'s own "update" branch already uses is
+        applied directly - no new parsing logic exists here.
+
+        Disclosed, accepted limitation (docs/phase_17_implementation_plan.md,
+        Section 5): replacement content that itself legitimately ends
+        with the exact literal words "and show it back" cannot be
+        distinguished from the workflow trigger and will always be
+        treated as this workflow, with those trailing words stripped from
+        what is actually stored.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            A (memory_id, content) tuple - memory_id is None when it
+            cannot be parsed as an integer, exactly as
+            _extract_memory_id() already tolerates for the standalone
+            command; content may be empty - or None if the text does not
+            match this workflow's grammar at all.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        if not lowered.startswith("update memory"):
+            return None
+        if not lowered.endswith(_UPDATE_AND_SHOW_WORKFLOW_SUFFIX):
+            return None
+
+        without_suffix = stripped[: len(stripped) - len(_UPDATE_AND_SHOW_WORKFLOW_SUFFIX)]
+        memory_id = self._extract_memory_id(without_suffix, "update memory")
+        content = ""
+        if ":" in without_suffix:
+            content = without_suffix.split(":", 1)[1].strip()
+        return memory_id, content
 
     def build_input(self, tool_name: str, text: str) -> dict[str, object]:
         """Build the input dictionary for the matched tool.

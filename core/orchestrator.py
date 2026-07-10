@@ -73,8 +73,10 @@ from tools.registry import ToolRegistry
 from workflow.engine import WorkflowEngine
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
+    build_create_and_read_plan,
     build_remember_and_forget_plan,
     build_remember_and_show_plan,
+    build_update_and_show_plan,
 )
 
 
@@ -650,6 +652,81 @@ class JarvisOrchestrator:
         plan = build_remember_and_forget_plan(content)
         return self._handle_workflow_request(plan, session_id=session_id)
 
+    def _handle_create_and_read_workflow_request(
+        self, path: str, content: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "create file <path> with <content> and show
+        it" request (Phase 17, Batch 2).
+
+        Builds the fixed, YELLOW-then-GREEN two-step Plan via
+        workflow.workflow_plan_factory.build_create_and_read_plan() and
+        executes it through the exact same shared _handle_workflow_request
+        path the two Phase 15 workflows already use - never executing a
+        tool, classifying security, or creating an approval directly
+        itself. Both path and content are passed through exactly as
+        CommandRouter.match_create_and_read_workflow() extracted them -
+        possibly empty, in which case FileCreateTool itself reports the
+        problem honestly, exactly as it already does for the standalone
+        command.
+
+        Args:
+            path: The raw path extracted by
+                CommandRouter.match_create_and_read_workflow - possibly
+                empty.
+            content: The raw content extracted by the same matcher -
+                possibly empty.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, or an
+            honest failure if WorkflowEngine is not configured.
+        """
+        plan = build_create_and_read_plan(path, content)
+        return self._handle_workflow_request(plan, session_id=session_id)
+
+    def _handle_update_and_show_workflow_request(
+        self, memory_id: int | None, content: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "update memory <id>: <content> and show it
+        back" request (Phase 17, Batch 2).
+
+        Builds the fixed, YELLOW-then-GREEN two-step Plan via
+        workflow.workflow_plan_factory.build_update_and_show_plan() and
+        executes it through the exact same shared _handle_workflow_request
+        path the two Phase 15 workflows already use. Unlike the other
+        three workflow handlers, this one must check memory_id before
+        calling the factory: build_update_and_show_plan() requires a real
+        int, since - unlike a path or free-text content - there is no
+        honest way for a downstream tool to report "the id you gave was
+        not a number" once a non-int has already been forced into an int
+        parameter. A None id (CommandRouter.match_update_and_show_workflow
+        already tolerates an unparsable id, exactly as the standalone
+        "update memory" command's own _extract_memory_id already does)
+        is therefore rejected here, honestly, before any Plan is built.
+
+        Args:
+            memory_id: The id extracted by
+                CommandRouter.match_update_and_show_workflow, or None if
+                it could not be parsed as an integer.
+            content: The raw replacement content extracted by the same
+                matcher - possibly empty.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, an
+            honest failure if memory_id could not be parsed, or an honest
+            failure if WorkflowEngine is not configured.
+        """
+        if memory_id is None:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    "Updating a memory requires a valid numeric id."
+                ),
+            )
+        plan = build_update_and_show_plan(memory_id, content)
+        return self._handle_workflow_request(plan, session_id=session_id)
+
     def _handle_workflow_request(
         self, plan: Plan, *, session_id: int | None
     ) -> JarvisResponse:
@@ -964,6 +1041,29 @@ class JarvisOrchestrator:
         if remember_and_forget_content is not None:
             return self._handle_remember_and_forget_workflow_request(
                 remember_and_forget_content, session_id
+            )
+
+        # Phase 17: two more fixed workflow commands, checked in the same
+        # position relative to the generic fallback as the two Phase 15
+        # workflow checks above, for the identical reason - each matcher
+        # returns None on any non-match, so a non-workflow-shaped request
+        # falls through to _handle_request_core exactly as before.
+        create_and_read_match = self._command_router.match_create_and_read_workflow(
+            user_request.strip()
+        )
+        if create_and_read_match is not None:
+            path, content = create_and_read_match
+            return self._handle_create_and_read_workflow_request(
+                path, content, session_id
+            )
+
+        update_and_show_match = self._command_router.match_update_and_show_workflow(
+            user_request.strip()
+        )
+        if update_and_show_match is not None:
+            memory_id, content = update_and_show_match
+            return self._handle_update_and_show_workflow_request(
+                memory_id, content, session_id
             )
 
         response = self._handle_request_core(user_request, session_id=session_id)

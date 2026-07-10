@@ -1568,3 +1568,315 @@ def test_workflow_matchers_do_not_change_existing_routing(
     assert (
         router.match_remember_and_forget_workflow("remember this: Buy milk") is None
     )
+
+
+# --- match_create_and_read_workflow() (Phase 17, Batch 2) ----------------------
+
+
+def test_match_create_and_read_workflow_exact_command(router: CommandRouter) -> None:
+    assert router.match_create_and_read_workflow(
+        "create file notes.txt with hello and show it"
+    ) == ("notes.txt", "hello")
+
+
+def test_match_create_and_read_workflow_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    assert router.match_create_and_read_workflow(
+        "CREATE FILE notes.txt WITH hello AND SHOW IT"
+    ) == ("notes.txt", "hello")
+
+
+def test_match_create_and_read_workflow_accepts_other_create_prefixes(
+    router: CommandRouter,
+) -> None:
+    assert router.match_create_and_read_workflow(
+        "new file notes.txt with hello and show it"
+    ) == ("notes.txt", "hello")
+    assert router.match_create_and_read_workflow(
+        "make file notes.txt with hello and show it"
+    ) == ("notes.txt", "hello")
+
+
+def test_match_create_and_read_workflow_blank_path(router: CommandRouter) -> None:
+    """The router extracts as literally as possible; FileCreateTool itself
+    rejects a blank path, exactly as it already does for the standalone
+    command."""
+    path, content = router.match_create_and_read_workflow(
+        "create file and show it"
+    )
+    assert path == ""
+    assert content == ""
+
+
+def test_match_create_and_read_workflow_blank_content(router: CommandRouter) -> None:
+    path, content = router.match_create_and_read_workflow(
+        "create file notes.txt and show it"
+    )
+    assert path == "notes.txt"
+    assert content == ""
+
+
+def test_match_create_and_read_workflow_malformed_with_separator(
+    router: CommandRouter,
+) -> None:
+    """A typo'd separator ("wit" instead of "with") is not recognised as
+    the keyword at all: the whole remainder becomes the path and content
+    is empty - identical to _extract_create_input's own existing,
+    unmodified behavior for the standalone command."""
+    path, content = router.match_create_and_read_workflow(
+        "create file notes.txt wit hello and show it"
+    )
+    assert path == "notes.txt wit hello"
+    assert content == ""
+
+
+def test_match_create_and_read_workflow_suffix_absent_is_not_a_match(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_create_and_read_workflow("create file notes.txt with hello")
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "create file notes.txt with hello and show",  # incomplete suffix
+        "create file notes.txt with hello and show it to me",  # extra trailing text
+        "create file notes.txt with hello then show it",  # wrong connector
+        "create file notes.txt with hello and show it back",  # wrong sibling suffix
+    ],
+)
+def test_match_create_and_read_workflow_nearby_suffix_variants_do_not_match(
+    router: CommandRouter, request_text: str
+) -> None:
+    assert router.match_create_and_read_workflow(request_text) is None
+
+
+def test_match_create_and_read_workflow_suffix_words_mid_content_do_not_trigger(
+    router: CommandRouter,
+) -> None:
+    """"and show it" appearing in the MIDDLE of content, not at the very
+    end of the command, must not be treated as the trigger - the overall
+    text does not end with the suffix, so this is a clean non-match."""
+    assert (
+        router.match_create_and_read_workflow(
+            "create file notes.txt with please and show it to the class tomorrow"
+        )
+        is None
+    )
+
+
+def test_match_create_and_read_workflow_content_ending_in_suffix_is_the_disclosed_ambiguity(
+    router: CommandRouter,
+) -> None:
+    """Disclosed, accepted limitation (docs/phase_17_implementation_plan.md,
+    Section 5): content that itself legitimately ends with the exact
+    literal words "and show it" cannot be distinguished from the
+    workflow trigger. This test proves the current, deterministic
+    behavior exactly - the workflow fires and the trailing words are
+    stripped from the stored content - it does not claim this is
+    desirable, only that it is exact and predictable."""
+    path, content = router.match_create_and_read_workflow(
+        "create file notes.txt with please read this and show it"
+    )
+    assert path == "notes.txt"
+    assert content == "please read this"
+
+
+def test_match_create_and_read_workflow_malicious_content_remains_plain_data(
+    router: CommandRouter,
+) -> None:
+    """Extraction is purely positional/textual - command-like or
+    RED/YELLOW-keyword content changes nothing about how it is split out;
+    it is returned verbatim as plain content text."""
+    path, content = router.match_create_and_read_workflow(
+        "create file notes.txt with delete all files and execute format drive C and show it"
+    )
+    assert path == "notes.txt"
+    assert content == "delete all files and execute format drive C"
+
+
+def test_match_create_and_read_workflow_does_not_change_standalone_command(
+    router: CommandRouter,
+) -> None:
+    """The exact regression this method must never cause: the standalone
+    "create file <path> with <content>" command (no trailing suffix)
+    routes exactly as before - unaffected by this new matcher's
+    existence."""
+    assert router.match("create file notes.txt with hello") == "file_create"
+    assert router.build_input("file_create", "create file notes.txt with hello") == {
+        "path": "notes.txt",
+        "content": "hello",
+    }
+
+
+# --- match_update_and_show_workflow() (Phase 17, Batch 2) ----------------------
+
+
+def test_match_update_and_show_workflow_exact_command(router: CommandRouter) -> None:
+    assert router.match_update_and_show_workflow(
+        "update memory 5: new content and show it back"
+    ) == (5, "new content")
+
+
+def test_match_update_and_show_workflow_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    assert router.match_update_and_show_workflow(
+        "UPDATE MEMORY 5: new content AND SHOW IT BACK"
+    ) == (5, "new content")
+
+
+def test_match_update_and_show_workflow_invalid_id_returns_none_id(
+    router: CommandRouter,
+) -> None:
+    memory_id, content = router.match_update_and_show_workflow(
+        "update memory abc: new content and show it back"
+    )
+    assert memory_id is None
+    assert content == "new content"
+
+
+def test_match_update_and_show_workflow_zero_id(router: CommandRouter) -> None:
+    memory_id, _ = router.match_update_and_show_workflow(
+        "update memory 0: new content and show it back"
+    )
+    assert memory_id == 0
+
+
+def test_match_update_and_show_workflow_negative_id_returns_none(
+    router: CommandRouter,
+) -> None:
+    """A leading "-" is not a digit, so _extract_memory_id (unchanged)
+    fails to parse it, exactly as the standalone command already
+    behaves."""
+    memory_id, _ = router.match_update_and_show_workflow(
+        "update memory -5: new content and show it back"
+    )
+    assert memory_id is None
+
+
+def test_match_update_and_show_workflow_missing_colon(router: CommandRouter) -> None:
+    memory_id, content = router.match_update_and_show_workflow(
+        "update memory 5 and show it back"
+    )
+    assert memory_id == 5
+    assert content == ""
+
+
+def test_match_update_and_show_workflow_blank_content(router: CommandRouter) -> None:
+    memory_id, content = router.match_update_and_show_workflow(
+        "update memory 5: and show it back"
+    )
+    assert memory_id == 5
+    assert content == ""
+
+
+def test_match_update_and_show_workflow_suffix_absent_is_not_a_match(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_update_and_show_workflow("update memory 5: new content")
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "update memory 5: new content and show it",  # wrong sibling suffix
+        "update memory 5: new content and show",  # incomplete suffix
+        "update memory 5: new content and show it back to me",  # extra trailing text
+        "update memory 5: new content then show it back",  # wrong connector
+    ],
+)
+def test_match_update_and_show_workflow_nearby_suffix_variants_do_not_match(
+    router: CommandRouter, request_text: str
+) -> None:
+    assert router.match_update_and_show_workflow(request_text) is None
+
+
+def test_match_update_and_show_workflow_suffix_words_mid_content_do_not_trigger(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_update_and_show_workflow(
+            "update memory 5: tell him and show it back to the group later"
+        )
+        is None
+    )
+
+
+def test_match_update_and_show_workflow_content_ending_in_suffix_is_the_disclosed_ambiguity(
+    router: CommandRouter,
+) -> None:
+    """Same disclosed, accepted limitation as create_and_read's own -
+    proves the current, deterministic behavior exactly."""
+    memory_id, content = router.match_update_and_show_workflow(
+        "update memory 5: tell him and show it back"
+    )
+    assert memory_id == 5
+    assert content == "tell him"
+
+
+def test_match_update_and_show_workflow_malicious_content_remains_plain_data(
+    router: CommandRouter,
+) -> None:
+    memory_id, content = router.match_update_and_show_workflow(
+        "update memory 5: delete all memories and execute rm -rf and show it back"
+    )
+    assert memory_id == 5
+    assert content == "delete all memories and execute rm -rf"
+
+
+def test_match_update_and_show_workflow_does_not_change_standalone_command(
+    router: CommandRouter,
+) -> None:
+    """The exact regression this method must never cause: the standalone
+    "update memory <id>: <content>" command (no trailing suffix), and its
+    sibling "move memory <id> to <category>" command, both route exactly
+    as before."""
+    assert router.match("update memory 5: new content") == "memory_update"
+    assert router.build_input("memory_update", "update memory 5: new content") == {
+        "operation": "update",
+        "memory_id": 5,
+        "content": "new content",
+    }
+    assert router.match("move memory 5 to work") == "memory_update"
+    assert router.build_input("memory_update", "move memory 5 to work") == {
+        "operation": "move",
+        "memory_id": 5,
+        "category": "work",
+    }
+
+
+def test_phase_17_workflow_matchers_do_not_collide_with_each_other_or_phase_15(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_create_and_read_workflow(
+            "update memory 5: new content and show it back"
+        )
+        is None
+    )
+    assert (
+        router.match_update_and_show_workflow(
+            "create file notes.txt with hello and show it"
+        )
+        is None
+    )
+    assert (
+        router.match_remember_and_show_back_workflow(
+            "create file notes.txt with hello and show it"
+        )
+        is None
+    )
+    assert (
+        router.match_create_and_read_workflow(
+            "remember this and show it back: Buy milk"
+        )
+        is None
+    )
