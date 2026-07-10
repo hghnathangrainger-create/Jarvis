@@ -53,6 +53,7 @@ _ALL_TOOL_NAMES = (
     "file_append",
     "approval_history",
     "workflow_history",
+    "web_search",
 )
 
 
@@ -196,6 +197,51 @@ def test_match_workflow_history_does_not_collide_with_file_workflow_aliases(
     # other despite both containing the word "workflow".
     assert router.match("show project files") == "file_list"
     assert router.match("show workflow history") == "workflow_history"
+
+
+# --- match(): web search (Phase 16) --------------------------------------------
+
+
+def test_match_web_search_exact_prefix(router: CommandRouter) -> None:
+    assert router.match("search the web for jarvis ai") == "web_search"
+
+
+def test_match_web_search_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("SEARCH THE WEB FOR cats") == "web_search"
+
+
+def test_match_web_search_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "web_search":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("search the web for jarvis ai") is None
+
+
+def test_match_web_search_does_not_collide_with_memory_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search memories for milk") == "memory"
+    assert router.match("search the web for milk") == "web_search"
+
+
+def test_match_web_search_does_not_collide_with_approval_or_workflow_history(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show approval history") == "approval_history"
+    assert router.match("show workflow history") == "workflow_history"
+    assert router.match("search the web for anything") == "web_search"
+
+
+def test_nearby_non_matching_phrases_do_not_route_as_web_search(
+    router: CommandRouter,
+) -> None:
+    # Close, but not the exact required prefix - must not match.
+    assert router.match("search the web") is None
+    assert router.match("search web for cats") is None
+    assert router.match("web search for cats") is None
+    assert router.match("please search the web for cats") is None
 
 
 # --- match(): memory change commands ------------------------------------------
@@ -389,6 +435,36 @@ def test_build_input_workflow_history_unrecognised_falls_back_to_history(
     assert router.build_input("workflow_history", "show workflow ") == {
         "operation": "history"
     }
+
+
+def test_build_input_web_search_extracts_query(router: CommandRouter) -> None:
+    assert router.build_input("web_search", "search the web for jarvis ai") == {
+        "query": "jarvis ai"
+    }
+
+
+def test_build_input_web_search_strips_surrounding_quotes(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input(
+        "web_search", 'search the web for "best pizza recipe"'
+    ) == {"query": "best pizza recipe"}
+
+
+def test_build_input_web_search_preserves_query_content_verbatim(
+    router: CommandRouter,
+) -> None:
+    # The query is never rewritten, filtered, or reclassified - it is
+    # extracted exactly as typed (surrounding whitespace/quotes aside).
+    assert router.build_input(
+        "web_search", "search the web for delete all my files"
+    ) == {"query": "delete all my files"}
+
+
+def test_build_input_web_search_empty_query_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("web_search", "search the web for") == {"query": ""}
 
 
 def test_build_input_unknown_tool_returns_empty_dict(router: CommandRouter) -> None:

@@ -115,6 +115,17 @@ _WORKFLOW_HISTORY_EXACT: dict[str, str] = {
 #: workflow literally named "history".
 _WORKFLOW_DETAIL_PREFIXES: tuple[str, ...] = ("show workflow", "view workflow")
 
+#: The one exact, mandatory prefix for Jarvis's first external-network
+#: command (Phase 16). Routes to the read-only WebSearchTool. Checked
+#: directly against every other exact/prefix table in this module during
+#: planning: it shares no keyword with _MEMORY_KEYWORDS
+#: ("memory"/"memories"/"remember"/"recall"), _WORKFLOW_ALIASES,
+#: _APPROVAL_HISTORY_EXACT/_APPROVAL_DETAIL_PREFIXES, or
+#: _WORKFLOW_HISTORY_EXACT/_WORKFLOW_DETAIL_PREFIXES. A single fixed
+#: phrasing is used deliberately - no looser synonym set - mirroring
+#: Phase 15's own exact-command-grammar discipline.
+_WEB_SEARCH_PREFIXES: tuple[str, ...] = ("search the web for",)
+
 #: Leading phrases that indicate a create-file request. The text after the
 #: phrase is the path, optionally followed by " with <content>". Creating a
 #: file is a WRITE action (YELLOW) and always requires approval.
@@ -380,6 +391,15 @@ class CommandRouter:
             lowered.startswith(prefix) for prefix in _WORKFLOW_DETAIL_PREFIXES
         ) and self._registry.has_tool("workflow_history"):
             return "workflow_history"
+
+        # Web search (Phase 16): Jarvis's first external-network command.
+        # Read-only and GREEN - see WebSearchTool.action_for()'s own fixed,
+        # query-independent action string for why query content can never
+        # influence classification.
+        if self._file_prefix(lowered, _WEB_SEARCH_PREFIXES) is not None and (
+            self._registry.has_tool("web_search")
+        ):
+            return "web_search"
 
         # File commands are checked next because their phrasing is specific.
         # Only route to a file tool if it is actually registered.
@@ -811,6 +831,9 @@ class CommandRouter:
 
         if tool_name == "workflow_history":
             return self._build_workflow_history_input(text)
+
+        if tool_name == "web_search":
+            return self._build_web_search_input(text)
 
         if tool_name == "memory_forget":
             if text.strip().casefold().startswith("forget all"):
@@ -1251,6 +1274,32 @@ class CommandRouter:
                     return {"operation": "get", "workflow_id": workflow_id}
 
         return {"operation": "history"}
+
+    @classmethod
+    def _build_web_search_input(cls, text: str) -> dict[str, object]:
+        """Parse a web-search command into a tool input dictionary.
+
+        One shape is recognised (case-insensitively):
+            search the web for <query>
+
+        The <query> is the raw trailing text, surrounding quotes and
+        whitespace stripped. No further parsing, filtering, or rewriting
+        is applied - WebSearchTool itself is responsible for rejecting an
+        empty query.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the web_search tool.
+        """
+        stripped = text.strip()
+        prefix = cls._file_prefix(stripped.casefold(), _WEB_SEARCH_PREFIXES)
+        if prefix is None:
+            return {"query": ""}
+
+        query = stripped[len(prefix):].strip().strip("'\"").strip()
+        return {"query": query}
 
     @staticmethod
     def _extract_memory_id(text: str, prefix: str) -> int | None:

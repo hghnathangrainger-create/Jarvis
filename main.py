@@ -55,8 +55,10 @@ from tools.builtin import (
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
+    WebSearchTool,
     WorkflowHistoryTool,
 )
+from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
@@ -129,6 +131,13 @@ def build_orchestrator() -> JarvisOrchestrator:
     # this read-only tool - never two separately constructed stores.
     workflow_history = WorkflowHistoryStore(session_factory)
     registry.register_tool(WorkflowHistoryTool(workflow_history))
+
+    # Web search (Phase 16): Jarvis's first external-network tool.
+    # Read-only, GREEN, and deliberately provider-independent - this is
+    # the only place a concrete search vendor (DuckDuckGo) is constructed.
+    # WebSearchTool itself depends only on the WebSearchProvider
+    # abstraction, never this concrete type directly.
+    registry.register_tool(WebSearchTool(DuckDuckGoSearchProvider()))
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,

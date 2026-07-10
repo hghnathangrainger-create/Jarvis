@@ -13,6 +13,10 @@ Read-only tools (GREEN) - these never change any state:
     - WorkflowHistoryTool: shows durable workflow lifecycle history
       (Durable Workflow Lifecycle Foundation - a prerequisite turn, not a
       numbered phase).
+    - WebSearchTool: performs a live web search and returns titles, URLs,
+      and snippets - not full webpage content (Phase 16). Jarvis's first
+      external-network tool; depends only on the WebSearchProvider
+      abstraction, never a concrete search vendor directly.
 
 Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
@@ -37,6 +41,7 @@ from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
+from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 
 __all__ = [
@@ -51,4 +56,5 @@ __all__ = [
     "MemoryUpdateTool",
     "MemoryForgetTool",
     "WorkflowHistoryTool",
+    "WebSearchTool",
 ]
