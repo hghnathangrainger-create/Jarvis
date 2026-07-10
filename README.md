@@ -22,6 +22,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Durable Workflow Lifecycle Foundation complete (a prerequisite turn, not a numbered phase).**
 **Phase 16 complete: Web Search Tool and External Content Boundary.**
 **Phase 17 complete: Broader Deterministic Workflow Commands.**
+**Phase 18 complete: AI Summarization of Web Search Results.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -49,9 +50,13 @@ The **Durable Workflow Lifecycle Foundation** is a small, narrow prerequisite tu
 
 Phase 16 gives Jarvis its **first real external-network capability**: a deterministic, read-only `search the web for <query>` command that returns live search results — titles, URLs, and short snippets — directly to Nathan. There is no AI involvement of any kind: no AI-authored queries, no AI summarisation of results, no autonomous browsing, and no fetching of the pages a result links to. Every search is classified GREEN by the same Security Manager every other read-only command already goes through, and the query's own content can never influence that classification. See the Phase 16 section below for the full security and architecture treatment.
 
+Phase 17 adds two more fixed, two-step workflow commands (`create_and_read`, `update_and_show`) on the same Sequential Workflow Engine Phase 15 already built — no engine change, no new tool, no AI involvement. See the Phase 17 section below.
+
+Phase 18 gives Jarvis its **first AI-facing use of live web search**: an explicit `summarise web search for <query>` command performs exactly one real search, converts the returned titles/URLs/snippets into bounded, typed, untrusted AI context using the same trust boundary Phases 7–14 already established, and returns an advisory synthesis honestly labelled as based on search-result snippets — never on full webpages Jarvis never visited. No AI-authored or AI-rewritten query, no second or follow-up search, and no new execution authority of any kind. See the Phase 18 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis, and no test makes a real web search either.
 
-> **Verified:** `poetry run pytest -v` — **2041 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–17 test plus the Durable Workflow Lifecycle Foundation.
+> **Verified:** `poetry run pytest -v` — **2112 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–18 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -504,6 +509,32 @@ Unlike Phase 15's two commands (where the trigger phrase comes first, so anythin
 ### What is deliberately NOT included in Phase 17
 
 `move_and_show`, `create_and_append`, any list-then-act or search-then-act workflow, any history-chaining workflow, any workflow using web search, any change to the Workflow Engine's single `memory_id` propagation mechanism (no path propagation, no arbitrary output-field mapping, no multiple-output propagation, no template or expression language, no branching, retries, rollback, or compensation), any new tool, and any AI involvement of any kind. `WorkflowEngine` still propagates exactly one field, `metadata["memory_id"]` — a known, disclosed limitation for any future workflow that would need to propagate something else, not fixed here.
+
+---
+
+## Phase 18 — AI Summarization of Web Search Results (complete)
+
+Jarvis's first AI-facing use of live web search: an explicit `summarise web search for <query>` command performs exactly one real search and asks the advisory AI to synthesise the returned snippets — reusing the exact same `AIReasoningEngine`/`AIRouter`/`PromptBuilder` pipeline, `ContentTrust` rules, and injection scanning every prior AI-summary command (Phases 8–14) already goes through, unchanged. See `docs/phase_18_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Narrow ingestion module.** A new `ai/web_search_ingestion.py` calls `WebSearchProvider.search()` directly — the same direct-acquisition pattern `ai/memory_ingestion.py` already established, never through `WebSearchTool`/`ToolExecutor` — exactly once per request, and combines up to 5 results into one bounded, typed `UNTRUSTED` context block (per-result and total character budgets, whole-result omission when a budget is exceeded, never partial re-inclusion).
+- **Batch 2 — Command routing and orchestrator wiring.** A new `summarise web search for <query>` (or `summarize web search for <query>`) command, recognised by the Core's command router and dispatched to a new terminal handler that acquires results, builds the AI request, and applies the same unexpected-action audit policy every other AI-advised response already uses.
+- **Batch 3 — End-to-end verification and closure.** Full real-stack proof (real Security Manager, Tool Executor, Command Router, `AIRouter`, `PromptBuilder`, and injection scanner; only the search provider and the AI provider are faked — never a real network or Claude call) that adversarial title/URL/snippet content, including fake system/developer/Nathan-impersonating instructions, remains inert `UNTRUSTED` data that can never trigger a second search, a tool call, an approval, or a workflow.
+
+### Web search summary command
+
+| Command | What it does |
+|---|---|
+| `summarise web search for <query>` / `summarize web search for <query>` | Performs exactly one live web search for `<query>` (GREEN, same authority as `search the web for <query>`) and asks the advisory AI to synthesise the returned titles, URLs, and snippets. Requires AI reasoning to be enabled. |
+
+The response is clearly labelled `[AI web search summary - based on search-result snippets, not full webpages]`. This label is fixed and code-enforced — it appears exactly as written regardless of anything the AI itself claims (for example, if the AI's own text asserts it "read the full article," the label still honestly says otherwise). If the query is empty, AI reasoning is disabled, web search is unavailable, the search itself fails, or no results are found, Jarvis says so plainly and never calls the AI at all.
+
+### Safety note: search-result content is untrusted, scanned, and audited — nothing new is trusted, and nothing new can act
+
+Every title, URL, and snippet returned by the search provider is combined into a single `UNTRUSTED` `AIContextBlock` via `AIContextBlock.from_untrusted()` — the same factory, the same fixed untrusted-context framing, and the same automatic injection scan every prior AI-summary command already uses. A snippet claiming to be a system message, a developer instruction, or "from Nathan" gains no trust from that claim; it is still wrapped in `PromptBuilder`'s own fixed header telling the AI to treat it strictly as information, not instructions, and a detected instruction-like pattern is audited, never blocked or acted on, exactly as Phase 7 already established. The query itself never becomes part of that untrusted content and is never rewritten by the AI — it is used to search exactly once, and the AI cannot trigger a second search, no matter what the results or its own output suggest. As in every prior AI-summary command, any AI-suggested action is only ever a policy/audit observation — it can never execute, approve itself, create a workflow, or change what Jarvis is allowed to do.
+
+### What is deliberately NOT included in Phase 18
+
+AI-authored, AI-expanded, or AI-rewritten search queries; a second or follow-up search of any kind; autonomous browsing, URL fetching, page crawling, or link-following; a Research Agent or any multi-turn research loop; any change to `SearchResult`, `WebSearchProvider`, `DuckDuckGoSearchProvider`, or the standalone `search the web for <query>` command's own behaviour; a multi-provider search router; migrating to the `ddgs` package; any new tool; any `WorkflowEngine` involvement; any execution authority derived from search-result content or AI output; and any new `ContentTrust` value or weakening of the existing trust factories. Jarvis has still not "read" a webpage in this phase either — only the search provider's own title/URL/snippet metadata is ever summarised, and the response says so explicitly.
 
 ---
 
