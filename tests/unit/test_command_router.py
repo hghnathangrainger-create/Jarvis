@@ -696,6 +696,88 @@ def test_match_memory_set_summary_does_not_change_existing_routing(
     assert router.match_file_summary("summarise file report.txt") == "report.txt"
 
 
+# --- match_web_search_summary(): AI web-search-summary command (Phase 18, Batch 2)
+
+
+def test_match_web_search_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_web_search_summary("summarise web search for jarvis ai") == "jarvis ai"
+
+
+def test_match_web_search_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert router.match_web_search_summary("summarize web search for jarvis ai") == "jarvis ai"
+
+
+def test_match_web_search_summary_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match_web_search_summary("SUMMARISE WEB SEARCH FOR jarvis ai") == "jarvis ai"
+
+
+def test_match_web_search_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match_web_search_summary("summarise web search for   jarvis ai   ") == "jarvis ai"
+
+
+def test_match_web_search_summary_with_no_query_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    """Recognised as a web-search-summary command, but with no query - the
+    caller (JarvisOrchestrator) is responsible for rejecting the empty
+    query honestly, exactly like an empty memory-summary id."""
+    assert router.match_web_search_summary("summarise web search for") == ""
+    assert router.match_web_search_summary("summarise web search for   ") == ""
+
+
+def test_match_web_search_summary_does_not_gate_on_tool_registration(
+    router: CommandRouter,
+) -> None:
+    """Unlike match_file_summary, this never goes through a registered
+    tool at all - it always recognises the grammar shape regardless of
+    whether "web_search" is registered."""
+    registry = ToolRegistry()
+    unregistered_router = CommandRouter(registry)
+    assert (
+        unregistered_router.match_web_search_summary("summarise web search for x")
+        == "x"
+    )
+
+
+def test_match_web_search_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert router.match_web_search_summary("search the web for jarvis ai") is None
+    assert router.match_web_search_summary("summarise file report.txt") is None
+    assert router.match_web_search_summary("summarise memory 5") is None
+    assert router.match_web_search_summary("summarise memories 1, 2, 3") is None
+    assert router.match_web_search_summary("summarise memories about security") is None
+    assert router.match_web_search_summary("summarise memories in project") is None
+    assert router.match_web_search_summary("web search for jarvis ai") is None
+    assert router.match_web_search_summary("summarise web") is None
+    assert router.match_web_search_summary("") is None
+
+
+def test_match_web_search_summary_does_not_change_normal_match_behaviour(
+    router: CommandRouter,
+) -> None:
+    """Adding match_web_search_summary must not change match()'s own
+    routing, the raw "search the web for" command's own recognition, or
+    any existing summary-family matcher's own recognition."""
+    assert router.match("search the web for jarvis ai") == "web_search"
+    assert router.match_file_summary("summarise file report.txt") == "report.txt"
+    assert router.match_memory_summary("summarise memory 42") == "42"
+    assert (
+        router.match_memory_query_summary("summarise memories about security")
+        == "security"
+    )
+    assert (
+        router.match_memory_category_summary("summarise memories in project")
+        == "project"
+    )
+
+
 # --- match_memory_query_summary(): query-based memory-summary command (Phase 11, Batch 2)
 
 

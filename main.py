@@ -136,8 +136,12 @@ def build_orchestrator() -> JarvisOrchestrator:
     # Read-only, GREEN, and deliberately provider-independent - this is
     # the only place a concrete search vendor (DuckDuckGo) is constructed.
     # WebSearchTool itself depends only on the WebSearchProvider
-    # abstraction, never this concrete type directly.
-    registry.register_tool(WebSearchTool(DuckDuckGoSearchProvider()))
+    # abstraction, never this concrete type directly. The same instance
+    # is reused by the "summarise web search for <query>" AI workflow
+    # (Phase 18, Batch 2) below - never a second, separately constructed
+    # provider.
+    web_search_provider = DuckDuckGoSearchProvider()
+    registry.register_tool(WebSearchTool(web_search_provider))
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,
@@ -207,6 +211,11 @@ def build_orchestrator() -> JarvisOrchestrator:
         # Phase 15, Batch 3: the same WorkflowEngine instance already built
         # above (not a second one) powers the two explicit workflow commands.
         workflow_engine=workflow_engine,
+        # Phase 18, Batch 2: the same WebSearchProvider instance already
+        # built above (not a second one) powers the explicit "summarise
+        # web search for <query>" AI-summary workflow, called directly -
+        # never through WebSearchTool/ToolExecutor.
+        web_search_provider=web_search_provider,
         logger=logger,
     )
 

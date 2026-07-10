@@ -55,6 +55,7 @@ from ai.memory_selection import (
 )
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
+from ai.web_search_ingestion import ingest_web_search_for_ai
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
@@ -70,6 +71,7 @@ from security.security_manager import (
 from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
+from tools.web_search_provider import WebSearchProvider
 from workflow.engine import WorkflowEngine
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
@@ -118,6 +120,33 @@ _AI_REASONING_NOT_ENABLED_MESSAGE = (
 )
 _AI_REASONING_UNAVAILABLE_MESSAGE = (
     "AI reasoning could not produce a summary for this file right now."
+)
+
+#: Advisory label for a web-search-summary response's message (Phase 18,
+#: Batch 2). Distinct from _FILE_SUMMARY_LABEL for the same reason that
+#: label is distinct from _attach_ai_suggestion's own annotation label -
+#: and its own wording explicitly, unconditionally discloses that the
+#: synthesis is based on search-result snippets, not full webpage
+#: content. This label is the code-enforced honesty guarantee
+#: (docs/phase_18_implementation_plan.md, Section 12): it is applied to
+#: every successful response regardless of the AI's own wording.
+_WEB_SEARCH_SUMMARY_LABEL = (
+    "[AI web search summary - based on search-result snippets, not full "
+    "webpages]"
+)
+#: A sixth, independently-declared message pair, matching the already-
+#: established, already-reviewed per-summary-family convention (five
+#: prior copies already exist: the file-summary pair above, and four
+#: memory-summary-family pairs below) rather than reusing the file-
+#: summary pair's own file-specific wording, which would be factually
+#: wrong for a web-search request. Centralising all six copies remains
+#: the same disclosed, deferred maintenance-turn candidate already
+#: identified in docs/phase_14_completion_report.md - not fixed here.
+_WEB_SEARCH_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise these web search results."
+)
+_WEB_SEARCH_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for these web search results right now."
 )
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
@@ -395,6 +424,7 @@ class JarvisOrchestrator:
         security_manager: SecurityManager | None = None,
         memory_manager: MemoryManager | None = None,
         workflow_engine: WorkflowEngine | None = None,
+        web_search_provider: WebSearchProvider | None = None,
         logger: _AuditLogger | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
@@ -431,6 +461,16 @@ class JarvisOrchestrator:
                 default; when omitted, workflow commands fail honestly
                 instead. Every existing construction site that omits this
                 parameter continues to behave exactly as before Phase 15.
+            web_search_provider: An optional WebSearchProvider, used only
+                by the explicit "summarise web search for <query>"
+                AI-summary workflow (Phase 18, Batch 2). Never invoked
+                through WebSearchTool or ToolExecutor - this workflow
+                calls search() directly, mirroring memory_manager's own
+                established precedent. No new instance is ever created
+                here if omitted; when omitted, web-search-summary
+                requests fail honestly instead. Every existing
+                construction site that omits this parameter continues to
+                behave exactly as before Phase 18.
             logger: Optional audit logger for the unexpected-action verdict.
                 The verdict is always evaluated; when logger is omitted,
                 nothing is recorded, matching how approval_manager behaves
@@ -445,6 +485,7 @@ class JarvisOrchestrator:
         self._security = security_manager or SecurityManager()
         self._memory_manager = memory_manager
         self._workflow_engine = workflow_engine
+        self._web_search_provider = web_search_provider
         self._logger = logger
 
     @property
@@ -964,6 +1005,14 @@ class JarvisOrchestrator:
                 memory_summary_raw_id, user_request, session_id
             )
 
+        web_search_summary_query = (
+            self._command_router.match_web_search_summary(user_request.strip())
+        )
+        if web_search_summary_query is not None:
+            return self._handle_web_search_summary_request(
+                web_search_summary_query, user_request, session_id
+            )
+
         memory_query_summary_raw_text = (
             self._command_router.match_memory_query_summary(user_request.strip())
         )
@@ -1172,6 +1221,184 @@ class JarvisOrchestrator:
         self._evaluate_unexpected_actions(response, result, session_id)
 
         return response
+
+    def _handle_web_search_summary_request(
+        self, raw_query: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarise web search for <query>" request
+        (Phase 18, Batch 2).
+
+        This is a terminal response path, the direct architectural
+        sibling of _handle_file_summary_request/_handle_memory_summary_request,
+        separate from the rule-based _handle_request_core/_attach_ai_suggestion
+        flow: the AI's own synthesis of live web search results is the
+        entire point of this request. It still coordinates only
+        existing, already-secured components - it owns no search
+        acquisition, context construction, or unexpected-action logic of
+        its own:
+
+            1. A Plan is generated normally (Planner.create_plan), so the
+               existing unexpected-action policy has a real expected-action
+               scope to evaluate AI suggestions against.
+            2. The raw trailing query text CommandRouter.match_web_search_summary
+               extracted is checked for emptiness here, before anything
+               else is attempted - an empty query fails honestly with no
+               search performed and no AI ever consulted.
+            3. Required collaborators (AI reasoning, then the
+               web_search_provider) are confirmed available, each with
+               its own honest failure.
+            4. ai.web_search_ingestion.ingest_web_search_for_ai() performs
+               the search directly through WebSearchProvider.search() -
+               called exactly once - and returns either an UNTRUSTED
+               AIContextBlock or a represented failure. This method never
+               calls WebSearchProvider.search() itself, never constructs
+               an AIContextBlock itself, and never parses WebSearchTool's
+               own rendered display output.
+            5. On ingestion failure (a provider error, or zero results),
+               an honest failure is returned and the AI is never called -
+               a summary is never fabricated from context that does not
+               exist.
+            6. AIReasoningEngine.reason() is called exactly as it always
+               is; this method has no ability to execute anything
+               regardless of what the AI returns, and nothing here can
+               trigger a second search.
+            7. The fixed _WEB_SEARCH_SUMMARY_LABEL is prepended to every
+               successful response unconditionally - the code-enforced
+               honesty guarantee that this is a synthesis of search-result
+               snippets, never full webpage content, regardless of the
+               AI's own wording.
+            8. Every AI-suggested action is evaluated through the
+               existing, unmodified _evaluate_unexpected_actions/
+               _audit_unexpected_action methods - the same Batch 4 policy
+               and audit path every other request already uses.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        summary, and never raises into the caller. Raw search results are
+        never substituted as a fake summary: Nathan can use the existing,
+        separate "search the web for <query>" command directly if AI
+        summarization is unavailable.
+
+        Args:
+            raw_query: The raw trailing query text extracted by
+                CommandRouter.match_web_search_summary - possibly empty.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary
+            was produced; otherwise success=False with an honest
+            explanation of which stage did not complete - never blocked
+            or requiring confirmation, since this workflow performs no
+            write action of any kind.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+        query = raw_query.strip()
+
+        if not query:
+            return JarvisResponse(
+                success=False,
+                message="Summarising a web search requires a non-empty query.",
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_WEB_SEARCH_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._web_search_provider is None:
+            return JarvisResponse(
+                success=False,
+                message="Web search is not available.",
+                plan=plan,
+            )
+
+        ingestion = ingest_web_search_for_ai(self._web_search_provider, query)
+        self._audit_web_search_summary_acquisition(ingestion, session_id)
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=ingestion.error or "Could not search the web.",
+                plan=plan,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=user_request,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_WEB_SEARCH_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_WEB_SEARCH_SUMMARY_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
+    def _audit_web_search_summary_acquisition(
+        self, ingestion: object, session_id: int | None
+    ) -> None:
+        """Emit one web_search_summary_acquisition audit event, if a
+        logger is configured.
+
+        A new, narrow, genuinely distinct event (Phase 18, Batch 2) -
+        never a duplication of WebSearchTool's own tool_call events
+        (this path never invokes WebSearchTool/ToolExecutor at all) or
+        of AIRouter's own ai_call event (which fires separately, for the
+        subsequent reason() call). Never embeds the raw query text or
+        any raw result content in the audit detail - only the outcome
+        and the honest included/omitted counts.
+
+        When no logger is configured, this is a no-op, matching how
+        every other optional-audit call site in this class behaves
+        without one. A raising logger is caught here so a failing audit
+        event can never break the authoritative ingestion outcome
+        already computed.
+
+        Args:
+            ingestion: The WebSearchIngestionResult to record.
+            session_id: Optional session identifier for the audit trail.
+        """
+        if self._logger is None:
+            return
+
+        outcome = EventOutcome.SUCCESS if ingestion.success else EventOutcome.FAILURE
+        detail = (
+            f"included={ingestion.included_count} "
+            f"omitted_for_size={ingestion.omitted_for_size}"
+        )
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type="web_search_summary_acquisition",
+                outcome=outcome,
+                detail=detail,
+                session_id=session_id,
+            )
+        except Exception:
+            # Observability-only: a failing audit logger must never break
+            # the authoritative ingestion outcome already computed.
+            pass
 
     def _handle_memory_summary_request(
         self, raw_id_text: str, user_request: str, session_id: int | None

@@ -160,6 +160,24 @@ _FILE_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize file",
 )
 
+#: Leading phrases that indicate an explicit AI web-search-summary request
+#: (Phase 18, Batch 2). The text after the phrase is the raw, unparsed
+#: search query. Deliberately a separate, narrow match from
+#: match()/build_input() and from _WEB_SEARCH_PREFIXES (the raw,
+#: non-AI "search the web for <query>" command, Phase 16): summarising web
+#: search results is a multi-step AI-reasoning workflow (search, then
+#: reason about the results), not a single tool execution, so it is never
+#: returned by match()/build_input(). Checked directly against every
+#: existing exact/prefix table in this module: "summarise web search for"
+#: shares no leading word with "search the web for" (different first
+#: word: "summarise"/"summarize" vs "search") or with any
+#: "summarise memor(y/ies)..." family prefix (different second word: "web"
+#: vs "memory"/"memories") - confirmed by direct comparison, not assumed.
+_WEB_SEARCH_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarise web search for",
+    "summarize web search for",
+)
+
 #: Leading phrases that indicate an explicit memory-summary request (Phase 9,
 #: Batch 2). The text after the phrase is treated as the raw, unparsed
 #: trailing id text. Deliberately a separate, narrow match from
@@ -517,6 +535,42 @@ class CommandRouter:
             return None
 
         return self._extract_path(text, _FILE_SUMMARY_PREFIXES)
+
+    def match_web_search_summary(self, text: str) -> str | None:
+        """Match an explicit AI web-search-summary request and extract its query.
+
+        Recognises "summarise web search for <query>" and "summarize web
+        search for <query>" (Phase 18, Batch 2). This is a distinct,
+        narrow operation from match()/build_input(): it never names a
+        registered tool for the orchestrator to execute directly, because
+        summarising web search results is a multi-step AI-reasoning
+        workflow (search, then reason about the results), not a single
+        tool execution.
+
+        Unlike match_file_summary, this method does not gate on any tool
+        being registered: this command never goes through ToolExecutor
+        or WebSearchTool at all (it calls WebSearchProvider.search()
+        directly, mirroring match_memory_summary's own precedent for
+        MemoryManager), so there is no registry check that would
+        honestly reflect whether the workflow can actually run. Whether
+        the required web_search_provider collaborator is available is
+        the orchestrator's own responsibility to check.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing query text if the text matches
+            this command - possibly empty, if the phrase was used with
+            no query - or None if the text does not match this command's
+            grammar at all.
+        """
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _WEB_SEARCH_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
 
     def match_memory_summary(self, text: str) -> str | None:
         """Match an explicit memory-summary request and extract its raw id text.
