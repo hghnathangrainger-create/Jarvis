@@ -96,6 +96,25 @@ _APPROVAL_HISTORY_EXACT: dict[str, str] = {
 #: literally named "history".
 _APPROVAL_DETAIL_PREFIXES: tuple[str, ...] = ("show approval", "view approval")
 
+#: Exact, read-only workflow-history commands (matched case-insensitively,
+#: after stripping surrounding whitespace). Every one of these routes to the
+#: read-only WorkflowHistoryTool (Durable Workflow Lifecycle Foundation - a
+#: prerequisite turn, not a numbered phase). Both are GREEN: neither can
+#: start, resume, pause, or execute anything, because the history store they
+#: read from carries no tool_input or resolved-step-input for any past
+#: workflow. Not to be confused with _WORKFLOW_ALIASES above, which is an
+#: unrelated, pre-existing Phase 7 table of friendly file-path aliases.
+_WORKFLOW_HISTORY_EXACT: dict[str, str] = {
+    "show workflow history": "history",
+    "show recent workflows": "recent",
+}
+
+#: Leading phrases for showing a single workflow's full history by id, e.g.
+#: "show workflow <workflow_id>". Checked only after the exact phrases
+#: above, so "show workflow history" is never mistaken for a lookup of a
+#: workflow literally named "history".
+_WORKFLOW_DETAIL_PREFIXES: tuple[str, ...] = ("show workflow", "view workflow")
+
 #: Leading phrases that indicate a create-file request. The text after the
 #: phrase is the path, optionally followed by " with <content>". Creating a
 #: file is a WRITE action (YELLOW) and always requires approval.
@@ -346,6 +365,21 @@ class CommandRouter:
             lowered.startswith(prefix) for prefix in _APPROVAL_DETAIL_PREFIXES
         ) and self._registry.has_tool("approval_history"):
             return "approval_history"
+
+        # Workflow history commands are read-only and GREEN, mirroring the
+        # approval-history block immediately above (Durable Workflow
+        # Lifecycle Foundation - a prerequisite turn, not a numbered phase).
+        # None of these commands can start, resume, pause, or execute a
+        # workflow.
+        if lowered.strip() in _WORKFLOW_HISTORY_EXACT and self._registry.has_tool(
+            "workflow_history"
+        ):
+            return "workflow_history"
+
+        if any(
+            lowered.startswith(prefix) for prefix in _WORKFLOW_DETAIL_PREFIXES
+        ) and self._registry.has_tool("workflow_history"):
+            return "workflow_history"
 
         # File commands are checked next because their phrasing is specific.
         # Only route to a file tool if it is actually registered.
@@ -775,6 +809,9 @@ class CommandRouter:
         if tool_name == "approval_history":
             return self._build_approval_history_input(text)
 
+        if tool_name == "workflow_history":
+            return self._build_workflow_history_input(text)
+
         if tool_name == "memory_forget":
             if text.strip().casefold().startswith("forget all"):
                 # Bulk forget: no id. The tool's action classifies RED and the
@@ -1175,6 +1212,43 @@ class CommandRouter:
                 request_id = stripped[len(prefix):].strip().strip(":").strip()
                 if request_id:
                     return {"operation": "get", "request_id": request_id}
+
+        return {"operation": "history"}
+
+    @classmethod
+    def _build_workflow_history_input(cls, text: str) -> dict[str, object]:
+        """Parse a workflow-history command into a tool input dictionary.
+
+        Four command shapes are recognised (case-insensitively):
+            show workflow history   -> history (most recent, all workflows)
+            show recent workflows   -> recent (last 10 transitions)
+            show workflow <id>      -> get (one workflow's full history)
+            view workflow <id>      -> get (one workflow's full history)
+
+        The <id> for "get" is a workflow_id (a UUID string), so it is taken
+        as the raw trailing text rather than parsed as an integer.
+
+        Anything unrecognised falls back to "history", so the command is
+        always read-only by default.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the workflow_history tool.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        operation = _WORKFLOW_HISTORY_EXACT.get(lowered)
+        if operation is not None:
+            return {"operation": operation}
+
+        for prefix in _WORKFLOW_DETAIL_PREFIXES:
+            if lowered.startswith(prefix):
+                workflow_id = stripped[len(prefix):].strip().strip(":").strip()
+                if workflow_id:
+                    return {"operation": "get", "workflow_id": workflow_id}
 
         return {"operation": "history"}
 

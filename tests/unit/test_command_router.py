@@ -52,6 +52,7 @@ _ALL_TOOL_NAMES = (
     "file_create",
     "file_append",
     "approval_history",
+    "workflow_history",
 )
 
 
@@ -144,6 +145,57 @@ def test_match_approval_history_not_confused_with_history_lookup(
     # "show approval history" must match the exact phrase, not be parsed as
     # "show approval <id='history'>".
     assert router.match("show approval history") == "approval_history"
+
+
+# --- match(): workflow history (Durable Workflow Lifecycle Foundation) -------
+
+
+def test_match_workflow_history_exact_phrases(router: CommandRouter) -> None:
+    assert router.match("show workflow history") == "workflow_history"
+    assert router.match("show recent workflows") == "workflow_history"
+
+
+def test_match_workflow_history_detail_lookup(router: CommandRouter) -> None:
+    assert router.match("show workflow abc-123") == "workflow_history"
+    assert router.match("view workflow abc-123") == "workflow_history"
+
+
+def test_match_workflow_history_not_confused_with_history_lookup(
+    router: CommandRouter,
+) -> None:
+    # "show workflow history" must match the exact phrase, not be parsed as
+    # "show workflow <id='history'>".
+    assert router.match("show workflow history") == "workflow_history"
+
+
+def test_match_workflow_history_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("SHOW WORKFLOW HISTORY") == "workflow_history"
+
+
+def test_match_workflow_history_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "workflow_history":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("show workflow history") is None
+
+
+def test_match_workflow_history_does_not_collide_with_approval_history(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show approval history") == "approval_history"
+    assert router.match("show workflow history") == "workflow_history"
+
+
+def test_match_workflow_history_does_not_collide_with_file_workflow_aliases(
+    router: CommandRouter,
+) -> None:
+    # _WORKFLOW_ALIASES (a pre-existing, unrelated Phase 7 file-path alias
+    # table) and _WORKFLOW_HISTORY_EXACT must never be confused with each
+    # other despite both containing the word "workflow".
+    assert router.match("show project files") == "file_list"
+    assert router.match("show workflow history") == "workflow_history"
 
 
 # --- match(): memory change commands ------------------------------------------
@@ -308,6 +360,34 @@ def test_build_input_approval_history_get_by_id(router: CommandRouter) -> None:
     assert router.build_input("approval_history", "show approval abc-123") == {
         "operation": "get",
         "request_id": "abc-123",
+    }
+
+
+def test_build_input_workflow_history_exact(router: CommandRouter) -> None:
+    assert router.build_input("workflow_history", "show workflow history") == {
+        "operation": "history"
+    }
+    assert router.build_input("workflow_history", "show recent workflows") == {
+        "operation": "recent"
+    }
+
+
+def test_build_input_workflow_history_get_by_id(router: CommandRouter) -> None:
+    assert router.build_input("workflow_history", "show workflow abc-123") == {
+        "operation": "get",
+        "workflow_id": "abc-123",
+    }
+    assert router.build_input("workflow_history", "view workflow abc-123") == {
+        "operation": "get",
+        "workflow_id": "abc-123",
+    }
+
+
+def test_build_input_workflow_history_unrecognised_falls_back_to_history(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("workflow_history", "show workflow ") == {
+        "operation": "history"
     }
 
 

@@ -9,6 +9,10 @@ Read-only tools (GREEN) - these never change any state:
     - MemoryTool: lists or searches stored memories.
     - FileListTool: lists files and folders in a directory (Phase 2).
     - FileReadTool: reads the contents of a text file (Phase 2).
+    - ApprovalHistoryTool: shows durable approval history (Phase 6).
+    - WorkflowHistoryTool: shows durable workflow lifecycle history
+      (Durable Workflow Lifecycle Foundation - a prerequisite turn, not a
+      numbered phase).
 
 Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
@@ -33,6 +37,7 @@ from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
+from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 
 __all__ = [
     "ApprovalHistoryTool",
@@ -45,4 +50,5 @@ __all__ = [
     "FileAppendTool",
     "MemoryUpdateTool",
     "MemoryForgetTool",
+    "WorkflowHistoryTool",
 ]

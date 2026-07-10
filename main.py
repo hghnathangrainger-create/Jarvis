@@ -55,11 +55,13 @@ from tools.builtin import (
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
+    WorkflowHistoryTool,
 )
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
 from workflow.engine import WorkflowEngine
+from workflow.workflow_history_store import WorkflowHistoryStore
 
 
 def build_orchestrator() -> JarvisOrchestrator:
@@ -118,6 +120,15 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileCreateTool())
     registry.register_tool(FileAppendTool())
     registry.register_tool(ApprovalHistoryTool(approval_history))
+
+    # Durable workflow lifecycle history (Durable Workflow Lifecycle
+    # Foundation - a prerequisite turn, not a numbered phase). Mirrors
+    # approval_history immediately above: a durable, read-only record of
+    # what already happened, correlated by workflow_id. The same store
+    # instance is reused by both WorkflowEngine (which writes to it) and
+    # this read-only tool - never two separately constructed stores.
+    workflow_history = WorkflowHistoryStore(session_factory)
+    registry.register_tool(WorkflowHistoryTool(workflow_history))
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,
@@ -139,6 +150,12 @@ def build_orchestrator() -> JarvisOrchestrator:
         executor=executor,
         approvals=approvals,
         logger=logger,
+        # Durable Workflow Lifecycle Foundation: the same WorkflowHistoryStore
+        # instance already built above (not a second one) - so every
+        # workflow_* transition WorkflowEngine already emits as an audit
+        # event is additionally recorded durably, queryable via the
+        # workflow_history tool registered above.
+        history=workflow_history,
     )
 
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
