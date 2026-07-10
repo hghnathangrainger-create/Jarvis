@@ -12,8 +12,10 @@ Responsibilities:
       workflow_step_waiting, workflow_step_failed, workflow_completed,
       workflow_stopped).
     - Query history: most recent transitions across all workflows, the
-      full transition history for one workflow, or that workflow's latest
-      (i.e. current) status.
+      full transition history for one workflow, that workflow's latest
+      (i.e. current) status, or the ids of the most recently active
+      distinct workflows (Phase 19, for the dashboard's "recent
+      workflows" view).
 
 Does NOT:
     - Store tool_input, resolved step input, or a serialised Plan
@@ -40,6 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
 
@@ -235,6 +238,51 @@ class WorkflowHistoryStore:
             if row is None:
                 return None
             return self._to_record(row)
+
+    def list_recent_workflow_ids(self, limit: int = 10) -> list[str]:
+        """Return the ids of the most recently active workflows, newest first.
+
+        Distinct workflow_ids, ordered by each workflow's own most recent
+        transition - not by individual transition rows - so a workflow
+        with many step transitions cannot crowd an older, distinct
+        workflow out of the result window the way a naive "most recent N
+        rows, deduplicated" approach would. Ties (an identical latest
+        timestamp) break on that workflow's own most recent row id,
+        descending, mirroring the tie-break convention every other query
+        in this store already uses.
+
+        This is a narrow, read-only addition for the dashboard's "recent
+        workflows" view (Phase 19). It reinterprets no lifecycle
+        semantics: the ordering key is exactly the same created_at column
+        list_recent/latest_status_for already use.
+
+        Args:
+            limit: Maximum number of distinct workflow ids to return.
+                Clamped to the range [1, 50].
+
+        Returns:
+            A list of distinct workflow_id strings, most recently active
+            first.
+        """
+        safe_limit = self._clamp_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(
+                    WorkflowHistoryEntry.workflow_id,
+                    func.max(WorkflowHistoryEntry.created_at).label(
+                        "latest_created_at"
+                    ),
+                    func.max(WorkflowHistoryEntry.id).label("latest_id"),
+                )
+                .group_by(WorkflowHistoryEntry.workflow_id)
+                .order_by(
+                    func.max(WorkflowHistoryEntry.created_at).desc(),
+                    func.max(WorkflowHistoryEntry.id).desc(),
+                )
+                .limit(safe_limit)
+                .all()
+            )
+            return [row.workflow_id for row in rows]
 
     @staticmethod
     def _clamp_limit(value: int) -> int:

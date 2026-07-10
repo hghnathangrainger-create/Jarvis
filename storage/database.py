@@ -83,6 +83,53 @@ def _enable_sqlite_foreign_keys(
     cursor.close()
 
 
+#: Milliseconds SQLite will wait for a lock before raising "database is
+#: locked", instead of failing immediately. See _configure_sqlite_concurrency.
+_SQLITE_BUSY_TIMEOUT_MS = 2000
+
+
+@event.listens_for(Engine, "connect")
+def _configure_sqlite_concurrency(
+    dbapi_connection: object, connection_record: object
+) -> None:
+    """Configure SQLite for a second, independent reader process (Phase 19).
+
+    Phase 19 introduces a real second process (the local dashboard) that
+    opens this same database file for reads while the Jarvis CLI process
+    may be writing to it. Under SQLite's default rollback-journal mode,
+    with no busy timeout configured, a reader that overlaps a writer's
+    commit window can receive an immediate "database is locked" error.
+
+    This listener sets two connection-level pragmas to make that safe:
+
+    - journal_mode=WAL: SQLite's own standard mechanism for letting one
+      writer and any number of concurrent readers proceed without
+      blocking each other. This is a durable, per-database-file setting
+      (persisted in the file itself once set), not merely a per-session
+      one - but it has no effect on a ":memory:" database, which has no
+      file and always behaves as if in "memory" journal mode regardless
+      of what is requested here.
+    - busy_timeout=2000: for the small remaining set of cases WAL alone
+      does not eliminate (for example two simultaneous writers), a
+      connection waits up to 2 seconds for a lock to clear before raising,
+      rather than failing immediately.
+
+    This does not eliminate every possible SQLite lock/contention
+    scenario, and it does not change SQLAlchemy's own commit/rollback/
+    session semantics, transaction boundaries, or the append-only
+    behaviour of any existing table - it only changes how a connection
+    waits for a lock at the SQLite level.
+
+    Args:
+        dbapi_connection: The raw DBAPI connection object.
+        connection_record: The connection pool's record for this connection.
+    """
+    cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    cursor.close()
+
+
 def create_database_engine(settings: Settings | None = None) -> Engine:
     """Create and return a SQLAlchemy engine for the configured database.
 

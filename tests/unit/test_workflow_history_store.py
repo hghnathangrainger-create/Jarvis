@@ -244,3 +244,98 @@ def test_multiple_workflows_do_not_interfere(store: WorkflowHistoryStore) -> Non
         "workflow_started",
         "workflow_stopped",
     ]
+
+
+# --- list_recent_workflow_ids (Phase 19) --------------------------------------
+
+
+def test_list_recent_workflow_ids_returns_distinct_ids(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    store.record_transition(workflow_id="wf-1", status="workflow_step_started")
+    store.record_transition(workflow_id="wf-1", status="workflow_completed")
+
+    ids = store.list_recent_workflow_ids()
+    assert ids == ["wf-1"]
+
+
+def test_list_recent_workflow_ids_orders_by_most_recent_activity(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    store.record_transition(workflow_id="wf-2", status="workflow_started")
+    # wf-1 is touched again after wf-2, so it should now sort first.
+    store.record_transition(workflow_id="wf-1", status="workflow_completed")
+
+    ids = store.list_recent_workflow_ids()
+    assert ids == ["wf-1", "wf-2"]
+
+
+def test_transition_heavy_workflow_does_not_crowd_out_other_workflows(
+    store: WorkflowHistoryStore,
+) -> None:
+    """The core Phase 19 requirement: a workflow with many transitions must
+    occupy exactly one slot in the result, not one slot per transition."""
+    store.record_transition(workflow_id="wf-quiet", status="workflow_started")
+    store.record_transition(workflow_id="wf-quiet", status="workflow_completed")
+
+    # wf-chatty racks up far more transitions than wf-quiet, all after it.
+    for step in range(1, 11):
+        store.record_transition(
+            workflow_id="wf-chatty",
+            status="workflow_step_started",
+            step_number=step,
+            step_total=10,
+        )
+    store.record_transition(workflow_id="wf-chatty", status="workflow_completed")
+
+    ids = store.list_recent_workflow_ids(limit=5)
+    assert ids.count("wf-chatty") == 1
+    assert set(ids) == {"wf-chatty", "wf-quiet"}
+
+
+def test_list_recent_workflow_ids_respects_limit(
+    store: WorkflowHistoryStore,
+) -> None:
+    for n in range(5):
+        store.record_transition(workflow_id=f"wf-{n}", status="workflow_started")
+
+    ids = store.list_recent_workflow_ids(limit=2)
+    assert len(ids) == 2
+
+
+def test_list_recent_workflow_ids_clamps_limit_below_one(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    assert store.list_recent_workflow_ids(limit=0) == ["wf-1"]
+
+
+def test_list_recent_workflow_ids_clamps_limit_above_max(
+    store: WorkflowHistoryStore,
+) -> None:
+    for n in range(3):
+        store.record_transition(workflow_id=f"wf-{n}", status="workflow_started")
+    # Clamped to 50, well above the 3 real distinct ids - no error, no truncation.
+    ids = store.list_recent_workflow_ids(limit=1000)
+    assert len(ids) == 3
+
+
+def test_list_recent_workflow_ids_empty_store_returns_empty_list(
+    store: WorkflowHistoryStore,
+) -> None:
+    assert store.list_recent_workflow_ids() == []
+
+
+def test_list_recent_workflow_ids_does_not_alter_existing_methods(
+    store: WorkflowHistoryStore,
+) -> None:
+    """Adding this method must not change list_recent/list_for_workflow/
+    latest_status_for's own existing behaviour."""
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    store.record_transition(workflow_id="wf-1", status="workflow_completed")
+
+    assert len(store.list_recent()) == 2
+    assert len(store.list_for_workflow("wf-1")) == 2
+    assert store.latest_status_for("wf-1").status == "workflow_completed"
