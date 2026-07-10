@@ -21,6 +21,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 15 complete: Sequential Workflow Execution — Minimal Multi-Step Planner and Workflow Engine.**
 **Durable Workflow Lifecycle Foundation complete (a prerequisite turn, not a numbered phase).**
 **Phase 16 complete: Web Search Tool and External Content Boundary.**
+**Phase 17 complete: Broader Deterministic Workflow Commands.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -50,7 +51,7 @@ Phase 16 gives Jarvis its **first real external-network capability**: a determin
 
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis, and no test makes a real web search either.
 
-> **Verified:** `poetry run pytest -v` — **1947 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–16 test plus the Durable Workflow Lifecycle Foundation.
+> **Verified:** `poetry run pytest -v` — **2041 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–17 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -475,6 +476,37 @@ Autonomous browsing, arbitrary webpage fetching, webpage summarisation, AI summa
 
 ---
 
+## Phase 17 — Broader Deterministic Workflow Commands (complete)
+
+Two more fixed, hand-authored, two-step workflow commands, reusing the exact same Sequential Workflow Engine, Security Manager, and Approval Manager every prior workflow already uses — no engine change, no new tool, no AI involvement. See `docs/phase_17_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Workflow plan factories.** `build_create_and_read_plan()` and `build_update_and_show_plan()` added to the same factory `workflow_plan_factory.py` already holds the two Phase 15 workflows, in the identical style.
+- **Batch 2 — Command routing and dispatch.** Two new exact commands, each requiring both an existing command's own prefix and one new fixed trailing suffix — routed through the same shared workflow-execution path every prior workflow command already uses.
+- **Batch 3 — End-to-end verification and closure.** Full real-stack proof (real Security Manager, Tool Executor, Approval Manager, Command Router, Workflow Engine, and a real filesystem/database — no fakes at this level) of approval pause/resume, genuine re-verification of persisted state, and inert handling of adversarial content.
+
+### New workflow commands
+
+| Command | What it does |
+|---|---|
+| `create file <path> with <content> and show it` | Creates a new file with the given content, then reads that exact file back. Step 1 (create) is YELLOW and asks for approval; step 2 (read) is GREEN. |
+| `update memory <id>: <content> and show it back` | Updates an existing memory's content, then shows the memory back. Step 1 (update) is YELLOW and asks for approval; step 2 (show) is GREEN. |
+
+Both commands require their exact fixed trailing phrase (`and show it` / `and show it back`); the standalone `create file <path> with <content>` and `update memory <id>: <content>` commands (with no trailing phrase) are completely unaffected and continue to work exactly as before.
+
+### Safety note: real verification, not an echo
+
+Step 2 of both workflows independently re-reads the actual, persisted result — `file_read` reads the real file from disk, and `memory` (`get`) re-fetches the real row from the database — neither ever simply repeats back what step 1 was given. `update_and_show`'s step 2 relies entirely on the exact same `memory_id` propagation mechanism the two Phase 15 workflows already use; `create_and_read` needs no propagation at all, since Nathan's own path is already known before either step runs. Every step is still classified fresh, live, by the Security Manager, exactly as before — a workflow command never grants, caches, or bypasses an approval.
+
+### Disclosed limitation: the trigger phrase is a suffix, not a prefix
+
+Unlike Phase 15's two commands (where the trigger phrase comes first, so anything after it can never be mistaken for the trigger), both of this phase's commands recognise their trigger phrase at the **end** of the command. This means if the content or replacement text you actually want to store legitimately ends in the exact words "and show it" or "and show it back", Jarvis cannot tell the difference — it will always treat it as the workflow trigger and strip those words from what is stored. This is a known, accepted limitation, not a bug: fixing it would require a quoting or escaping convention this codebase does not otherwise have, and inventing one — or guessing intent, or asking AI to disambiguate — was explicitly out of scope for this phase.
+
+### What is deliberately NOT included in Phase 17
+
+`move_and_show`, `create_and_append`, any list-then-act or search-then-act workflow, any history-chaining workflow, any workflow using web search, any change to the Workflow Engine's single `memory_id` propagation mechanism (no path propagation, no arbitrary output-field mapping, no multiple-output propagation, no template or expression language, no branching, retries, rollback, or compensation), any new tool, and any AI involvement of any kind. `WorkflowEngine` still propagates exactly one field, `metadata["memory_id"]` — a known, disclosed limitation for any future workflow that would need to propagate something else, not fixed here.
+
+---
+
 ## Example Session
 
 ```
@@ -589,12 +621,12 @@ jarvis/
 
 ## Next Phase
 
-**Phase 16 is complete**: Jarvis has its first real external-network capability, a deterministic, read-only web search returning live results directly to Nathan, with zero AI involvement and zero write authority — see `docs/phase_16_completion_report.md` for the full closure write-up.
+**Phase 17 is complete**: two more fixed, hand-authored, two-step workflow commands, reusing the exact same Workflow Engine, Security Manager, and Approval Manager every prior workflow already used — no engine change, no new tool, no AI involvement — see `docs/phase_17_completion_report.md` for the full closure write-up.
 
-Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. A narrow **Durable Workflow Lifecycle Foundation** turn closed the durable-status/history half of that last gap — see `docs/durable_workflow_lifecycle_foundation_completion_report.md` — without adding resumable checkpoints, scheduling, or any exactly-once execution guarantee. Phase 16 is an independent branch from all of that: it does not touch workflows, checkpoints, or scheduling at all. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what AI-facing summarisation of search results, AI-assisted or AI-authored planning, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 16; each remains a separately-scoped decision.
+An architectural and product-value review performed before this phase concluded that with only the two original Phase 15 templates, AI-assisted allowlisted planning would have been mostly cosmetic — the allowlist was too small and too narrow to justify the trust-boundary cost. Phase 17 grew that allowlist to four genuinely distinct templates, but this alone does not automatically justify that direction either: exact commands remain obviously simpler for all four, and the same review's own honest conclusion — that the *diversity* of intent categories matters more than the raw count — still stands. Phase 16 (web search) and the Durable Workflow Lifecycle Foundation both remain independent branches, untouched by this phase. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what AI-assisted or AI-authored planning, AI-facing summarisation of search results, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 17; each remains a separately-scoped decision.
 
 Resumable approvals beyond a single paused workflow, and deeper but still-advisory AI assistance, remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, and Phase 16 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, Phase 16, and Phase 17 are complete for their defined scope, not yet tagged. None is a finished product.*
