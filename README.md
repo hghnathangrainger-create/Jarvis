@@ -23,6 +23,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 16 complete: Web Search Tool and External Content Boundary.**
 **Phase 17 complete: Broader Deterministic Workflow Commands.**
 **Phase 18 complete: AI Summarization of Web Search Results.**
+**Phase 19 complete: Local Read-Only Dashboard for Existing Jarvis State.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -54,9 +55,11 @@ Phase 17 adds two more fixed, two-step workflow commands (`create_and_read`, `up
 
 Phase 18 gives Jarvis its **first AI-facing use of live web search**: an explicit `summarise web search for <query>` command performs exactly one real search, converts the returned titles/URLs/snippets into bounded, typed, untrusted AI context using the same trust boundary Phases 7–14 already established, and returns an advisory synthesis honestly labelled as based on search-result snippets — never on full webpages Jarvis never visited. No AI-authored or AI-rewritten query, no second or follow-up search, and no new execution authority of any kind. See the Phase 18 section below.
 
+Phase 19 gives Jarvis its **first visual surface**: a separate, local, strictly read-only dashboard (`poetry run python dashboard.py`) that displays real durable state — memory, approval history, and workflow lifecycle history — without reading CLI scrollback or issuing multiple `show`/`list` commands by hand. It is a second, independent process that only ever reads the same SQLite file the CLI already writes to; it cannot execute a tool, approve or deny anything, mutate memory, or start a workflow, and its failure never affects the Jarvis CLI process. See the Phase 19 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis, and no test makes a real web search either.
 
-> **Verified:** `poetry run pytest -v` — **2112 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–18 test plus the Durable Workflow Lifecycle Foundation.
+> **Verified:** `poetry run pytest -v` — **2181 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–19 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -535,6 +538,43 @@ Every title, URL, and snippet returned by the search provider is combined into a
 ### What is deliberately NOT included in Phase 18
 
 AI-authored, AI-expanded, or AI-rewritten search queries; a second or follow-up search of any kind; autonomous browsing, URL fetching, page crawling, or link-following; a Research Agent or any multi-turn research loop; any change to `SearchResult`, `WebSearchProvider`, `DuckDuckGoSearchProvider`, or the standalone `search the web for <query>` command's own behaviour; a multi-provider search router; migrating to the `ddgs` package; any new tool; any `WorkflowEngine` involvement; any execution authority derived from search-result content or AI output; and any new `ContentTrust` value or weakening of the existing trust factories. Jarvis has still not "read" a webpage in this phase either — only the search provider's own title/URL/snippet metadata is ever summarised, and the response says so explicitly.
+
+---
+
+## Phase 19 — Local Read-Only Dashboard for Existing Jarvis State (complete)
+
+Jarvis's first visual surface: a separate, local, strictly read-only dashboard window over the same durable state the CLI already reads and writes. It is not the Master Specification's full Chapter 21 Dashboard — no chat interface, no approval interaction, no AI provider status, no Knowledge Library, no Goals, no Settings — it is a narrow viewer over exactly three existing durable domains. See `docs/phase_19_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model/query layer.** A new `dashboard/read_model.py` composes `MemoryManager`, `ApprovalHistoryStore`, and `WorkflowHistoryStore`'s own existing read methods into small, frozen view-model rows — never a write-capable method, never parsed CLI/tool output. A new `WorkflowHistoryStore.list_recent_workflow_ids()` returns distinct, most-recently-active workflows so one transition-heavy workflow can't crowd others out of the "recent workflows" view. `storage/database.py`'s existing connect-event-listener pattern gained `journal_mode=WAL` and `busy_timeout=2000ms`, empirically verified, to support a real second reader process safely.
+- **Batch 2 — tkinter/ttk UI.** A four-tab window (Overview, Memories, Approval History, Workflow History) built entirely on the Python standard library's `tkinter`/`ttk` — no new dependency. A separate `dashboard.py` entry point starts it independently of `main.py`/the CLI.
+- **Batch 3 — End-to-end verification and closure.** Full real-stack proof (a real temporary SQLite database, real stores, a real withdrawn Tk window) that refresh sees newly committed writes, that two independent connections against the same database file behave safely under the new WAL configuration, and — the strongest adversarial proof in this phase — that a full, real, live Jarvis execution stack (`SecurityManager`, `ToolExecutor`, `ApprovalManager`, `WorkflowEngine`, `CommandRouter`) sharing the same process is completely unaffected by driving every interaction the dashboard offers over adversarial memory/approval/workflow content.
+
+### Launching the dashboard
+
+```powershell
+poetry run python dashboard.py
+```
+
+This is a second, independent process — it does not require the Jarvis CLI to be running, and the CLI does not require it either. The two share only the same SQLite database file on disk; there is no IPC, no socket, and no HTTP server anywhere in this phase.
+
+### Dashboard views
+
+| Tab | What it shows |
+|---|---|
+| Overview | Total memory count, the 5 most recent approval decisions, and the 5 most recently active workflows — every number traces to a real query, nothing estimated or simulated. |
+| Memories | Recent memories (optionally filtered by category), each with a 120-character preview; full content is shown only after selecting a row. |
+| Approval History | Recent approval history entries — action, tier, status, timestamps. Durable history only, explicitly not a live list of approvals currently awaiting a decision. |
+| Workflow History | Recently active workflows and, on selection, that workflow's full recorded transition history. Durable lifecycle history only, explicitly not resumable or executable state. |
+
+Refresh is a fixed, honestly-labelled requery — a "Refresh now" button plus an automatic requery every 5 seconds — never described as "live" or "real-time." Timestamps are shown as `YYYY-MM-DD HH:MM:SS UTC`; the `UTC` suffix is appended literally by the dashboard's own code (every timestamp in these three tables is produced from `datetime.now(timezone.utc)` at write time, confirmed directly, though SQLite itself returns it naive on reload) — it is never derived from timezone metadata that isn't actually there.
+
+### Safety note: read-only, local-process-only, and structurally unable to act
+
+The dashboard cannot construct a `ToolRequest`, call `ToolExecutor` or `CommandRouter`, create or resolve an `ApprovalRequest`, start/resume/cancel a workflow, change a memory, or call any AI or web-search component — none of those objects are ever imported by `dashboard/read_model.py`, `ui/dashboard_app.py`, or `dashboard.py`, confirmed structurally. The only interactive control in the entire window is a single "Refresh now" button; there is no approve, deny, edit, delete, save, run, or open-URL control anywhere, and no row is double-click-executable. Memory content containing command-like text (for example, "forget all memories") is displayed as plain, literal text in a table cell — it is never parsed, routed, or executed. A dashboard failure (a closed database, a transient SQLite lock, a malformed row) is isolated to that one panel or, at worst, the dashboard process itself — it can never affect the Jarvis CLI process, which does not import or depend on the dashboard in any way.
+
+### What is deliberately NOT included in Phase 19
+
+An HTTP server, listener, or served frontend of any kind (no FastAPI, no Uvicorn, no Flask, no WebSocket, no REST API); any remote, LAN, phone, or browser reachability; authentication, sessions, or accounts; any write, execute, approve, decline, cancel, resume, or schedule action from the dashboard; any change to `SecurityManager`, `ToolExecutor`, `ApprovalManager`, `WorkflowEngine`, `CommandRouter`, or any AI-facing module; any new tool; live web-search results or AI web-search summaries (ephemeral, not durable); AI provider status or cost tracking; system-health, plugin, or agent simulations; goals, projects, or tasks; a durable inbox, notification, or scheduled-task model (no producer exists yet — building one now would be infrastructure ahead of a second real use case); voice; and computer control. This is not the Master Specification's full Chapter 21 Dashboard, its "Web Dashboard chat interface," or the FastAPI server named in Chapter 29's startup sequence.
 
 ---
 
