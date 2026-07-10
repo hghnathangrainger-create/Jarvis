@@ -20,6 +20,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 14 complete: User-Controlled Bounded Recent-Memory Count for Advisory AI.**
 **Phase 15 complete: Sequential Workflow Execution — Minimal Multi-Step Planner and Workflow Engine.**
 **Durable Workflow Lifecycle Foundation complete (a prerequisite turn, not a numbered phase).**
+**Phase 16 complete: Web Search Tool and External Content Boundary.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -45,9 +46,11 @@ Phase 15 is a genuinely new kind of capability, not another memory selector: Jar
 
 The **Durable Workflow Lifecycle Foundation** is a small, narrow prerequisite turn that followed Phase 15's closure — deliberately **not** a numbered phase, since it adds no new capability of its own beyond one read-only command. A workflow's lifecycle (started, each step's outcome, paused, resumed, completed, or stopped) is now durably recorded, so `show workflow history` can honestly answer "what happened to that workflow?" even after a restart — something Phase 15 alone could not do, since its paused-workflow state lived only in memory. This still does **not** make any workflow resumable, replayable, or exactly-once after a crash; see the section below for exactly what it closes and what it deliberately leaves open.
 
-> **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
+Phase 16 gives Jarvis its **first real external-network capability**: a deterministic, read-only `search the web for <query>` command that returns live search results — titles, URLs, and short snippets — directly to Nathan. There is no AI involvement of any kind: no AI-authored queries, no AI summarisation of results, no autonomous browsing, and no fetching of the pages a result links to. Every search is classified GREEN by the same Security Manager every other read-only command already goes through, and the query's own content can never influence that classification. See the Phase 16 section below for the full security and architecture treatment.
 
-> **Verified:** `poetry run pytest -v` — **1878 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–15 test plus the Durable Workflow Lifecycle Foundation.
+> **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis, and no test makes a real web search either.
+
+> **Verified:** `poetry run pytest -v` — **1947 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–16 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -448,6 +451,30 @@ General-purpose or natural-language workflow creation, AI-authored or AI-selecte
 
 ---
 
+## Phase 16 — Web Search Tool and External Content Boundary (complete)
+
+Jarvis's first real external-network capability: a deterministic, read-only web search that returns live results directly to Nathan. See `docs/phase_16_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Search provider boundary.** A new, Jarvis-owned `SearchResult` model (title, URL, snippet) and a `WebSearchProvider` abstraction, plus the concrete `DuckDuckGoSearchProvider` adapter — modelled on the existing `AIProvider`/`ClaudeProvider` boundary, deliberately scaled down to exactly one provider with no registry or multi-provider routing.
+- **Batch 2 — Read-only tool and command routing.** A new `WebSearchTool` (GREEN), reachable via `search the web for <query>`, routed through the ordinary, unmodified `CommandRouter` → `ToolExecutor` path.
+- **Batch 3 — End-to-end verification and closure.** Full real-stack proof (real Security Manager, real Tool Executor, real Command Router, a fake injected search provider — never a real network call in any test) that query content cannot influence security classification and that malicious-looking result content is displayed only as inert data.
+
+### Web search command
+
+| Command | What it does |
+|---|---|
+| `search the web for <query>` | Performs a live web search and returns up to 5 results — title, URL, and a short snippet each. GREEN, read-only. |
+
+### Safety note: the query never controls classification, and results are display-only
+
+`WebSearchTool`'s security classification is a **fixed string**, `"search the web"`, completely independent of the query's own content — a query containing words like "delete" or "execute" is classified exactly the same as any other query. Nothing a search result contains — its title, URL, or snippet — can ever become a Jarvis instruction, trigger an approval prompt, or be fetched/opened automatically: results are inert text, displayed to Nathan and nothing else. There is no AI-facing path in Phase 16 at all — no summarisation, no AI-authored queries, no AI-selected execution — so none of Phase 7's prompt-injection defences are exercised by this command, and none need to be: a human reading plain text is not an AI context window.
+
+### What is deliberately NOT included in Phase 16
+
+Autonomous browsing, arbitrary webpage fetching, webpage summarisation, AI summarisation of search results, AI-authored queries, AI-selected tool execution, a Research Agent, scheduling or background execution, notifications, any workflow-resumption change, a plugin architecture, and multi-provider search routing. Jarvis has not "read" a webpage in this phase — only the search provider's own title/URL/snippet metadata is ever returned, and the tool's own output says so explicitly. The installed `duckduckgo-search` package's own disclosed rename to `ddgs` is confined entirely to `tools/duckduckgo_search_provider.py` and was not acted on this phase.
+
+---
+
 ## Example Session
 
 ```
@@ -529,10 +556,13 @@ jarvis/
 │                   category-based, recency-based, and count-bounded
 │                   recency-based memory selection (ai/memory_selection.py)
 ├── planner/        Turns requests into structured plans
-├── tools/          Tool registry, executor, and built-in tools
+├── tools/          Tool registry, executor, built-in tools, and the
+│                   WebSearchProvider abstraction plus the concrete
+│                   DuckDuckGoSearchProvider adapter (Phase 16)
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
-│                   file_read (GREEN); file_create, file_append,
-│                   memory_update, memory_forget (YELLOW, approval-gated)
+│                   file_read, web_search (GREEN); file_create,
+│                   file_append, memory_update, memory_forget
+│                   (YELLOW, approval-gated)
 ├── approval/       Approval models and the Approval Manager
 ├── workflow/       Sequential Workflow Engine, the deterministic
 │                   two-step workflow plan factory, and the durable
@@ -559,12 +589,12 @@ jarvis/
 
 ## Next Phase
 
-**Phase 15 is complete**: Jarvis can now run a short, fixed, two-step workflow through a new headless Sequential Workflow Engine, with every step still individually classified by the Security Manager and gated by the Tool Executor exactly as before — see `docs/phase_15_completion_report.md` for the full closure write-up, including the two narrow observability-isolation defects (Tool Executor, Approval Manager) found and fixed along the way.
+**Phase 16 is complete**: Jarvis has its first real external-network capability, a deterministic, read-only web search returning live results directly to Nathan, with zero AI involvement and zero write authority — see `docs/phase_16_completion_report.md` for the full closure write-up.
 
-Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. A narrow **Durable Workflow Lifecycle Foundation** turn has since closed the durable-status/history half of that last gap — see the section above and `docs/durable_workflow_lifecycle_foundation_completion_report.md` — without adding resumable checkpoints, scheduling, or any exactly-once execution guarantee. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what a general-purpose workflow syntax, AI-assisted or AI-authored planning, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by this foundation turn; each remains a separately-scoped decision.
+Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. A narrow **Durable Workflow Lifecycle Foundation** turn closed the durable-status/history half of that last gap — see `docs/durable_workflow_lifecycle_foundation_completion_report.md` — without adding resumable checkpoints, scheduling, or any exactly-once execution guarantee. Phase 16 is an independent branch from all of that: it does not touch workflows, checkpoints, or scheduling at all. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what AI-facing summarisation of search results, AI-assisted or AI-authored planning, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 16; each remains a separately-scoped decision.
 
 Resumable approvals beyond a single paused workflow, and deeper but still-advisory AI assistance, remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, and Phase 15 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, and Phase 16 are complete for their defined scope, not yet tagged. None is a finished product.*
