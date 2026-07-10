@@ -198,6 +198,27 @@ class _FailingLogger:
         raise RuntimeError("simulated logger failure")
 
 
+class _RecordingHistoryStore:
+    """A fake WorkflowHistoryStore recording every record_transition() call,
+    without touching a real database - mirrors _RecordingLogger above."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def record_transition(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        return object()
+
+
+class _FailingHistoryStore:
+    """A fake WorkflowHistoryStore whose record_transition() always raises,
+    mirroring _FailingLogger above - used to prove a failing durable
+    history write can never alter an authoritative WorkflowResult."""
+
+    def record_transition(self, **kwargs: object) -> object:
+        raise RuntimeError("simulated history store failure")
+
+
 # --- Fixtures/helpers ---------------------------------------------------------
 
 
@@ -244,7 +265,9 @@ def _plan(*steps: PlanStep) -> Plan:
 
 
 def _engine(
-    *tools: BaseTool, logger: object | None = None
+    *tools: BaseTool,
+    logger: object | None = None,
+    history: object | None = None,
 ) -> tuple[WorkflowEngine, ToolExecutor, ApprovalManager]:
     """Build an engine wired to real collaborators.
 
@@ -256,13 +279,21 @@ def _engine(
     nothing here requires that, and a test proving WorkflowEngine's own
     logger-failure isolation must not be confounded by ToolExecutor's own,
     separately-owned, already-tested-elsewhere logger behaviour).
+
+    `history`, when supplied, is WorkflowEngine's own optional durable
+    WorkflowHistoryStore (Durable Workflow Lifecycle Foundation). Omitted
+    by default, so every pre-existing test in this file continues to
+    build an engine with no durable history recording at all - proving
+    that omission remains fully backward compatible.
     """
     security = _security()
     registry = _registry(*tools)
     executor = _executor(registry, _RecordingLogger(), security)
     approvals = _approvals(_RecordingLogger())
     return (
-        WorkflowEngine(executor=executor, approvals=approvals, logger=logger),
+        WorkflowEngine(
+            executor=executor, approvals=approvals, logger=logger, history=history
+        ),
         executor,
         approvals,
     )
@@ -914,7 +945,15 @@ def test_engine_has_no_async_threading_or_persistence_code() -> None:
         assert forbidden not in source
 
 
-def test_every_except_exception_wraps_only_emit() -> None:
+def test_every_except_exception_wraps_only_emit_or_history() -> None:
+    """Every bare `except Exception` block in this module is a single Pass
+    statement - the identical narrow observability-isolation pattern used
+    both by _emit() (the audit logger) and, since the Durable Workflow
+    Lifecycle Foundation turn, _record_history() (the durable history
+    store). Neither is ever wrapped around classify_action, execute, or
+    any other authoritative call - only around its own optional-observer
+    call, so a failing logger or a failing history store can never alter
+    an authoritative workflow outcome."""
     import workflow.engine as module
 
     tree = ast.parse(inspect.getsource(module))
@@ -925,11 +964,11 @@ def test_every_except_exception_wraps_only_emit() -> None:
         and node.type is not None
         and getattr(node.type, "id", None) == "Exception"
     ]
-    assert len(except_bodies) == 1
-    body = except_bodies[0]
-    # A single Pass statement (after the comment, which is not an AST node).
-    assert len(body) == 1
-    assert isinstance(body[0], ast.Pass)
+    assert len(except_bodies) == 2
+    for body in except_bodies:
+        # A single Pass statement (after the comment, which is not an AST node).
+        assert len(body) == 1
+        assert isinstance(body[0], ast.Pass)
 
 
 # --- Paused-workflow timeout leak (Phase 15, Batch 4) -------------------------
@@ -1053,5 +1092,201 @@ def test_toolexecutor_logger_failure_no_longer_propagates_through_workflow_engin
     approvals = ApprovalManager()
     engine = WorkflowEngine(executor=executor, approvals=approvals, logger=_RecordingLogger())
 
+    result = engine.run(_plan(_step(1, "a")))
+    assert result.overall_status is StepStatus.COMPLETED
+
+
+# --- Durable history recording (Durable Workflow Lifecycle Foundation - a
+# --- prerequisite turn, not a numbered phase) --------------------------------
+#
+# WorkflowEngine gains one new optional collaborator, history:
+# WorkflowHistoryStore | None = None. These tests prove: (1) omitting it is
+# fully backward compatible with every test above; (2) when supplied, every
+# one of the seven existing workflow_* transitions is also durably recorded;
+# (3) a raising history store can never alter the authoritative
+# WorkflowResult, using the same narrow isolation pattern already proven for
+# the audit logger.
+
+
+def test_omitting_history_store_is_fully_backward_compatible() -> None:
+    """Every pre-existing test in this file constructs an engine with no
+    history argument at all, and all of them already pass unmodified -
+    this test only makes that backward-compatibility guarantee explicit."""
+    engine, _, _ = _engine(_GreenTool("a"), _GreenTool("b"))
+    result = engine.run(_plan(_step(1, "a"), _step(2, "b")))
+    assert result.overall_status is StepStatus.COMPLETED
+
+
+def test_history_records_workflow_started_and_completed() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_GreenTool("a"), _GreenTool("b"), history=history)
+
+    result = engine.run(_plan(_step(1, "a"), _step(2, "b")))
+
+    statuses = [call["status"] for call in history.calls]
+    assert statuses[0] == "workflow_started"
+    assert statuses[-1] == "workflow_completed"
+    assert all(call["workflow_id"] == result.workflow_id for call in history.calls)
+
+
+def test_history_records_started_and_step_total_on_workflow_started() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_GreenTool("a"), _GreenTool("b"), history=history)
+
+    engine.run(_plan(_step(1, "a"), _step(2, "b")))
+
+    started = history.calls[0]
+    assert started["status"] == "workflow_started"
+    assert started["step_total"] == 2
+
+
+def test_history_records_step_started_and_completed_for_each_step() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_GreenTool("a"), _GreenTool("b"), history=history)
+
+    engine.run(_plan(_step(1, "a"), _step(2, "b")))
+
+    step_events = [
+        (call["status"], call["step_number"], call["tool_name"])
+        for call in history.calls
+        if call["status"] in {"workflow_step_started", "workflow_step_completed"}
+    ]
+    assert step_events == [
+        ("workflow_step_started", 1, "a"),
+        ("workflow_step_completed", 1, "a"),
+        ("workflow_step_started", 2, "b"),
+        ("workflow_step_completed", 2, "b"),
+    ]
+
+
+def test_history_records_waiting_with_correlated_approval_request_id() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_YellowTool("y"), history=history)
+
+    result = engine.run(_plan(_step(1, "y")))
+
+    waiting_calls = [call for call in history.calls if call["status"] == "workflow_step_waiting"]
+    assert len(waiting_calls) == 1
+    approval_request = result.pending_approval_request
+    assert approval_request is not None
+    assert waiting_calls[0]["approval_request_id"] == approval_request.request_id
+
+
+def test_history_records_resume_step_started_and_completed() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, approvals = _engine(_YellowTool("y"), _GreenTool("g"), history=history)
+
+    result = engine.run(_plan(_step(1, "y"), _step(2, "g")))
+    approval_request = result.pending_approval_request
+    assert approval_request is not None
+    decision = approvals.approve(approval_request.request_id)
+
+    history.calls.clear()
+    engine.resume(result.workflow_id, decision)
+
+    statuses = [
+        (call["status"], call["step_number"]) for call in history.calls
+    ]
+    assert ("workflow_step_started", 1) in statuses
+    assert ("workflow_step_completed", 1) in statuses
+    assert ("workflow_step_started", 2) in statuses
+    assert ("workflow_step_completed", 2) in statuses
+    assert history.calls[-1]["status"] == "workflow_completed"
+
+
+def test_history_records_step_failed_and_workflow_stopped() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_FailingGreenTool("f"), history=history)
+
+    engine.run(_plan(_step(1, "f")))
+
+    statuses = [call["status"] for call in history.calls]
+    assert "workflow_step_failed" in statuses
+    assert statuses[-1] == "workflow_stopped"
+
+
+def test_history_records_red_block_as_step_failed_and_stopped() -> None:
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_RedTool("r"), history=history)
+
+    engine.run(_plan(_step(1, "r")))
+
+    statuses = [call["status"] for call in history.calls]
+    assert "workflow_step_failed" in statuses
+    assert statuses[-1] == "workflow_stopped"
+
+
+def test_history_never_receives_tool_input_or_plan() -> None:
+    """Structural guarantee at the call-site level: every record_transition
+    call carries only primitive, content-free fields - never a Plan, a
+    PlanStep, or a tool_input dict."""
+    history = _RecordingHistoryStore()
+    engine, _, _ = _engine(_GreenTool("a"), history=history)
+
+    engine.run(_plan(_step(1, "a")))
+
+    for call in history.calls:
+        assert "plan" not in call
+        assert "tool_input" not in call
+        assert "step" not in call
+        for value in call.values():
+            assert not isinstance(value, (Plan, PlanStep))
+
+
+def test_failing_history_store_does_not_alter_completed_workflow_result() -> None:
+    engine, _, _ = _engine(
+        _GreenTool("a"), _GreenTool("b"), history=_FailingHistoryStore()
+    )
+    result = engine.run(_plan(_step(1, "a"), _step(2, "b")))
+    assert result.overall_status is StepStatus.COMPLETED
+
+
+def test_failing_history_store_does_not_alter_waiting_workflow_result() -> None:
+    engine, _, _ = _engine(_YellowTool("y"), history=_FailingHistoryStore())
+    result = engine.run(_plan(_step(1, "y")))
+    assert result.overall_status is StepStatus.WAITING
+
+
+def test_failing_history_store_does_not_alter_failed_workflow_result() -> None:
+    engine, _, _ = _engine(_FailingGreenTool("f"), history=_FailingHistoryStore())
+    result = engine.run(_plan(_step(1, "f")))
+    assert result.overall_status is StepStatus.FAILED
+
+
+def test_failing_history_store_does_not_alter_resume_result() -> None:
+    engine, _, approvals = _engine(
+        _YellowTool("y"), _GreenTool("g"), history=_FailingHistoryStore()
+    )
+    result = engine.run(_plan(_step(1, "y"), _step(2, "g")))
+    approval_request = result.pending_approval_request
+    assert approval_request is not None
+    decision = approvals.approve(approval_request.request_id)
+
+    resumed = engine.resume(result.workflow_id, decision)
+    assert resumed.overall_status is StepStatus.COMPLETED
+
+
+def test_failing_history_store_does_not_prevent_audit_logger_from_recording() -> None:
+    """The two isolation boundaries (_emit for the audit logger,
+    _record_history for the durable store) are independent: a raising
+    history store must not prevent the separate, already-working audit
+    logger from recording its own events."""
+    logger = _RecordingLogger()
+    engine, _, _ = _engine(
+        _GreenTool("a"), logger=logger, history=_FailingHistoryStore()
+    )
+    result = engine.run(_plan(_step(1, "a")))
+    assert result.overall_status is StepStatus.COMPLETED
+    assert len(logger.calls) >= 1
+
+
+def test_history_isolation_except_bodies_are_present_in_module() -> None:
+    """Cross-check against the module-level structural invariant test
+    above (test_every_except_exception_wraps_only_emit_or_history): a
+    failing history store's exception must be caught, not merely
+    tolerated by accident because nothing in this test triggers the
+    failure path. This test directly forces that path via run()."""
+    engine, _, _ = _engine(_GreenTool("a"), history=_FailingHistoryStore())
+    # No exception should propagate out of run() despite the failing store.
     result = engine.run(_plan(_step(1, "a")))
     assert result.overall_status is StepStatus.COMPLETED

@@ -18,6 +18,13 @@ Responsibilities:
     - Emit a small, orchestration-only audit event family, distinct from
       (and never duplicating) ToolExecutor's/ApprovalManager's own existing
       tool_call/approval events.
+    - Optionally record the same lifecycle transitions durably via a
+      WorkflowHistoryStore (Durable Workflow Lifecycle Foundation - a
+      prerequisite turn, not a numbered phase), so a workflow's history
+      remains queryable across a restart. This is additive only: it never
+      replaces the existing audit events above, and it never makes any
+      workflow resumable, replayable, or exactly-once - see
+      workflow.workflow_history_store's own module docstring.
 
 Does NOT:
     - Construct its own ToolRegistry, SecurityManager, ToolExecutor, or
@@ -56,6 +63,7 @@ from config.constants import EventOutcome, SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
 from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
+from workflow.workflow_history_store import WorkflowHistoryStore
 from workflow.workflow_models import WorkflowResult, WorkflowStepOutcome
 
 _SOURCE = "workflow_engine"
@@ -147,6 +155,11 @@ class WorkflowEngine:
             workflow_* event family. When omitted, nothing is recorded -
             matching how every other optional-audit collaborator in this
             codebase already behaves without one.
+        _history: Optional durable WorkflowHistoryStore. When omitted,
+            no lifecycle transition is ever recorded durably - Phase 15's
+            original in-memory-only behaviour is fully preserved. When
+            present, it is written to additively, alongside (never
+            instead of) _logger, using the same narrow isolation pattern.
         _paused: The at-most-one currently paused workflow, keyed by its
             own workflow_id. In-memory only; never persisted. Phase 15's
             concurrency model is exactly one active/paused workflow at a
@@ -160,6 +173,7 @@ class WorkflowEngine:
         executor: ToolExecutor,
         approvals: ApprovalManager,
         logger: _AuditLogger | None = None,
+        history: WorkflowHistoryStore | None = None,
     ) -> None:
         """Initialise the engine with its collaborators.
 
@@ -171,10 +185,15 @@ class WorkflowEngine:
                 constructed by this class.
             logger: Optional audit logger for the new workflow_* event
                 family. When omitted, no workflow event is ever recorded.
+            history: Optional durable WorkflowHistoryStore. When omitted
+                (the default), fully backward compatible with every
+                pre-existing Phase 15 caller: no lifecycle transition is
+                ever recorded durably.
         """
         self._executor = executor
         self._approvals = approvals
         self._logger = logger
+        self._history = history
         self._paused: dict[str, _PausedWorkflow] = {}
 
     def has_paused(self, workflow_id: str) -> bool:
@@ -272,6 +291,12 @@ class WorkflowEngine:
             detail=f"workflow_id={workflow_id} steps={len(plan.steps)}",
             session_id=session_id,
         )
+        self._record_history(
+            _EVENT_WORKFLOW_STARTED,
+            workflow_id=workflow_id,
+            session_id=session_id,
+            step_total=len(plan.steps),
+        )
         return self._run_from(
             plan,
             workflow_id=workflow_id,
@@ -349,6 +374,14 @@ class WorkflowEngine:
             step=step,
             session_id=resolved_session_id,
         )
+        self._record_history(
+            _EVENT_STEP_STARTED,
+            workflow_id=workflow_id,
+            session_id=resolved_session_id,
+            step_number=step.number,
+            step_total=len(paused.plan.steps),
+            tool_name=step.tool_name,
+        )
         tool_result = self._executor.execute(
             step.tool_name,
             paused.resolved_tool_input,
@@ -376,6 +409,14 @@ class WorkflowEngine:
             plan=paused.plan,
             step=step,
             session_id=resolved_session_id,
+        )
+        self._record_history(
+            _EVENT_STEP_COMPLETED,
+            workflow_id=workflow_id,
+            session_id=resolved_session_id,
+            step_number=step.number,
+            step_total=len(paused.plan.steps),
+            tool_name=step.tool_name,
         )
         return self._run_from(
             paused.plan,
@@ -428,6 +469,14 @@ class WorkflowEngine:
                 step=step,
                 session_id=session_id,
             )
+            self._record_history(
+                _EVENT_STEP_STARTED,
+                workflow_id=workflow_id,
+                session_id=session_id,
+                step_number=step.number,
+                step_total=len(plan.steps),
+                tool_name=step.tool_name,
+            )
 
             tool_input, usable = self._resolve_tool_input(step, tuple(outcomes))
             if not usable:
@@ -479,6 +528,16 @@ class WorkflowEngine:
                     step=step,
                     session_id=session_id,
                 )
+                self._record_history(
+                    _EVENT_STEP_WAITING,
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                    step_number=step.number,
+                    step_total=len(plan.steps),
+                    tool_name=step.tool_name,
+                    approval_request_id=approval_request.request_id,
+                    detail=tool_result.error or "Awaiting your confirmation.",
+                )
                 self._paused[workflow_id] = _PausedWorkflow(
                     plan=plan,
                     session_id=session_id,
@@ -517,12 +576,27 @@ class WorkflowEngine:
                 step=step,
                 session_id=session_id,
             )
+            self._record_history(
+                _EVENT_STEP_COMPLETED,
+                workflow_id=workflow_id,
+                session_id=session_id,
+                step_number=step.number,
+                step_total=len(plan.steps),
+                tool_name=step.tool_name,
+            )
 
         self._emit(
             _EVENT_WORKFLOW_COMPLETED,
             EventOutcome.SUCCESS,
             detail=f"workflow_id={workflow_id} steps_completed={len(outcomes)}",
             session_id=session_id,
+        )
+        self._record_history(
+            _EVENT_WORKFLOW_COMPLETED,
+            workflow_id=workflow_id,
+            session_id=session_id,
+            step_total=len(plan.steps),
+            detail=f"steps_completed={len(outcomes)}",
         )
         return WorkflowResult(
             plan=plan,
@@ -573,11 +647,28 @@ class WorkflowEngine:
             step=step,
             session_id=session_id,
         )
+        self._record_history(
+            _EVENT_STEP_FAILED,
+            workflow_id=workflow_id,
+            session_id=session_id,
+            step_number=step.number,
+            step_total=len(plan.steps),
+            tool_name=step.tool_name,
+            detail=tool_result.error,
+        )
         self._emit(
             _EVENT_WORKFLOW_STOPPED,
             EventOutcome.BLOCKED if tool_result.blocked else EventOutcome.FAILURE,
             detail=f"workflow_id={workflow_id} stopped_at_step={step.number}",
             session_id=session_id,
+        )
+        self._record_history(
+            _EVENT_WORKFLOW_STOPPED,
+            workflow_id=workflow_id,
+            session_id=session_id,
+            step_number=step.number,
+            step_total=len(plan.steps),
+            detail=f"stopped_at_step={step.number}",
         )
         return WorkflowResult(
             plan=plan,
@@ -768,4 +859,58 @@ class WorkflowEngine:
         except Exception:
             # Observability-only: a failing audit logger must never break
             # the authoritative workflow already in progress.
+            pass
+
+    # ----- durable history (Durable Workflow Lifecycle Foundation) ----------
+
+    def _record_history(
+        self,
+        status: str,
+        *,
+        workflow_id: str,
+        session_id: int | None,
+        step_number: int | None = None,
+        step_total: int | None = None,
+        tool_name: str | None = None,
+        approval_request_id: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Durably record one workflow lifecycle transition, if configured.
+
+        A raising history store is caught here, scoped only around the
+        record_transition() call itself, so a failing durable-history
+        write can never alter execution, pause, resume, or the final
+        WorkflowResult already computed - the identical narrow
+        observability-isolation pattern already used by _emit() above.
+        This is additive: it never replaces the existing workflow_* audit
+        events, and never stores enough to reconstruct an executable
+        resumption point (no tool_input, no resolved step input, no plan).
+
+        Args:
+            status: One of the module's _EVENT_* constants.
+            workflow_id: This workflow's correlation id.
+            session_id: Optional session identifier.
+            step_number: Optional 1-based step this transition concerns.
+            step_total: Optional total number of steps in the plan.
+            tool_name: Optional step tool name (never its input).
+            approval_request_id: Optional correlated approval request id,
+                set only for a workflow_step_waiting transition.
+            detail: Optional short, content-free human-readable text.
+        """
+        if self._history is None:
+            return
+        try:
+            self._history.record_transition(
+                workflow_id=workflow_id,
+                status=status,
+                session_id=session_id,
+                step_number=step_number,
+                step_total=step_total,
+                tool_name=tool_name,
+                approval_request_id=approval_request_id,
+                detail=detail,
+            )
+        except Exception:
+            # Observability-only: a failing durable history write must
+            # never break the authoritative workflow already in progress.
             pass
