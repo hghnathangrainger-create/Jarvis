@@ -19,6 +19,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 13 complete: Deterministic Recency-Based Automatic Memory Selection for Advisory AI.**
 **Phase 14 complete: User-Controlled Bounded Recent-Memory Count for Advisory AI.**
 **Phase 15 complete: Sequential Workflow Execution — Minimal Multi-Step Planner and Workflow Engine.**
+**Durable Workflow Lifecycle Foundation complete (a prerequisite turn, not a numbered phase).**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -42,9 +43,11 @@ Phase 14 lets you choose exactly how many recent memories to summarise: an expli
 
 Phase 15 is a genuinely new kind of capability, not another memory selector: Jarvis can now run a short, fixed, two-step **workflow** — a real multi-step job, not just a single reply — through a new Sequential Workflow Engine, with every step still individually classified and gated by the same Security Manager and Tool Executor as always. Two exact commands exist today: `remember this and show it back: <text>` (save, then immediately read back what was saved) and `remember this and forget it: <text>` (save, then forget — which asks for approval first, exactly like `forget memory <id>` already does). Nothing about this is AI-planned, general-purpose, or user-definable — see the Phase 15 section below for exactly what it is and is not.
 
+The **Durable Workflow Lifecycle Foundation** is a small, narrow prerequisite turn that followed Phase 15's closure — deliberately **not** a numbered phase, since it adds no new capability of its own beyond one read-only command. A workflow's lifecycle (started, each step's outcome, paused, resumed, completed, or stopped) is now durably recorded, so `show workflow history` can honestly answer "what happened to that workflow?" even after a restart — something Phase 15 alone could not do, since its paused-workflow state lived only in memory. This still does **not** make any workflow resumable, replayable, or exactly-once after a crash; see the section below for exactly what it closes and what it deliberately leaves open.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis.
 
-> **Verified:** `poetry run pytest -v` — **1815 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–15 test.
+> **Verified:** `poetry run pytest -v` — **1878 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–15 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -417,6 +420,34 @@ General-purpose or natural-language workflow creation, AI-authored or AI-selecte
 
 ---
 
+## Durable Workflow Lifecycle Foundation (prerequisite turn, not a phase)
+
+**This is explicitly not a phase** — it adds no scheduling, no resumable checkpoints, no workflow replay, no exactly-once execution, and no new workflow command grammar. It closes exactly one gap Phase 15's own closure review identified: a workflow's lifecycle (started, each step's outcome, paused, resumed, completed, or stopped) previously lived only in memory and in the generic, unstructured audit log. It is now also recorded durably, in a structured, `workflow_id`-queryable form, so it survives a restart. See `docs/durable_workflow_lifecycle_foundation_plan.md` and `docs/durable_workflow_lifecycle_foundation_completion_report.md` for the full write-up.
+
+- **Batch 1 — Durable history store.** A new, append-only `workflow_history` table and `WorkflowHistoryStore`, mirroring the existing `ApprovalHistoryStore` pattern.
+- **Batch 2 — WorkflowEngine integration.** `WorkflowEngine` gains one new optional collaborator, recording every one of its seven existing lifecycle transitions durably, additively, alongside (never instead of) its existing audit events — using the same narrow observability-isolation pattern already proven for a raising audit logger, so a failing history write can never alter an authoritative `WorkflowResult`.
+- **Batch 3 — Read-only command.** A new `WorkflowHistoryTool` (GREEN, read-only), wired through the ordinary `CommandRouter` → `ToolExecutor` path — no bypass, no special case.
+
+### Workflow-history commands
+
+| Command | What it does |
+|---|---|
+| `show workflow history` | Lists the most recent workflow lifecycle transitions, across all workflows, newest first. |
+| `show recent workflows` | The last 10 transitions, across all workflows. |
+| `show workflow <workflow_id>` | One workflow's full lifecycle, oldest first — the whole story of what happened to it. |
+
+### Safety note: still exactly the same gate, nothing new granted
+
+`show workflow history` and its siblings are ordinary GREEN tool calls, classified fresh by the same Security Manager "show" rule every other read-only command already uses — no new rule was added or needed. A durable history row never carries a `tool_input`, a resolved step input, or a serialised plan, so nothing shown by this command can ever be replayed, resumed, or re-executed — that boundary is a structural fact about the schema, not a rule that could be forgotten.
+
+### What this closes, and what it deliberately still leaves open
+
+**Closes:** a crashed or restarted Jarvis process can no longer make a workflow's history silently vanish — `show workflow history` (or `show workflow <id>`) now gives an honest answer even after a restart.
+
+**Deliberately still open, unchanged from Phase 15:** a paused workflow still cannot be resumed after a restart (only its *history* survives, not its executable state); there is still no idempotency mechanism, so a step still cannot be safely replayed after an uncertain crash; there is still no scheduling, background execution, or notification of any kind; and there is still exactly one active workflow at a time. Durable, resumable checkpoints and any exactly-once execution guarantee remain explicitly out of scope for this turn, deferred to a future, separately-authorized and separately-reviewed phase.
+
+---
+
 ## Example Session
 
 ```
@@ -503,8 +534,9 @@ jarvis/
 │                   file_read (GREEN); file_create, file_append,
 │                   memory_update, memory_forget (YELLOW, approval-gated)
 ├── approval/       Approval models and the Approval Manager
-├── workflow/       Sequential Workflow Engine and the deterministic
-│                   two-step workflow plan factory
+├── workflow/       Sequential Workflow Engine, the deterministic
+│                   two-step workflow plan factory, and the durable
+│                   workflow lifecycle history store
 ├── core/           Orchestrator that wires everything together, plus the
 │                   CommandRouter that matches request text to a tool
 ├── ui/             Command-line interface and approval prompts
@@ -529,7 +561,7 @@ jarvis/
 
 **Phase 15 is complete**: Jarvis can now run a short, fixed, two-step workflow through a new headless Sequential Workflow Engine, with every step still individually classified by the Security Manager and gated by the Tool Executor exactly as before — see `docs/phase_15_completion_report.md` for the full closure write-up, including the two narrow observability-isolation defects (Tool Executor, Approval Manager) found and fixed along the way.
 
-Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. The next architectural direction has not been chosen and requires its own fresh review after this closure, in the same way every prior phase boundary has: what a general-purpose workflow syntax, AI-assisted or AI-authored planning, scheduled or background execution, or durable/crash-recoverable workflow state would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 15 unlocking the underlying engine; each remains a separately-scoped decision.
+Phase 15 was deliberately scoped as a minimal, non-general capability — two fixed, hardcoded workflows, no AI-authored steps, no branching, no retries, no durable state. A narrow **Durable Workflow Lifecycle Foundation** turn has since closed the durable-status/history half of that last gap — see the section above and `docs/durable_workflow_lifecycle_foundation_completion_report.md` — without adding resumable checkpoints, scheduling, or any exactly-once execution guarantee. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what a general-purpose workflow syntax, AI-assisted or AI-authored planning, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by this foundation turn; each remains a separately-scoped decision.
 
 Resumable approvals beyond a single paused workflow, and deeper but still-advisory AI assistance, remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
 
