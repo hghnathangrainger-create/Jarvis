@@ -208,8 +208,12 @@ def test_no_ai_module_is_imported_by_the_new_orchestrator_handler() -> None:
 
 
 def test_propagated_field_constant_is_unchanged() -> None:
-    """Direct structural proof that Phase 17 did not touch
-    WorkflowEngine's single propagation field."""
-    from workflow.engine import _PROPAGATED_FIELD
+    """Direct structural proof that Phase 17 did not touch WorkflowEngine's
+    memory_id propagation field. Phase 29 generalised the single
+    _PROPAGATED_FIELD constant into an explicit, ordered _PROPAGATED_FIELDS
+    tuple to add one more named, fixed field (file-search-to-copy path
+    propagation) - this proves the original Phase 15 entry is still
+    present, unchanged, not replaced or reinterpreted."""
+    from workflow.engine import _PROPAGATED_FIELDS
 
-    assert _PROPAGATED_FIELD == "memory_id"
+    assert ("memory_id", "memory_id") in _PROPAGATED_FIELDS

@@ -233,10 +233,10 @@ def test_no_web_search_or_ai_reference_in_new_orchestrator_handlers() -> None:
             assert forbidden not in names
 
 
-def test_only_two_new_workflow_templates_exist() -> None:
+def test_only_five_approved_workflow_templates_exist() -> None:
     """Structural proof against scope creep: exactly the two approved
-    Phase 17 factory functions exist, alongside the two approved Phase 15
-    ones - no extra template was added."""
+    Phase 15 factory functions, the two approved Phase 17 ones, and the
+    one approved Phase 29 one exist - no extra template was added."""
     import workflow.workflow_plan_factory as module
 
     public_builders = [
@@ -249,4 +249,5 @@ def test_only_two_new_workflow_templates_exist() -> None:
         "build_remember_and_forget_plan",
         "build_create_and_read_plan",
         "build_update_and_show_plan",
+        "build_file_search_and_copy_plan",
     }

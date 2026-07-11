@@ -29,21 +29,41 @@ Responsibilities:
 Does NOT:
     - Construct its own ToolRegistry, SecurityManager, ToolExecutor, or
       ApprovalManager - all are injected.
-    - Call SecurityManager.classify_action() itself, call any Tool
-      directly, or read ToolRegistry.
+    - Call SecurityManager.classify_action() or read ToolRegistry to
+      decide whether a step may execute - that remains solely
+      ToolExecutor.execute()'s job, for every step, every time (proven by
+      test_execution_path_never_calls_classify_action_or_tool_run_directly
+      in tests/unit/test_workflow_engine.py). Phase 27, Batch 2 added one
+      narrow exception, confined entirely to the optional reload-safety
+      path: reload_paused() (via _try_reconstruct_paused_workflow) calls
+      both, purely to decide whether a *persisted* paused workflow may be
+      safely treated as pending again after a restart - never to decide
+      whether a live step may run, and never executing anything itself
+      (see test_classify_action_and_get_tool_appear_only_in_reload_revalidation,
+      same file, which proves this confinement structurally).
     - Support retries, depends_on, branching, parallel steps, or concurrent
       workflows.
-    - Persist anything. Paused-workflow state is held only in this
-      instance's own memory and is lost on process exit; a different
-      WorkflowEngine instance can never resume another instance's paused
-      workflow. Phase 15 makes no crash-recovery or cross-restart-resume
-      claim of any kind.
+    - Persist anything by default. A freshly constructed WorkflowEngine
+      with no paused_store behaves exactly as Phase 15 originally
+      specified: paused-workflow state lives only in this instance's own
+      memory and is lost on process exit. Phase 27, Batch 2 added an
+      optional paused_store collaborator: when configured, a paused
+      workflow's plan/progress is additionally persisted to
+      paused_workflow_state and can be safely reloaded (reload_paused())
+      after a restart, independently re-validated against live code
+      before being trusted - see workflow/paused_workflow_store.py's own
+      module docstring for the full trust-boundary reasoning. This is
+      still not a general crash-recovery or exactly-once guarantee: see
+      docs/phase_27_completion_report.md and
+      docs/phase_28_completion_report.md for what remains explicitly out
+      of scope.
     - Match commands, dispatch requests, or return JarvisResponse. This
       engine executes a Plan and returns a WorkflowResult; command routing,
       Plan construction, and CLI presentation remain later Phase 15
       batches' responsibility (Batch 3/4), not this module's.
     - Depend on AIReasoningEngine, AIRouter, or any AI provider. Every
-      executable Phase 15 step is a deterministic tool call.
+      executable step, in every workflow this engine has ever run
+      (Phases 15, 17, 29), is a deterministic tool call.
 
 This is a plain, synchronous, single-threaded engine: no callbacks, no
 generators/iterators, no async, no threads, no background loop. run() and
@@ -79,17 +99,35 @@ _EVENT_STEP_FAILED = "workflow_step_failed"
 _EVENT_WORKFLOW_COMPLETED = "workflow_completed"
 _EVENT_WORKFLOW_STOPPED = "workflow_stopped"
 
-#: The sole Phase 15 previous-step propagation field. Deliberately one
-#: fixed, repository-defined key, not a generic templating/variable/data-
-#: flow language: both approved Phase 15 proof workflows
-#: (docs/phase_15_implementation_plan.md, Section 13) use exactly this
-#: metadata key on both sides already - tools/builtin/memory_tool.py's own
-#: save operation already returns metadata["memory_id"], and both
-#: MemoryTool's "get" operation and MemoryForgetTool already accept
-#: "memory_id" as their own tool_input key. Generalising this beyond one
-#: fixed field is explicitly out of scope pending real evidence of another
-#: need.
-_PROPAGATED_FIELD = "memory_id"
+#: The fixed, repository-defined previous-step propagation fields.
+#: Deliberately a small, explicitly-enumerated list of (metadata_key,
+#: tool_input_key) pairs, not a generic templating/variable/data-flow
+#: language: each entry is its own named, justified special case, reused
+#: exactly as-is by every step that declares input_from_previous_step,
+#: never combined, never dynamically selected by AI or by a step's own
+#: description text.
+#:
+#: - ("memory_id", "memory_id") - Phase 15: tools/builtin/memory_tool.py's
+#:   own save operation already returns metadata["memory_id"], and both
+#:   MemoryTool's "get" operation and MemoryForgetTool already accept
+#:   "memory_id" as their own tool_input key.
+#: - ("matched_path", "source") - Phase 29: tools/builtin/file_search_tool.py
+#:   sets metadata["matched_path"] only when a search finds exactly one
+#:   match (never for zero or multiple matches), and file_copy accepts
+#:   "source" as its own tool_input key. A search with zero or multiple
+#:   matches therefore has no "matched_path" entry, so the same "usable"
+#:   check below already stops the workflow honestly - no separate
+#:   zero/multiple-match handling exists anywhere in this engine.
+#:
+#: Checked in this fixed order; the first metadata key found is used. In
+#: practice the two never coexist on one tool_result, since no tool sets
+#: both, so order has no effect on correctness today. Generalising this
+#: beyond these two named fields is explicitly out of scope pending real
+#: evidence of another need.
+_PROPAGATED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("memory_id", "memory_id"),
+    ("matched_path", "source"),
+)
 
 
 class _AuditLogger(Protocol):
@@ -817,21 +855,24 @@ class WorkflowEngine:
             message=tool_result.error or "The workflow was stopped.",
         )
 
-    # ----- previous-step propagation (narrow, single fixed field) ------------
+    # ----- previous-step propagation (narrow, fixed field list) --------------
 
     @staticmethod
     def _resolve_tool_input(
         step: PlanStep, prior_outcomes: tuple[WorkflowStepOutcome, ...]
     ) -> tuple[dict[str, object], bool]:
-        """Build this step's tool_input, applying Phase 15's one narrow
-        previous-step propagation rule if the step declares it.
+        """Build this step's tool_input, applying one of the narrow,
+        fixed previous-step propagation rules in _PROPAGATED_FIELDS if
+        the step declares it.
 
         Static step.tool_input is always the base - never replaced, only
         extended. When input_from_previous_step is True, the immediately
-        previous outcome's tool_result.metadata["memory_id"] (and only
-        that field - no other field, no nested object, no arbitrary
-        earlier step) is copied into tool_input["memory_id"], overwriting
-        any static value there. No ToolResult.message text is ever parsed.
+        previous outcome's tool_result.metadata is checked against each
+        (metadata_key, tool_input_key) pair in _PROPAGATED_FIELDS, in
+        order; the first metadata key found present is copied into
+        tool_input[tool_input_key], overwriting any static value there.
+        No ToolResult.message text is ever parsed, and no field outside
+        this fixed list is ever propagated.
 
         Args:
             step: The step whose input is being resolved.
@@ -841,8 +882,13 @@ class WorkflowEngine:
             A tuple of (tool_input, usable). usable is False only when
             input_from_previous_step is True but the immediately previous
             outcome did not complete successfully, or its tool_result has
-            no "memory_id" metadata entry - in which case tool_input is
+            none of the known metadata keys - in which case tool_input is
             returned unmodified and the caller must not execute the step.
+            This is also how a file-search-then-copy workflow (Phase 29)
+            stops honestly on zero or multiple matches: FileSearchTool
+            only ever sets "matched_path" for exactly one match, so
+            "usable" is False for either zero or multiple matches, with
+            no separate handling needed here.
         """
         tool_input = dict(step.tool_input)
         if not step.input_from_previous_step:
@@ -855,12 +901,13 @@ class WorkflowEngine:
         if previous.status is not StepStatus.COMPLETED or previous.tool_result is None:
             return tool_input, False
 
-        value = previous.tool_result.metadata.get(_PROPAGATED_FIELD)
-        if value is None:
-            return tool_input, False
+        for metadata_key, tool_input_key in _PROPAGATED_FIELDS:
+            value = previous.tool_result.metadata.get(metadata_key)
+            if value is not None:
+                tool_input[tool_input_key] = value
+                return tool_input, True
 
-        tool_input[_PROPAGATED_FIELD] = value
-        return tool_input, True
+        return tool_input, False
 
     # ----- executable-plan precondition validation ---------------------------
 

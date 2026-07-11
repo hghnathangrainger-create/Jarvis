@@ -20,6 +20,16 @@ Supported input (via input_data):
            mirroring FileListTool's own default).
     limit: the maximum number of matching files to return (optional,
            default 50).
+
+Result metadata (Phase 29): every successful result also carries a
+"match_count" metadata entry, and - only when there is exactly one
+match - a "matched_path" entry holding that match's absolute path. This
+exists so a workflow step can safely chain off of "exactly one file was
+found" (via WorkflowEngine's existing, narrow previous-step propagation
+mechanism - see workflow/engine.py's own _PROPAGATED_FIELDS) without ever
+parsing this tool's own human-readable formatted output text. Standalone
+use of this tool (outside a workflow) is completely unaffected - the
+formatted text output is unchanged.
 """
 
 from __future__ import annotations
@@ -172,7 +182,12 @@ class FileSearchTool(BaseTool):
         except OSError as exc:
             return self.fail(f"Could not search directory: {exc}")
 
-        return self.ok(self._format(root, mode, query, matches, limit))
+        return ToolResult(
+            tool_name=self.name,
+            success=True,
+            output=self._format(root, mode, query, matches, limit),
+            metadata=self._build_metadata(root, matches),
+        )
 
     @staticmethod
     def _clamp_limit(value: object) -> int:
@@ -345,6 +360,48 @@ class FileSearchTool(BaseTool):
             return str(path.relative_to(root))
         except ValueError:
             return str(path)
+
+    @staticmethod
+    def _build_metadata(
+        root: Path, matches: list[str] | list[tuple[str, str]]
+    ) -> dict[str, str]:
+        """Build structured, trusted result metadata for safe propagation
+        to a later workflow step (Phase 29).
+
+        This is always derived directly from the same `matches` data
+        `_format` renders into human-readable text - never by parsing
+        that formatted text back out. "matched_path" is set only when
+        there is exactly one match, so a later workflow step chaining
+        off of it (via WorkflowEngine's existing input_from_previous_step
+        propagation) can safely assume "exactly one file" without any
+        disambiguation of its own; a search with zero or multiple
+        matches has no "matched_path" entry at all, which is what makes
+        WorkflowEngine's own existing "usable" check stop such a
+        workflow honestly, with no special-case handling needed here or
+        in the engine.
+
+        The path is always resolved to an absolute path. The human-
+        facing display path elsewhere in this tool (_relative_display)
+        is relative to `root`, which may itself be relative to the
+        current working directory - a later tool step must be able to
+        use this path correctly regardless of its own working directory.
+
+        Args:
+            root: The directory that was searched.
+            matches: The matches found, shaped per mode - a list of path
+                strings for "name" mode, or a list of (path, snippet)
+                tuples for "content" mode.
+
+        Returns:
+            A dict with "match_count" always set, and "matched_path" set
+            only when there is exactly one match.
+        """
+        metadata = {"match_count": str(len(matches))}
+        if len(matches) == 1:
+            first = matches[0]
+            display_path = first if isinstance(first, str) else first[0]
+            metadata["matched_path"] = str((root / display_path).resolve())
+        return metadata
 
     @staticmethod
     def _format(

@@ -362,6 +362,32 @@ _CREATE_AND_READ_WORKFLOW_SUFFIX = " and show it"
 #: it back".
 _UPDATE_AND_SHOW_WORKFLOW_SUFFIX = " and show it back"
 
+#: The exact, fixed marker for the Phase 29 "search files for <pattern>
+#: and copy first to <destination>" workflow command. Unlike
+#: _CREATE_AND_READ_WORKFLOW_SUFFIX/_UPDATE_AND_SHOW_WORKFLOW_SUFFIX
+#: above, this marker sits in the MIDDLE of the text, not at the very
+#: end - a destination path follows it, which a fixed trailing suffix
+#: could not capture. match_file_search_and_copy_workflow() below
+#: requires BOTH an existing _FILE_SEARCH_NAME_PREFIXES prefix AND this
+#: exact marker text to be present (via str.find, not a substring search
+#: anchored anywhere else), so the standalone "search files for
+#: <pattern>"/"find files named <pattern>" commands - with no trailing
+#: marker - are entirely unaffected. Content-mode search ("find files
+#: containing"/"search files containing") is deliberately not supported
+#: by this workflow - only name-mode search chains into a copy.
+#: Disclosed, accepted limitation, matching every other split-based
+#: extraction already in this codebase (e.g. _extract_copy_input's own
+#: " to " splitting): a pattern that itself legitimately contains the
+#: literal substring " and copy first to" cannot be distinguished from
+#: this marker and will always be split there. The marker has no
+#: trailing space (unlike the leading one): the destination is captured
+#: by everything after it, then stripped, so an empty destination (the
+#: marker at the very end of the text) still matches correctly - a
+#: trailing-space-inclusive marker would fail to match once the overall
+#: request text has already been stripped of trailing whitespace by the
+#: caller.
+_FILE_SEARCH_AND_COPY_WORKFLOW_MARKER = " and copy first to"
+
 #: The exact, complete recent-memory-summary commands (Phase 13, Batch 2).
 #: Unlike every other summary-family command, this one carries no trailing
 #: free-text argument at all - there is no query, category, or id list to
@@ -1109,6 +1135,55 @@ class CommandRouter:
         if ":" in without_suffix:
             content = without_suffix.split(":", 1)[1].strip()
         return memory_id, content
+
+    def match_file_search_and_copy_workflow(
+        self, text: str
+    ) -> tuple[str, str] | None:
+        """Match the exact "search files for <pattern> and copy first to
+        <destination>" command (Phase 29).
+
+        Requires BOTH an existing file-search-by-name prefix
+        (_FILE_SEARCH_NAME_PREFIXES: "search files for" or "find files
+        named") AND the exact, fixed marker text " and copy first to "
+        somewhere after it (matched via str.find, not a trailing suffix,
+        since a destination path follows the marker - unlike
+        match_create_and_read_workflow/match_update_and_show_workflow
+        above, whose marker sits at the very end). Returns None - a
+        clean non-match, falling through to the ordinary, completely
+        unmodified match()/build_input() -> file_search path - whenever
+        either condition is absent, so the standalone "search files for
+        <pattern>"/"find files named <pattern>" commands (with no
+        trailing marker) are entirely unaffected by this method's
+        existence. Content-mode search ("find files containing"/"search
+        files containing") is deliberately not matched here at all.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            A (pattern, destination) tuple - either may be empty, in
+            which case the underlying tools report the problem honestly
+            at execution time - or None if the text does not match this
+            workflow's grammar at all.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+
+        name_prefix = self._file_prefix(lowered, _FILE_SEARCH_NAME_PREFIXES)
+        if name_prefix is None:
+            return None
+
+        marker_index = lowered.find(
+            _FILE_SEARCH_AND_COPY_WORKFLOW_MARKER, len(name_prefix)
+        )
+        if marker_index == -1:
+            return None
+
+        pattern = stripped[len(name_prefix) : marker_index].strip()
+        destination = stripped[
+            marker_index + len(_FILE_SEARCH_AND_COPY_WORKFLOW_MARKER) :
+        ].strip()
+        return pattern, self._clean_path(destination)
 
     def build_input(self, tool_name: str, text: str) -> dict[str, object]:
         """Build the input dictionary for the matched tool.

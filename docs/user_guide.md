@@ -164,6 +164,7 @@ Creating, enabling, or disabling a schedule requires approval because it commits
 | `remember this and forget it: <text>` | Saves a memory, then asks approval to immediately delete it again. |
 | `create file <path> with <content> and show it` | Creates a file (with approval), then reads it back to you. |
 | `update memory <id>: <content> and show it back` | Updates a memory (with approval), then shows the new content. |
+| `search files for <pattern> and copy first to <destination>` | Searches by filename; if exactly one file matches, asks approval to copy it. Zero or multiple matches stop honestly instead of guessing. No AI, no file delete — see below. |
 
 ### Approval/workflow history commands (all GREEN, read-only)
 
@@ -317,6 +318,22 @@ jarvis> [APPROVED] You approved 'move file'.
 jarvis> [OK] Moved 'draft.txt' to 'final.txt'.
 ```
 `move file` and `rename file` are the same command — `draft.txt` no longer exists afterward; only `final.txt` does. If `final.txt` already existed, the move is refused — even after approval — and `draft.txt` is left exactly where it was.
+
+**Find a file and copy it, in one command (requires your approval):**
+```
+you> search files for budget.xlsx and copy first to backup/budget.xlsx
+jarvis> [NEEDS APPROVAL] ...
+=================================================
+  APPROVAL REQUIRED - Jarvis needs your decision
+=================================================
+  Action:     copy file
+  Reason:     Copying a file creates new state and should be confirmed.
+  Risk tier:  YELLOW (sensitive - needs your approval)
+Approve this action? [y]es / [n]o: y
+jarvis> [APPROVED] You approved 'copy file'.
+jarvis> [OK] Copied '...\budget.xlsx' to 'backup/budget.xlsx' (...bytes).
+```
+This only proceeds if the search finds **exactly one** matching file. If it finds none, or more than one, Jarvis stops honestly and shows you what it found instead of guessing — narrow your pattern and try again. No AI is involved in choosing the file, and this workflow never deletes anything.
 
 **Get an AI-summarized web search, saved to the Inbox automatically:**
 ```

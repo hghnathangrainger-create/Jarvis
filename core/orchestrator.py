@@ -77,6 +77,7 @@ from workflow.engine import WorkflowEngine
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
     build_create_and_read_plan,
+    build_file_search_and_copy_plan,
     build_remember_and_forget_plan,
     build_remember_and_show_plan,
     build_update_and_show_plan,
@@ -738,6 +739,43 @@ class JarvisOrchestrator:
         plan = build_create_and_read_plan(path, content)
         return self._handle_workflow_request(plan, session_id=session_id)
 
+    def _handle_file_search_and_copy_workflow_request(
+        self, pattern: str, destination: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the exact "search files for <pattern> and copy first to
+        <destination>" request (Phase 29).
+
+        Builds the fixed, GREEN-then-YELLOW two-step Plan via
+        workflow.workflow_plan_factory.build_file_search_and_copy_plan()
+        and executes it through the exact same shared
+        _handle_workflow_request path every other workflow command
+        already uses - never executing a tool, classifying security, or
+        creating an approval directly itself. Both pattern and
+        destination are passed through exactly as
+        CommandRouter.match_file_search_and_copy_workflow() extracted
+        them - possibly empty, in which case FileSearchTool/FileCopyTool
+        themselves report the problem honestly, exactly as they already
+        do for their standalone commands. This method never selects
+        among search matches or inspects step 1's result itself - that
+        is entirely WorkflowEngine's own existing previous-step
+        propagation mechanism (see workflow/engine.py's
+        _PROPAGATED_FIELDS).
+
+        Args:
+            pattern: The raw filename pattern extracted by
+                CommandRouter.match_file_search_and_copy_workflow -
+                possibly empty.
+            destination: The raw destination path extracted by the same
+                matcher - possibly empty.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse translated from the WorkflowResult, or an
+            honest failure if WorkflowEngine is not configured.
+        """
+        plan = build_file_search_and_copy_plan(pattern, destination)
+        return self._handle_workflow_request(plan, session_id=session_id)
+
     def _handle_update_and_show_workflow_request(
         self, memory_id: int | None, content: str, session_id: int | None
     ) -> JarvisResponse:
@@ -1126,6 +1164,25 @@ class JarvisOrchestrator:
             memory_id, content = update_and_show_match
             return self._handle_update_and_show_workflow_request(
                 memory_id, content, session_id
+            )
+
+        # Phase 29: one more fixed workflow command, checked in the same
+        # position relative to the generic fallback as every workflow
+        # check above, for the identical reason - the matcher returns
+        # None on any non-match (including the standalone "search files
+        # for <pattern>"/"find files named <pattern>" commands, which
+        # have no trailing " and copy first to " marker), so a
+        # non-workflow-shaped request falls through to
+        # _handle_request_core exactly as before.
+        search_and_copy_match = (
+            self._command_router.match_file_search_and_copy_workflow(
+                user_request.strip()
+            )
+        )
+        if search_and_copy_match is not None:
+            pattern, destination = search_and_copy_match
+            return self._handle_file_search_and_copy_workflow_request(
+                pattern, destination, session_id
             )
 
         response = self._handle_request_core(user_request, session_id=session_id)

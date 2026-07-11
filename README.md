@@ -796,6 +796,28 @@ No new workflow templates, no new tools, no file delete, no dashboard changes, n
 
 ---
 
+## Phase 29 — Search File Then Copy File Workflow (complete)
+
+One new, narrow, fully deterministic workflow command — the fifth, after the two Phase 15 memory workflows and the two Phase 17 file/memory workflows — chaining the existing `file_search` (GREEN) and `file_copy` (YELLOW) tools. Fully durable and hardened by construction: it pauses for approval exactly like every other workflow, survives a restart through Phase 27's own durable pending-approval/paused-workflow system, and remains protected by Phase 28's resume request-id invariant, with zero new plumbing for either. See `docs/phase_29_completion_report.md` for the full write-up.
+
+### File search-and-copy command
+
+```
+search files for <pattern> and copy first to <destination>
+```
+
+Finds files whose name matches `<pattern>`. If **exactly one** file matches, it pauses for your approval to copy that file to `<destination>` — decline and nothing is copied, approve and the copy proceeds exactly like a standalone `copy file` command (never overwriting an existing destination, even after approval). If the search finds **zero** or **more than one** match, the workflow stops honestly without ever attempting a copy — the search step's own result (visible in the response) tells you exactly what was found, so you can narrow the pattern and try again. Only name-mode search is supported for this workflow; content-mode search (`find files containing`/`search files containing`) does not chain into a copy.
+
+### How the file path is safely carried between steps
+
+The matched file's path never comes from parsing this tool's own human-readable output text. `FileSearchTool` now also returns a small piece of structured result metadata — a match count, and (only when there is exactly one match) that match's absolute path — and `WorkflowEngine`'s existing, narrow previous-step propagation mechanism (previously used only for a saved memory's id) carries that one specific field into the copy step's input. No general-purpose dataflow system was introduced: the propagation is a small, fixed, explicitly-named list of exactly two special cases, both pre-existing in spirit, not a generic templating language.
+
+### What is deliberately NOT included in Phase 29
+
+More than this one workflow template; an AI-generated summary as part of any workflow step (`WorkflowEngine` still executes only deterministic tool calls, never AI); file delete; new file tools; any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; notifications; goals/projects/tasks; and any database-tamper/integrity work. A small, corrective fix was also made to `workflow/engine.py`'s own module docstring, whose "Does NOT" claims about never calling `SecurityManager`/`ToolRegistry` and never persisting anything had gone stale since Phase 27 — corrected to accurately describe the now-existing, narrowly-scoped reload-revalidation exception.
+
+---
+
 ## Example Session
 
 ```
