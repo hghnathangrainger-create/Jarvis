@@ -784,6 +784,18 @@ No new tools, no file delete, no dashboard write actions or command box, no Core
 
 ---
 
+## Phase 28 — Workflow Resume Request-ID Invariant (complete)
+
+A small, narrow hardening pass, closing a gap Phase 27 disclosed but deliberately did not fix: `WorkflowEngine.resume()` never verified that the `ApprovalDecision` it was given actually belonged to the specific paused workflow being resumed — it trusted the caller to supply a matching pair. In every real caller this codebase has (`core/orchestrator.py::execute_approved()`), that pair was already guaranteed to match by construction, so this was never live-exploitable; but it was a real, avoidable gap worth closing narrowly before it could matter more (more workflow templates, or a future multi-client architecture, would both make a caller-side slip-up more plausible). See `docs/phase_28_completion_report.md` for the full write-up.
+
+`resume()` now fails closed — raising `WorkflowError`, executing no tool, mutating nothing — if `decision.request_id` does not match the paused workflow's own recorded `request_id`, and records an honest terminal entry in the existing, unchanged `workflow_history`. A mismatch permanently closes the workflow rather than leaving it open for a retry with a different decision. Every existing, legitimate approval/resume path — live or reloaded after a restart — is completely unaffected; the guard only ever rejects a genuinely mismatched pair, which no production code path produces today.
+
+### What is deliberately NOT included in Phase 28
+
+No new workflow templates, no new tools, no file delete, no dashboard changes, no Core service, no webpage fetching, no notifications, no goals/projects/tasks, no changes to `SecurityManager` or `ApprovalManager` behaviour, and no new approval-correlation subsystem or durable table — this is exactly one additive guard clause inside `WorkflowEngine.resume()`.
+
+---
+
 ## Example Session
 
 ```

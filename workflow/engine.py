@@ -174,7 +174,9 @@ class WorkflowReloadReport:
 
 class WorkflowError(Exception):
     """Raised for a WorkflowEngine usage error: an invalid executable plan,
-    an unknown workflow id, or a workflow id that is not currently paused.
+    an unknown workflow id, a workflow id that is not currently paused, or
+    (Phase 28) a resume() call whose decision.request_id does not match
+    the specific paused workflow being resumed.
 
     Never raised for an ordinary step outcome (a tool failure, a RED
     block, or a declined approval) - those are always represented
@@ -182,7 +184,9 @@ class WorkflowError(Exception):
     repository's existing convention that expected, describable outcomes
     are returned as data, not raised as exceptions (ApprovalError is the
     nearest existing precedent for a small, subsystem-specific exception
-    reserved for genuine misuse).
+    reserved for genuine misuse). A request-id mismatch is exactly this
+    kind of misuse - not a decision the workflow itself made about its
+    own step - so it is raised, not returned as a FAILED WorkflowResult.
     """
 
 
@@ -424,7 +428,9 @@ class WorkflowEngine:
         Raises:
             WorkflowError: If workflow_id does not refer to a currently
                 paused workflow (unknown id, already resumed, or already
-                terminal).
+                terminal); or (Phase 28) if decision.request_id does not
+                match the request_id this exact paused workflow is
+                actually waiting on.
         """
         paused = self._paused.pop(workflow_id, None)
         if paused is None:
@@ -437,6 +443,45 @@ class WorkflowEngine:
         # pauses again on a later step (which re-persists a fresh row via
         # the pause site in _run_from() below).
         self._remove_paused_state(workflow_id)
+
+        # Phase 28: the supplied decision must be the one this exact
+        # paused workflow is actually waiting on - never a different,
+        # unrelated decision, even one that is itself a real, validly
+        # approved ApprovalDecision for something else entirely. Every
+        # legitimate caller already satisfies this by construction
+        # (core.orchestrator.execute_approved() derives workflow_id from
+        # the same approval_request whose decision it then supplies), so
+        # this only ever rejects a genuinely mismatched pair. This
+        # workflow is treated as permanently, terminally done - never put
+        # back into self._paused for a later retry with a different
+        # decision, which would otherwise let a caller probe for a
+        # matching id.
+        if decision.request_id != paused.request_id:
+            self._emit(
+                _EVENT_WORKFLOW_STOPPED,
+                EventOutcome.FAILURE,
+                detail=(
+                    f"workflow_id={workflow_id} resume_request_id_mismatch "
+                    f"expected={paused.request_id} got={decision.request_id}"
+                ),
+                session_id=paused.session_id,
+            )
+            self._record_history(
+                _EVENT_WORKFLOW_STOPPED,
+                workflow_id=workflow_id,
+                session_id=paused.session_id,
+                detail=(
+                    "resume() called with a decision for a different "
+                    f"request (expected request_id={paused.request_id})"
+                ),
+            )
+            raise WorkflowError(
+                f"The supplied decision does not belong to workflow "
+                f"'{workflow_id}': expected request_id '{paused.request_id}', "
+                f"got '{decision.request_id}'. This workflow cannot be "
+                "resumed with a decision that is not the one it is "
+                "actually waiting on."
+            )
 
         resolved_session_id = (
             session_id if session_id is not None else paused.session_id

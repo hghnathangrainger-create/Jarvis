@@ -365,23 +365,27 @@ def test_missing_linked_approval_row_entirely_fails_closed(session_factory) -> N
     assert yellow_two.calls == []
 
 
-def test_mismatched_request_id_pointing_at_an_unrelated_pending_approval(
+def test_row_level_request_id_tampering_is_a_disclosed_database_integrity_boundary(
     session_factory,
 ) -> None:
-    """Documents a deliberate, disclosed Phase 15 boundary, not a Phase
-    27 regression: if a paused_workflow_state row's own request_id were
-    corrupted to point at a *different*, unrelated, genuinely-pending
-    approval, reload_paused()'s own check (has_pending(request_id)) would
-    pass, because that check only verifies "is some approval with this id
-    still pending", not "is this specifically the workflow's own
-    approval". This mirrors WorkflowEngine.resume()'s own pre-existing,
-    unchanged-by-Phase-27 contract: the caller must supply the decision
-    for the correct workflow_id (exactly as JarvisOrchestrator.
-    execute_approved() already does today, deriving workflow_id directly
-    from the approval_request's own metadata). Phase 27 does not
-    introduce, worsen, or fix this - it is the same trust boundary this
-    project has relied on since Phase 15, disclosed here rather than
-    silently assumed."""
+    """Documents a deliberate, disclosed residual boundary, not something
+    Phase 28's resume() invariant fixes: if a paused_workflow_state row's
+    own request_id were corrupted *in the database* to point at a
+    different, unrelated, genuinely-pending approval, reload_paused()'s
+    own check (has_pending(request_id)) still passes - it only verifies
+    "is some approval with this id still pending", not "is this
+    specifically the workflow's own approval" - and once reloaded, the
+    in-memory paused workflow's own request_id *is* the tampered value,
+    so Phase 28's resume() invariant (decision.request_id ==
+    paused.request_id) cannot detect this either: both would agree on
+    the tampered id. This is expected and out of scope for Phase 28 by
+    design (see docs/phase_28_completion_report.md) - defending against
+    direct tampering with the SQLite file itself would require
+    cryptographic row-signing, wildly disproportionate to what this
+    project protects against elsewhere. What Phase 28 actually closes is
+    a *caller-side* mismatch - see
+    test_resume_rejects_a_decision_for_a_different_workflow in
+    tests/unit/test_workflow_resume_invariant.py for that proof."""
     registry_one, _, approvals_one, engine_one, _, _ = _build_stack(session_factory)
     result = engine_one.run(_two_step_plan())
     workflow_id = result.workflow_id
@@ -411,17 +415,14 @@ def test_mismatched_request_id_pointing_at_an_unrelated_pending_approval(
     report = engine_two.reload_paused(registry=registry_two)
 
     # The mismatched-but-genuinely-pending unrelated approval means this
-    # row passes reload's own narrow check - documented above as an
-    # existing, disclosed boundary, not a new one.
+    # row still passes reload's own narrow check - reload cannot catch
+    # this class of mismatch by itself.
     assert report == WorkflowReloadReport(resumed=1, invalidated=0)
 
-    # The real safety property that matters: resuming the workflow still
-    # requires an explicit resume() call, and nothing executes merely
-    # because reload happened.
+    # The real safety property that matters in practice: resuming the
+    # workflow still requires an explicit resume() call, and nothing
+    # executes merely because reload happened.
     assert yellow_two.calls == []
 
-    # The original real approval (never approved) is untouched, and the
-    # workflow's own actual completion still requires its own real
-    # decision path in ordinary use - this test exists to document the
-    # boundary, not to exercise an unsafe resume.
+    # The original real approval (never approved) is untouched.
     assert approvals_two.has_pending(real_request_id) is True
