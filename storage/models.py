@@ -637,3 +637,119 @@ class PendingApprovalState(Base):
             f"<PendingApprovalState request_id={self.request_id!r} "
             f"tool_name={self.tool_name!r}>"
         )
+
+
+class PausedWorkflowState(Base):
+    """Durable operational state for a currently-paused workflow.
+
+    Phase 27, Batch 2. This is deliberately NOT a second workflow-history
+    table - `WorkflowHistoryEntry` remains completely unchanged, and its
+    own long-standing discipline of never storing a serialised Plan or
+    resolved step input is preserved exactly as before. This table exists
+    for a different, narrower, newly-authorized purpose: letting a paused
+    workflow's own resumption state - its plan, which steps already
+    completed, which step is waiting, and that step's resolved input -
+    survive a process restart, so it can be independently revalidated and
+    safely resumed. See workflow/paused_workflow_store.py's own module
+    docstring, and docs/phase_27_implementation_plan.md section 4/5, for
+    the full trust-boundary reasoning this table's design rests on -
+    identical in spirit to storage.models.PendingApprovalState (Phase 27,
+    Batch 1), applied to a whole paused workflow instead of one pending
+    tool call.
+
+    A row here is short-lived operational state, not history: it exists
+    only while its workflow is genuinely paused, and is deleted the
+    moment that workflow resumes (successfully or not) or is found
+    invalid on reload. Nothing here is ever copied into workflow_history,
+    and nothing in workflow_history is ever read from here.
+
+    Row existence must never be treated as approval, and loading a row
+    must never, by itself, execute anything - WorkflowEngine.
+    reload_paused() always independently re-validates every field
+    against live code (the current ToolRegistry, a fresh
+    SecurityManager.classify_action() call, and - critically - whether
+    this row's own linked approval is still genuinely pending in
+    ApprovalManager, reusing Batch 1's own reload_pending() outcome
+    rather than re-deriving approval validity here) before treating a row
+    as genuinely paused again; a row that fails that revalidation is
+    removed here and recorded as an honest terminal entry in
+    workflow_history instead of ever being resumed, and its own linked
+    pending-approval row (if still present) is invalidated too, so its
+    mere existence can never imply this workflow is still resumable.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        workflow_id: The workflow this row describes (matches
+            WorkflowEngine's own per-run correlation id). Unique - at
+            most one row per workflow, mirroring Phase 15's own
+            one-workflow-paused-at-a-time contract.
+        session_id: The session the workflow ran under, if any. Plain
+            Integer, not a ForeignKey, matching every newer table's own
+            convention.
+        request_id: The id of the pending_approval_state /
+            ApprovalRequest this workflow is paused on (matches
+            ApprovalRequest.request_id). A paused workflow is never
+            treated as resumable unless this exact request_id is still
+            genuinely pending in ApprovalManager after its own reload.
+        user_request: The original Plan.user_request text this workflow
+            was built from.
+        plan_steps_json: JSON-serialized list of every step in the
+            paused workflow's Plan (number, description, action, tier,
+            reason, tool_name, tool_input, input_from_previous_step) -
+            plain, already-validated data (paths, ids, text), never code
+            or a pickled object. Authorized to be stored here, for this
+            table only, for the same reason PendingApprovalState.
+            tool_input_json is authorized (Phase 27 planning).
+        completed_outcomes_json: JSON-serialized list of the steps
+            already completed before the pause (step_number and a plain
+            view of that step's ToolResult) - enough to display/resume
+            context. Never re-executed on reload; only the waiting step
+            is ever a candidate for execution, and only after a fresh
+            approval decision.
+        waiting_step_index: The plan.steps index of the step this
+            workflow is paused on.
+        resolved_tool_input_json: JSON-serialized dict of the specific
+            input the waiting step would run with once resumed.
+        schema_version: The version of this row's own JSON shape. Used
+            so a future change to what is stored can safely refuse to
+            treat an older or newer row it no longer understands as
+            resumable, rather than guessing.
+        created_at: Timestamp marking when this workflow first paused
+            (UTC). Deliberately not used as an independent staleness
+            ceiling - see reload_paused()'s own docstring for why a
+            paused workflow's resumability is entirely inherited from
+            its linked approval's own staleness check (Batch 1), rather
+            than a second, separately-clocked ceiling that could disagree
+            with it.
+    """
+
+    __tablename__ = "paused_workflow_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    user_request: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_steps_json: Mapped[str] = mapped_column(Text, nullable=False)
+    completed_outcomes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    waiting_step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_tool_input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by workflow_id and request_id.
+        """
+        return (
+            f"<PausedWorkflowState workflow_id={self.workflow_id!r} "
+            f"request_id={self.request_id!r}>"
+        )

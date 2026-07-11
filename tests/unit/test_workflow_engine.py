@@ -890,7 +890,15 @@ def test_plan_step_display_green_cannot_bypass_a_live_red_classification() -> No
     assert result.step_outcomes[0].tool_result.blocked is True
 
 
-def test_engine_module_imports_no_security_manager_or_tool_registry() -> None:
+def test_engine_module_imports_no_ai_or_planning_components() -> None:
+    """Phase 15's original invariant, narrowed by name rather than by a
+    blanket absence of SecurityManager/ToolRegistry: Phase 27, Batch 2
+    legitimately imports both (see the two tests below) for its own new,
+    narrowly-scoped reload-revalidation feature. What still never changes
+    is that the engine has no dependency on AI, Planner, CommandRouter,
+    or the Core orchestrator - it only executes an already-built Plan
+    through the existing ToolExecutor/ApprovalManager authorities, plus
+    (Batch 2) revalidates persisted state against live code at reload."""
     import workflow.engine as module
 
     with open(module.__file__, encoding="utf-8") as f:
@@ -903,8 +911,6 @@ def test_engine_module_imports_no_security_manager_or_tool_registry() -> None:
         elif isinstance(node, ast.Import):
             imported_names.update(alias.name for alias in node.names)
 
-    assert "SecurityManager" not in imported_names
-    assert "ToolRegistry" not in imported_names
     assert "AIReasoningEngine" not in imported_names
     assert "AIRouter" not in imported_names
     assert "AIReasoningResult" not in imported_names
@@ -914,25 +920,78 @@ def test_engine_module_imports_no_security_manager_or_tool_registry() -> None:
     assert "JarvisOrchestrator" not in imported_names
 
 
-def test_engine_never_calls_classify_action_or_tool_run_directly() -> None:
-    """Structural proof, via real AST call-site inspection (not substring
-    search, which would also match this module's own prose docstrings):
-    workflow/engine.py contains no call whose method name is
-    classify_action or run, only calls to executor.execute(...)."""
+def test_execution_path_never_calls_classify_action_or_tool_run_directly() -> None:
+    """Structural proof, via real per-function AST call-site inspection
+    (not substring search, which would also match this module's own
+    prose docstrings): the actual step-EXECUTION path (run, resume,
+    _run_from, _stop) contains no call whose method name is
+    classify_action or run - only calls to executor.execute(...). This is
+    Phase 15's original, still-load-bearing safety invariant: a step's
+    own display-only `tier` (planning-time metadata) must never gate
+    execution - only a fresh, live SecurityManager.classify_action() call
+    inside ToolExecutor.execute() may (see
+    test_plan_step_display_green_cannot_bypass_a_live_yellow_classification
+    immediately above for the behavioural proof this structural test
+    backs up).
+
+    Phase 27, Batch 2 adds a second, deliberately separate
+    classify_action call inside reload_paused()/
+    _try_reconstruct_paused_workflow() - proven, by the companion test
+    below, to be entirely confined outside this execution path."""
     import workflow.engine as module
 
     with open(module.__file__, encoding="utf-8") as f:
         tree = ast.parse(f.read())
 
-    called_method_names = {
+    execution_path_functions = {"run", "resume", "_run_from", "_stop"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in execution_path_functions:
+            called_method_names = {
+                call.func.attr
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            }
+            assert "classify_action" not in called_method_names, node.name
+            assert "run" not in called_method_names, node.name
+
+    all_called_method_names = {
         node.func.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
+    assert "execute" in all_called_method_names
 
-    assert "classify_action" not in called_method_names
-    assert "run" not in called_method_names
-    assert "execute" in called_method_names
+
+def test_classify_action_and_get_tool_appear_only_in_reload_revalidation() -> None:
+    """Phase 27, Batch 2: the two new SecurityManager/ToolRegistry calls
+    this module now makes are confined entirely to the reload-safety
+    path. reload_paused() only ever decides whether a persisted row is
+    eligible to sit back in self._paused as ordinary pending state; it
+    never runs a tool itself, and the real execution gate
+    (ToolExecutor.execute, called only from resume()/_run_from(), proven
+    by the test above) is completely unchanged."""
+    import workflow.engine as module
+
+    with open(module.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    allowed_functions = {"reload_paused", "_try_reconstruct_paused_workflow"}
+    offending: set[str] = set()
+
+    for func_node in ast.walk(tree):
+        if not isinstance(func_node, ast.FunctionDef):
+            continue
+        for call in ast.walk(func_node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("classify_action", "get_tool")
+            ):
+                if func_node.name not in allowed_functions:
+                    offending.add(func_node.name)
+
+    assert offending == set()
 
 
 def test_engine_has_no_async_threading_or_persistence_code() -> None:

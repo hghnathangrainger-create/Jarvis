@@ -78,6 +78,7 @@ from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
 from workflow.engine import WorkflowEngine
+from workflow.paused_workflow_store import PausedWorkflowStore
 from workflow.workflow_history_store import WorkflowHistoryStore
 
 
@@ -212,6 +213,15 @@ def build_orchestrator() -> JarvisOrchestrator:
     # so the Core coordinates rather than performing command-matching itself.
     command_router = CommandRouter(registry)
 
+    # Durable paused-workflow operational state (Phase 27, Batch 2). A
+    # *different* table from workflow_history above - see
+    # paused_workflow_store.py's own module docstring. Nothing is
+    # reloaded from it until reload_paused() is called explicitly below,
+    # after workflow_engine exists and after pending approvals have
+    # already been reloaded - reload_paused()'s own revalidation depends
+    # on that order.
+    paused_workflows = PausedWorkflowStore(session_factory)
+
     # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same
     # ToolExecutor, ApprovalManager, and EventLogger instances already built
     # above - no duplicate execution, approval, or logging authority is ever
@@ -222,6 +232,7 @@ def build_orchestrator() -> JarvisOrchestrator:
         executor=executor,
         approvals=approvals,
         logger=logger,
+        paused_store=paused_workflows,
         # Durable Workflow Lifecycle Foundation: the same WorkflowHistoryStore
         # instance already built above (not a second one) - so every
         # workflow_* transition WorkflowEngine already emits as an audit
@@ -229,6 +240,16 @@ def build_orchestrator() -> JarvisOrchestrator:
         # workflow_history tool registered above.
         history=workflow_history,
     )
+
+    # Phase 27, Batch 2: reload any paused workflow persisted before a
+    # previous restart, now that workflow_engine exists. Must run AFTER
+    # approvals.reload_pending() above - each paused workflow's own
+    # revalidation checks whether its linked approval is still genuinely
+    # pending in the already-reloaded `approvals` instance. Never resumes
+    # or executes anything by itself - see
+    # WorkflowEngine.reload_paused()'s own docstring for the full
+    # fail-closed reasoning.
+    workflow_engine.reload_paused(registry=registry, security_manager=security)
 
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
     # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and

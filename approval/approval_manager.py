@@ -1091,34 +1091,94 @@ class ApprovalManager:
             reason: The human-readable rejection reason.
             now: The current moment, from this manager's own clock.
         """
-        if self._pending_store is not None:
-            self._pending_store.delete(record.request_id)
-        self._audit_reload_invalidation(record, reason=reason)
-        if self._history is not None:
-            self._history.record_timeout(
-                request_id=record.request_id,
-                timed_out_at=now,
-                reason=f"Could not be resumed after restart: {reason}",
-            )
+        self._finalize_pending_as_unresumable(
+            request_id=record.request_id,
+            action=record.action,
+            session_id=record.session_id,
+            reason=reason,
+            now=now,
+        )
 
-    def _audit_reload_invalidation(
-        self, record: PendingApprovalRecord, *, reason: str
-    ) -> None:
-        """Record one audit event for a pending row invalidated on reload.
+    def invalidate_pending(self, request_id: str, *, reason: str) -> bool:
+        """Forcibly invalidate a still-pending request as unresumable, for
+        a reason external to this manager's own reload revalidation
+        (Phase 27, Batch 2).
 
-        Reuses the existing _emit_audit_event isolation - a failing audit
-        logger can never affect whether a row is invalidated.
+        Used specifically when a paused workflow's own persisted state
+        could not be safely reloaded (corrupt, unsupported schema
+        version, an unregistered tool, a no-longer-YELLOW action, or an
+        out-of-range step index) - its linked pending approval, even if
+        it would otherwise still look individually valid, can never
+        actually be resumed once its workflow is gone, so it must not be
+        left sitting as if it still meant something. Never approves,
+        declines, or executes anything.
+
+        This is a no-op (returns False) if request_id is not currently
+        pending - a caller (WorkflowEngine.reload_paused()) may call this
+        even when it is not certain the approval is still pending,
+        without needing to check first.
 
         Args:
-            record: The persisted row that failed revalidation.
-            reason: The human-readable rejection reason.
+            request_id: The identifier of the pending request to
+                invalidate.
+            reason: A human-readable explanation, recorded in approval
+                history exactly like any other reload-invalidation.
+
+        Returns:
+            True if a pending request was found and invalidated; False
+            if there was nothing pending to invalidate.
         """
+        request = self._pending.pop(request_id, None)
+        if request is None:
+            return False
+        self._finalize_pending_as_unresumable(
+            request_id=request_id,
+            action=request.action,
+            session_id=request.session_id,
+            reason=reason,
+            now=self._clock(),
+        )
+        return True
+
+    def _finalize_pending_as_unresumable(
+        self,
+        *,
+        request_id: str,
+        action: str,
+        session_id: int | None,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """Shared terminal-invalidation logic: remove durable state, audit,
+        and record an honest approval-history entry.
+
+        Used both when a reload_pending() row fails its own revalidation
+        (_invalidate_reloaded_row, the request was never added back to
+        _pending) and when an already-pending request is invalidated
+        externally (invalidate_pending, e.g. orphaned by a paused
+        workflow that could not itself be reloaded).
+
+        Args:
+            request_id: The identifier of the request being invalidated.
+            action: The action string, for the audit detail.
+            session_id: Optional session identifier.
+            reason: The human-readable rejection reason.
+            now: The current moment, from this manager's own clock.
+        """
+        if self._pending_store is not None:
+            self._pending_store.delete(request_id)
         self._emit_audit_event(
             outcome=EventOutcome.TIMEOUT,
             detail=(
-                f"request_id={record.request_id} action={record.action} "
+                f"request_id={request_id} action={action} "
                 f"status=invalidated_on_reload reason={reason}"
             ),
             security_tier=SecurityTier.YELLOW,
-            session_id=record.session_id,
+            session_id=session_id,
         )
+        if self._history is not None:
+            self._history.record_timeout(
+                request_id=request_id,
+                timed_out_at=now,
+                reason=f"Could not be resumed after restart: {reason}",
+            )

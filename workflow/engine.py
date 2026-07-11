@@ -61,8 +61,11 @@ from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision, ApprovalError, ApprovalRequest
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
-from tools.base_tool import ToolResult
+from security.security_manager import SecurityManager
+from tools.base_tool import ToolRequest, ToolResult
 from tools.executor import ToolExecutor
+from tools.registry import ToolRegistry
+from workflow.paused_workflow_store import SCHEMA_VERSION, PausedWorkflowRecord
 from workflow.workflow_history_store import WorkflowHistoryStore
 from workflow.workflow_models import WorkflowResult, WorkflowStepOutcome
 
@@ -109,6 +112,66 @@ class _AuditLogger(Protocol):
         ...
 
 
+class _PausedWorkflowStateStore(Protocol):
+    """The minimal paused-workflow-state interface WorkflowEngine depends
+    on. Matches the write/read-side methods of
+    workflow.paused_workflow_store.PausedWorkflowStore. Declaring it as a
+    Protocol keeps the engine decoupled from the concrete store (Phase
+    27, Batch 2), mirroring approval.approval_manager's own
+    _PendingApprovalStateStore Protocol.
+
+    Unlike WorkflowHistoryStore, this interface's whole purpose is to let
+    a paused workflow's own plan and resolved step input survive a
+    restart - that is explicitly authorized for *this* table only (see
+    paused_workflow_store.py's own module docstring), never for
+    workflow_history, which remains completely untouched by this
+    feature.
+    """
+
+    def save(
+        self,
+        *,
+        workflow_id: str,
+        session_id: int | None,
+        request_id: str,
+        user_request: str,
+        plan_steps: list[dict[str, object]],
+        completed_outcomes: list[dict[str, object]],
+        waiting_step_index: int,
+        resolved_tool_input: dict[str, object],
+    ) -> object:
+        """Persist (or replace) the paused state for one workflow_id."""
+        ...
+
+    def delete(self, workflow_id: str) -> None:
+        """Remove the persisted paused state for one workflow_id, if any."""
+        ...
+
+    def list_all(self) -> list[PausedWorkflowRecord]:
+        """Return every currently persisted paused-workflow row."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowReloadReport:
+    """A small, honest summary of what reload_paused() did (Phase 27,
+    Batch 2). Mirrors approval.approval_manager.ApprovalReloadReport.
+
+    Attributes:
+        resumed: Number of persisted paused workflows that passed
+            revalidation and are now genuinely paused again, exactly as
+            if the process had never restarted.
+        invalidated: Number of persisted paused workflows that failed
+            revalidation and were removed, with a terminal entry
+            recorded in workflow history explaining why - never
+            resumed, and their linked pending approval (if still
+            present) invalidated too.
+    """
+
+    resumed: int
+    invalidated: int
+
+
 class WorkflowError(Exception):
     """Raised for a WorkflowEngine usage error: an invalid executable plan,
     an unknown workflow id, or a workflow id that is not currently paused.
@@ -125,11 +188,16 @@ class WorkflowError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class _PausedWorkflow:
-    """Private, in-memory-only record of a workflow paused for approval.
+    """Private, in-memory record of a workflow paused for approval.
 
     Never exposed as a public workflow model (workflow.workflow_models
     stays limited to WorkflowStepOutcome/WorkflowResult, per the approved
-    Phase 15 plan) and never persisted anywhere.
+    Phase 15 plan). Phase 15 never persisted this anywhere; Phase 27,
+    Batch 2 optionally mirrors it durably (see _paused_store) so it can
+    survive a restart - but this in-memory dataclass itself is never
+    written to or read from a database directly; WorkflowEngine converts
+    to and from plain dict/JSON shapes at its own persistence boundary
+    (_persist_paused_state / _try_reconstruct_paused_workflow).
     """
 
     plan: Plan
@@ -161,10 +229,17 @@ class WorkflowEngine:
             present, it is written to additively, alongside (never
             instead of) _logger, using the same narrow isolation pattern.
         _paused: The at-most-one currently paused workflow, keyed by its
-            own workflow_id. In-memory only; never persisted. Phase 15's
-            concurrency model is exactly one active/paused workflow at a
-            time - enforced by run() rejecting a second workflow while one
-            is already paused.
+            own workflow_id. Phase 15's concurrency model is exactly one
+            active/paused workflow at a time - enforced by run()
+            rejecting a second workflow while one is already paused.
+        _paused_store: Optional durable paused-workflow-state store
+            (Phase 27, Batch 2). When provided, a paused workflow's plan
+            and resolved step input are additionally persisted there, so
+            it can survive a restart. __init__ never reads from this
+            store - exactly like _history, a freshly constructed engine
+            always starts with an empty _paused; a caller must explicitly
+            call reload_paused() to repopulate it from what was
+            persisted, after independently revalidating every row.
     """
 
     def __init__(
@@ -174,6 +249,7 @@ class WorkflowEngine:
         approvals: ApprovalManager,
         logger: _AuditLogger | None = None,
         history: WorkflowHistoryStore | None = None,
+        paused_store: _PausedWorkflowStateStore | None = None,
     ) -> None:
         """Initialise the engine with its collaborators.
 
@@ -189,12 +265,22 @@ class WorkflowEngine:
                 (the default), fully backward compatible with every
                 pre-existing Phase 15 caller: no lifecycle transition is
                 ever recorded durably.
+            paused_store: Optional durable paused-workflow-state store
+                (such as a PausedWorkflowStore) used to persist a paused
+                workflow's plan and resolved step input (Phase 27, Batch
+                2). When omitted, the engine behaves exactly as it did
+                before this feature existed - purely in memory, and a
+                restart always loses every paused workflow, exactly as
+                today. This parameter only ever causes writes during
+                pause/resume/reap; reload_paused() must be called
+                explicitly to read anything back.
         """
         self._executor = executor
         self._approvals = approvals
         self._logger = logger
         self._history = history
         self._paused: dict[str, _PausedWorkflow] = {}
+        self._paused_store = paused_store
 
     def has_paused(self, workflow_id: str) -> bool:
         """Report whether workflow_id refers to a currently paused workflow.
@@ -249,6 +335,7 @@ class WorkflowEngine:
                 stale_ids.append(workflow_id)
         for workflow_id in stale_ids:
             del self._paused[workflow_id]
+            self._remove_paused_state(workflow_id)
 
     def run(self, plan: Plan, *, session_id: int | None = None) -> WorkflowResult:
         """Execute plan.steps in order, starting from the first step.
@@ -345,6 +432,11 @@ class WorkflowEngine:
                 f"No paused workflow with id '{workflow_id}'. It may not "
                 "exist, or it may already have been resumed."
             )
+        # Phase 27, Batch 2: the durable row's job is done the moment
+        # resume() is called, whether this step now completes, fails, or
+        # pauses again on a later step (which re-persists a fresh row via
+        # the pause site in _run_from() below).
+        self._remove_paused_state(workflow_id)
 
         resolved_session_id = (
             session_id if session_id is not None else paused.session_id
@@ -538,7 +630,7 @@ class WorkflowEngine:
                     approval_request_id=approval_request.request_id,
                     detail=tool_result.error or "Awaiting your confirmation.",
                 )
-                self._paused[workflow_id] = _PausedWorkflow(
+                paused = _PausedWorkflow(
                     plan=plan,
                     session_id=session_id,
                     completed_outcomes=tuple(outcomes[:-1]),
@@ -546,6 +638,8 @@ class WorkflowEngine:
                     resolved_tool_input=tool_input,
                     request_id=approval_request.request_id,
                 )
+                self._paused[workflow_id] = paused
+                self._persist_paused_state(workflow_id, paused)
                 return WorkflowResult(
                     plan=plan,
                     workflow_id=workflow_id,
@@ -914,3 +1008,369 @@ class WorkflowEngine:
             # Observability-only: a failing durable history write must
             # never break the authoritative workflow already in progress.
             pass
+
+    # ----- durable paused-workflow state (Phase 27, Batch 2) -----------------
+
+    def _persist_paused_state(self, workflow_id: str, paused: _PausedWorkflow) -> None:
+        """Durably persist this workflow's paused state, if a
+        paused_store is configured.
+
+        When no paused_store is configured, this is a no-op and the
+        engine behaves purely in memory, exactly as before this feature
+        existed. Not isolated in a try/except - mirrors
+        ApprovalManager._record_pending_state's own reasoning: a failing
+        durable write here is a real problem worth surfacing, not a
+        purely observational one.
+
+        Args:
+            workflow_id: This workflow's correlation id.
+            paused: The in-memory paused-workflow record to persist.
+        """
+        if self._paused_store is None:
+            return
+        self._paused_store.save(
+            workflow_id=workflow_id,
+            session_id=paused.session_id,
+            request_id=paused.request_id,
+            user_request=paused.plan.user_request,
+            plan_steps=[self._plan_step_to_dict(s) for s in paused.plan.steps],
+            completed_outcomes=[
+                self._completed_outcome_to_dict(o) for o in paused.completed_outcomes
+            ],
+            waiting_step_index=paused.waiting_step_index,
+            resolved_tool_input=dict(paused.resolved_tool_input),
+        )
+
+    def _remove_paused_state(self, workflow_id: str) -> None:
+        """Remove this workflow's durable paused-state row, if a
+        paused_store is configured.
+
+        Args:
+            workflow_id: The identifier of the workflow that just
+                resumed or was reaped as stale.
+        """
+        if self._paused_store is None:
+            return
+        self._paused_store.delete(workflow_id)
+
+    @staticmethod
+    def _plan_step_to_dict(step: PlanStep) -> dict[str, object]:
+        """Convert one PlanStep into a plain, JSON-safe dict.
+
+        Args:
+            step: The step to convert.
+
+        Returns:
+            A plain dict with every field PlanStep declares.
+        """
+        return {
+            "number": step.number,
+            "description": step.description,
+            "action": step.action,
+            "tier": step.tier.value,
+            "reason": step.reason,
+            "tool_name": step.tool_name,
+            "tool_input": dict(step.tool_input),
+            "input_from_previous_step": step.input_from_previous_step,
+        }
+
+    @staticmethod
+    def _completed_outcome_to_dict(
+        outcome: WorkflowStepOutcome,
+    ) -> dict[str, object]:
+        """Convert one completed WorkflowStepOutcome into a plain,
+        JSON-safe dict.
+
+        Every entry in _PausedWorkflow.completed_outcomes is always
+        StepStatus.COMPLETED with a real, successful tool_result (see
+        _run_from's own construction: completed_outcomes is always
+        outcomes[:-1], sliced before the WAITING entry, and
+        WorkflowResult.__post_init__ already enforces that only the
+        final outcome may be non-COMPLETED) - so this never needs to
+        represent a WAITING/FAILED shape.
+
+        Args:
+            outcome: The completed step outcome to convert.
+
+        Returns:
+            A plain dict naming the step number and a plain view of its
+            ToolResult.
+        """
+        result = outcome.tool_result
+        assert result is not None  # guaranteed by WorkflowStepOutcome's own validation
+        return {
+            "step_number": outcome.step.number,
+            "tool_result": {
+                "tool_name": result.tool_name,
+                "success": result.success,
+                "output": result.output,
+                "error": result.error,
+                "requires_confirmation": result.requires_confirmation,
+                "blocked": result.blocked,
+                "metadata": dict(result.metadata),
+            },
+        }
+
+    def reload_paused(
+        self,
+        *,
+        registry: ToolRegistry,
+        security_manager: SecurityManager | None = None,
+    ) -> WorkflowReloadReport:
+        """Reload every persisted paused workflow, revalidating each
+        against live code - and against this engine's own already-
+        reloaded ApprovalManager - before treating it as genuinely paused
+        again (Phase 27, Batch 2).
+
+        This is never called from __init__ - a freshly constructed
+        WorkflowEngine always starts with an empty _paused, exactly as
+        before this feature existed. A caller (the composition root,
+        main.py) calls this explicitly, once, AFTER
+        ApprovalManager.reload_pending() has already run on the same
+        `approvals` instance this engine was constructed with - this
+        engine's own revalidation depends on that having already
+        happened (see _try_reconstruct_paused_workflow's own has_pending
+        check).
+
+        A persisted row is only ever treated as resumable if ALL of the
+        following hold:
+            - its plan_steps_json/completed_outcomes_json/
+              resolved_tool_input_json decoded without error
+              (PausedWorkflowRecord.corrupt is False);
+            - its schema_version is one this code recognises;
+            - it has at least one plan step, and waiting_step_index is a
+              valid index into it;
+            - its linked approval (request_id) is still genuinely
+              pending in self._approvals, right now - this reuses
+              ApprovalManager.reload_pending()'s own outcome rather than
+              re-deriving approval validity here, so a linked approval
+              that was itself invalidated (missing, decided, expired, or
+              corrupt) always fails this workflow closed too;
+            - the waiting step's tool_name (if any) is still registered
+              in `registry`, and classifying its fixed action_for()
+              output (or the step's own stored action text, if it has no
+              tool) still returns SecurityTier.YELLOW right now;
+            - every completed-outcome entry refers to a real step number
+              in the reconstructed plan, and its stored ToolResult shape
+              is well-formed enough to reconstruct a real
+              WorkflowStepOutcome (which re-validates the combination
+              itself via its own __post_init__).
+
+        A row that fails any check is never resumed and never executed:
+        it is removed from the durable paused-workflow table, a terminal
+        "workflow_stopped"-shaped entry is recorded in workflow history
+        (via the existing, unchanged record_transition() event
+        vocabulary), and its own linked pending-approval row - if still
+        present - is invalidated too via
+        ApprovalManager.invalidate_pending(), so that approval's mere
+        existence can never imply this workflow is still resumable.
+        Nothing here ever auto-approves, auto-resumes, or auto-executes
+        anything; a row that passes every check is only ever added back
+        to self._paused - a caller must still explicitly approve its
+        linked approval and call resume(), exactly as for a live pause.
+
+        Args:
+            registry: The live ToolRegistry to check the waiting step's
+                tool_name against. Should already have every tool
+                registered.
+            security_manager: The live SecurityManager to reclassify the
+                waiting step's action against. Defaults to a new
+                SecurityManager() if omitted (it is stateless, so this is
+                equivalent to sharing the application's own instance).
+
+        Returns:
+            A WorkflowReloadReport summarising how many paused workflows
+            were resumed versus invalidated.
+        """
+        if self._paused_store is None:
+            return WorkflowReloadReport(resumed=0, invalidated=0)
+
+        security = security_manager or SecurityManager()
+        resumed = 0
+        invalidated = 0
+
+        for record in self._paused_store.list_all():
+            paused, rejection = self._try_reconstruct_paused_workflow(
+                record, registry=registry, security=security
+            )
+            if paused is None:
+                self._invalidate_reloaded_paused_workflow(
+                    record, reason=rejection or "Could not be revalidated."
+                )
+                invalidated += 1
+                continue
+
+            self._paused[record.workflow_id] = paused
+            resumed += 1
+
+        return WorkflowReloadReport(resumed=resumed, invalidated=invalidated)
+
+    def _try_reconstruct_paused_workflow(
+        self,
+        record: PausedWorkflowRecord,
+        *,
+        registry: ToolRegistry,
+        security: SecurityManager,
+    ) -> tuple[_PausedWorkflow | None, str | None]:
+        """Attempt to safely reconstruct one persisted paused-workflow row.
+
+        Args:
+            record: The persisted row being considered for reload.
+            registry: The live ToolRegistry to resolve the waiting step's
+                tool_name against.
+            security: The live SecurityManager to reclassify against.
+
+        Returns:
+            A tuple of (paused, None) if the row passes every check and
+            was reconstructed successfully, or (None, reason) if it must
+            fail closed.
+        """
+        if record.corrupt:
+            return None, "Persisted state could not be parsed."
+        if record.schema_version != SCHEMA_VERSION:
+            return None, (
+                "Persisted state uses an unsupported schema version "
+                f"({record.schema_version})."
+            )
+        if not record.plan_steps:
+            return None, "Persisted state has no plan steps."
+        if not (0 <= record.waiting_step_index < len(record.plan_steps)):
+            return None, "Persisted waiting_step_index is out of range."
+
+        # The linked approval must itself already be genuinely pending -
+        # this reuses ApprovalManager.reload_pending()'s own outcome
+        # directly rather than re-implementing approval validation here.
+        # main.py's own composition order guarantees reload_pending() has
+        # already run on this exact `self._approvals` instance.
+        if not self._approvals.has_pending(record.request_id):
+            return None, (
+                f"Linked approval '{record.request_id}' is not pending "
+                "(missing, already decided, or invalidated on its own "
+                "reload)."
+            )
+
+        try:
+            steps = tuple(
+                PlanStep(
+                    number=s["number"],
+                    description=s["description"],
+                    action=s["action"],
+                    tier=SecurityTier(s["tier"]),
+                    reason=s["reason"],
+                    tool_name=s.get("tool_name"),
+                    tool_input=dict(s.get("tool_input") or {}),
+                    input_from_previous_step=bool(
+                        s.get("input_from_previous_step", False)
+                    ),
+                )
+                for s in record.plan_steps
+            )
+            plan = Plan(user_request=record.user_request or "", steps=steps)
+        except (KeyError, TypeError, ValueError) as exc:
+            return None, f"Persisted plan could not be reconstructed: {exc}"
+
+        waiting_step = plan.steps[record.waiting_step_index]
+        tool = (
+            registry.get_tool(waiting_step.tool_name)
+            if waiting_step.tool_name is not None
+            else None
+        )
+        if waiting_step.tool_name is not None and tool is None:
+            return None, f"Tool '{waiting_step.tool_name}' is no longer registered."
+
+        classify_text = (
+            tool.action_for(
+                ToolRequest(
+                    tool_name=waiting_step.tool_name,
+                    input_data=dict(record.resolved_tool_input or {}),
+                )
+            )
+            if tool is not None
+            else waiting_step.action
+        )
+        try:
+            decision = security.classify_action(classify_text)
+        except ValueError:
+            return None, "Persisted waiting-step action is empty and cannot be reclassified."
+        if decision.tier is not SecurityTier.YELLOW:
+            return None, (
+                "Waiting step no longer classifies as YELLOW "
+                f"(now {decision.tier.value})."
+            )
+
+        try:
+            completed_outcomes = []
+            for entry in record.completed_outcomes or []:
+                step_number = entry["step_number"]
+                matching = [s for s in steps if s.number == step_number]
+                if not matching:
+                    return None, (
+                        f"Completed-outcome step {step_number} not found "
+                        "in the reconstructed plan."
+                    )
+                tr = entry["tool_result"]
+                tool_result = ToolResult(
+                    tool_name=tr["tool_name"],
+                    success=tr["success"],
+                    output=tr.get("output", ""),
+                    error=tr.get("error"),
+                    requires_confirmation=tr.get("requires_confirmation", False),
+                    blocked=tr.get("blocked", False),
+                    metadata=dict(tr.get("metadata") or {}),
+                )
+                completed_outcomes.append(
+                    WorkflowStepOutcome(
+                        step=matching[0],
+                        status=StepStatus.COMPLETED,
+                        tool_result=tool_result,
+                    )
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            return None, f"Persisted completed outcomes could not be reconstructed: {exc}"
+
+        paused = _PausedWorkflow(
+            plan=plan,
+            session_id=record.session_id,
+            completed_outcomes=tuple(completed_outcomes),
+            waiting_step_index=record.waiting_step_index,
+            resolved_tool_input=dict(record.resolved_tool_input or {}),
+            request_id=record.request_id,
+        )
+        return paused, None
+
+    def _invalidate_reloaded_paused_workflow(
+        self, record: PausedWorkflowRecord, *, reason: str
+    ) -> None:
+        """Remove a persisted paused-workflow row that failed reload
+        revalidation, record an honest terminal entry in workflow
+        history, and invalidate its linked pending approval too - so
+        neither the workflow nor its approval can ever imply this is
+        still resumable.
+
+        Args:
+            record: The persisted row that failed revalidation.
+            reason: The human-readable rejection reason.
+        """
+        if self._paused_store is not None:
+            self._paused_store.delete(record.workflow_id)
+
+        self._approvals.invalidate_pending(
+            record.request_id,
+            reason=f"paused workflow could not be resumed after restart: {reason}",
+        )
+
+        self._emit(
+            _EVENT_WORKFLOW_STOPPED,
+            EventOutcome.FAILURE,
+            detail=(
+                f"workflow_id={record.workflow_id} "
+                f"stopped_at_reload reason={reason}"
+            ),
+            session_id=record.session_id,
+        )
+        self._record_history(
+            _EVENT_WORKFLOW_STOPPED,
+            workflow_id=record.workflow_id,
+            session_id=record.session_id,
+            detail=f"Could not be resumed after restart: {reason}",
+        )
