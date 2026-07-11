@@ -2,24 +2,26 @@
 schedule_store.py
 
 Data-access layer for durable, Nathan-configured web-search-summary
-schedules (Phase 21, Batch 1).
+schedules (Phase 21, Batch 1: create/list/get/enable/disable/count;
+Batch 2: claim_due - the atomic due/claim guard).
 
 Responsibilities:
     - Create a new schedule, validating its query and time_of_day.
     - List schedules, get a single schedule by id.
-    - Enable/disable a schedule (the only supported mutations).
+    - Enable/disable a schedule.
     - Count schedules.
+    - Atomically claim a due, enabled schedule for the current local
+      calendar date, so at most one runner process can ever run a given
+      schedule on a given local day (Phase 21, Batch 2).
 
 Does NOT:
-    - Determine whether a schedule is currently due, or claim/run one -
-      that logic (claim_due and the atomic guard it requires) is added
-      in a later batch, once it can be verified against real SQLite
-      concurrency. Batch 1 never writes to last_run_at at all.
-    - Perform a web search, call AI, or write an Inbox entry.
+    - Perform a web search, call AI, or write an Inbox entry - claim_due
+      only updates last_run_at; the scheduled web-search-summary
+      execution itself lives in scheduling/scheduled_summary_runner.py,
+      which has no dependency on this store beyond calling claim_due()
+      and reading the claimed schedule's query.
     - Provide any update/delete/rename/reschedule method. Disabling is
-      the only way to stop a schedule from running - there is no
-      "delete" or "edit the query" operation, keeping the write surface
-      exactly as narrow as Batch 1 needs.
+      the only way to stop a schedule from running.
     - Store or interpret anything beyond the literal query text and a
       fixed HH:MM time - no command string, no action type, no
       recurrence expression.
@@ -34,8 +36,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
+from sqlalchemy import func, or_, update
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
 
@@ -237,6 +240,77 @@ class ScheduleStore:
         """
         with session_scope(self._session_factory) as db:
             return db.query(ScheduleEntry).count()
+
+    def claim_due(
+        self, schedule_id: int, *, now: datetime | None = None
+    ) -> bool:
+        """Atomically claim a schedule if it is currently due.
+
+        A schedule is due when: it is enabled, its time_of_day (in host
+        local time) has been reached, and it has not already run today
+        (in host local time). This means a schedule catches up later the
+        same day if the runner was not active exactly at time_of_day,
+        never backfills across multiple missed days, and runs at most
+        once per local calendar date.
+
+        This is the one and only method that writes to last_run_at. It
+        is implemented as a single atomic SQL UPDATE ... WHERE ...
+        statement - never a Python read-then-write - so that two
+        independent runner processes racing to claim the same schedule
+        at the same moment cannot both succeed: SQLite's own
+        transactional atomicity (WAL-enabled since Phase 19) guarantees
+        at most one UPDATE actually matches a row, and this method
+        reports success by checking the statement's own rowcount, not by
+        re-reading afterward.
+
+        Empirically verified directly against a real SQLAlchemy/SQLite
+        engine during Phase 21 planning: SQLite's date()/time() functions
+        with the 'localtime' modifier correctly treat a naive, UTC-in-
+        substance stored value (this project's own established
+        convention - see docs/phase_19_implementation_plan.md section 8)
+        as UTC and convert it to host local time, because SQLite's own
+        documented default is to assume a timezone-less value is UTC
+        exactly when a 'localtime' conversion is explicitly requested -
+        which is exactly what this project's own storage convention
+        already produces. No new column or format is needed.
+
+        Args:
+            now: The UTC-aware instant to treat as "the current moment".
+                Defaults to datetime.now(timezone.utc). Exposed as a
+                parameter specifically so tests can simulate a particular
+                moment without depending on the real system clock or
+                mocking global time.
+
+        Returns:
+            True if this call successfully claimed the schedule (it was
+            enabled, due, and not already run today) - the caller should
+            proceed to run it. False if the schedule does not exist, is
+            disabled, is not yet due, or was already claimed today
+            (by this call or a concurrent one) - the caller must not run
+            it.
+        """
+        reference = now if now is not None else datetime.now(timezone.utc)
+        local_now = reference.astimezone()
+        local_hhmm = local_now.strftime("%H:%M")
+        local_date = local_now.date().isoformat()
+
+        with session_scope(self._session_factory) as db:
+            stmt = (
+                update(ScheduleEntry)
+                .where(ScheduleEntry.id == schedule_id)
+                .where(ScheduleEntry.enabled.is_(True))
+                .where(ScheduleEntry.time_of_day <= local_hhmm)
+                .where(
+                    or_(
+                        ScheduleEntry.last_run_at.is_(None),
+                        func.date(ScheduleEntry.last_run_at, "localtime")
+                        < local_date,
+                    )
+                )
+                .values(last_run_at=reference)
+            )
+            result = db.execute(stmt)
+            return result.rowcount == 1
 
     @staticmethod
     def _clamp_limit(value: int) -> int:

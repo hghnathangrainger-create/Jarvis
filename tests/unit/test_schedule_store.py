@@ -277,18 +277,30 @@ def test_schedules_persist_across_database_reopens(tmp_path: Path) -> None:
 
 
 def test_store_public_api_is_exactly_the_approved_methods() -> None:
-    """Batch 1's approved API: create, list_all, get, enable, disable,
-    count. No claim_due yet (added in a later batch), and no
-    update/delete/rename/reschedule/run-now method of any kind."""
+    """The full approved API (Batch 1: create, list_all, get, enable,
+    disable, count; Batch 2: claim_due - the atomic due/claim guard).
+    No update/delete/rename/reschedule/run-now method of any kind."""
     public_methods = {
         name
         for name in dir(ScheduleStore)
         if not name.startswith("_") and callable(getattr(ScheduleStore, name))
     }
-    assert public_methods == {"create", "list_all", "get", "enable", "disable", "count"}
+    assert public_methods == {
+        "create",
+        "list_all",
+        "get",
+        "enable",
+        "disable",
+        "count",
+        "claim_due",
+    }
 
 
 def test_store_exposes_no_delete_edit_reschedule_or_run_now_method() -> None:
+    """Deliberately NOT "run" or "claim" in this forbidden list: claim_due
+    is the one approved Batch 2 addition (the atomic due/claim guard,
+    not a generic run-now/execute method), and "run" as a bare substring
+    would also false-positive against it."""
     forbidden_name_fragments = (
         "delete",
         "remove",
@@ -296,8 +308,6 @@ def test_store_exposes_no_delete_edit_reschedule_or_run_now_method() -> None:
         "update_query",
         "reschedule",
         "run_now",
-        "run",
-        "claim",
         "execute",
     )
     public_methods = [
@@ -310,7 +320,7 @@ def test_store_exposes_no_delete_edit_reschedule_or_run_now_method() -> None:
         for fragment in forbidden_name_fragments:
             assert fragment not in lowered, (
                 f"ScheduleStore.{method_name} looks like a mutation/execution "
-                "method beyond the approved Batch 1 API"
+                "method beyond the approved API"
             )
 
 
