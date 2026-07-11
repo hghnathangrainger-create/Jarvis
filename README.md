@@ -838,6 +838,25 @@ Any AI workflow step; any save-summary-to-file automation; any new workflow temp
 
 ---
 
+## Phase 31 — Configuration Inspection Tool (complete)
+
+One small, GREEN, read-only tool answering a real, already-documented troubleshooting need: what is Jarvis currently configured with? See `docs/phase_31_completion_report.md` for the full write-up.
+
+### Configuration command
+
+```
+show config
+show settings
+```
+
+Both are the same fixed, no-argument request. Reports every non-secret `Settings` field in full — AI model, AI max tokens, whether AI reasoning is enabled, database path, log level, approval timeout, and debug mode. The one secret field, the Anthropic API key, is reported only as `set` or `not set` — never its value, never a masked or partial form, never its length, and never a hash or fingerprint of it. The tool reads only the already-loaded `Settings` object; it never re-reads `.env`/`os.environ` itself, never mutates anything, never uses a subprocess, and never calls AI or the web.
+
+### What is deliberately NOT included in Phase 31
+
+No subprocess usage of any kind (this remains true of every tool in this codebase); no git/repo-health reporting; no test-running; no configuration mutation or `.env` editing; no new dependency; no secret display in any form, partial or otherwise; webpage fetching; file delete; Core service; goals/projects/tasks; new workflow templates; dashboard, scheduler, or Inbox changes; automated summary-saving; or notifications.
+
+---
+
 ## Example Session
 
 ```

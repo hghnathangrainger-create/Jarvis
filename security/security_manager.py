@@ -216,6 +216,10 @@ _RULES: tuple[_Rule, ...] = (
     # other command family's own tailored reason rather than the
     # generic fallback wording.
     _Rule("search files", SecurityTier.GREEN, "Searching files by name or content is read-only and safe."),
+    # Phase 31: configuration status. Already covered by the generic
+    # "show" rule below without this entry, but listed explicitly for
+    # the same reason as "search files" above.
+    _Rule("show configuration", SecurityTier.GREEN, "Showing configuration status is read-only and never exposes secret values."),
     _Rule("search", SecurityTier.GREEN, "Searching is read-only and safe."),
     _Rule("read file", SecurityTier.GREEN, "Reading a file does not change anything."),
     _Rule("read", SecurityTier.GREEN, "Reading does not change anything."),

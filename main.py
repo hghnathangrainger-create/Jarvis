@@ -54,6 +54,7 @@ from storage.database import (
 from scheduling.schedule_store import ScheduleStore
 from tools.builtin import (
     ApprovalHistoryTool,
+    ConfigTool,
     EchoTool,
     FileAppendTool,
     FileCopyTool,
@@ -139,6 +140,10 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry = ToolRegistry()
     registry.register_tool(EchoTool())
     registry.register_tool(InfoTool())
+    # ConfigTool (Phase 31) reads only the already-loaded `settings`
+    # object above - it never calls load_settings() again, never reads
+    # .env/os.environ directly, and never exposes the API key's value.
+    registry.register_tool(ConfigTool(settings))
     registry.register_tool(MemoryTool(memory))
     registry.register_tool(MemoryUpdateTool(memory))
     registry.register_tool(MemoryForgetTool(memory))

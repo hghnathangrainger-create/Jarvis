@@ -89,6 +89,7 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 |---|---|
 | `echo <text>`, `repeat <text>`, `say <text>` | Repeats the text back. |
 | `system info`, `version`, `about`, `who are you` | Shows basic Jarvis system information. |
+| `show config`, `show settings` | Shows current configuration status (AI model, timeouts, database path, etc.). Never shows the API key's value — only whether it's set. |
 
 ### Memory commands
 
@@ -385,6 +386,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 | The dashboard shows stale data | It refreshes every 5 seconds automatically, or click "Refresh now". |
 | An approval seems to have "timed out" | YELLOW approvals expire after `APPROVAL_TIMEOUT_SECONDS` (default 60s) if you don't answer — nothing runs; just retry the command. |
 | A command isn't recognized | Check §6 for the exact required phrasing — Jarvis matches fixed, deterministic grammar, not free-form natural language. |
+| Not sure what Jarvis is currently configured with | Run `show config` (or `show settings`) — it reports the AI model, whether AI reasoning is enabled, the approval timeout, log level, database path, and debug mode, plus whether the API key is set. It never shows the key's actual value. |
 
 ---
 

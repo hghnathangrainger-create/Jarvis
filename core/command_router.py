@@ -115,6 +115,15 @@ _WORKFLOW_HISTORY_EXACT: dict[str, str] = {
 #: workflow literally named "history".
 _WORKFLOW_DETAIL_PREFIXES: tuple[str, ...] = ("show workflow", "view workflow")
 
+#: Exact, read-only configuration-status commands (Phase 31), matched
+#: case-insensitively after stripping surrounding whitespace, mirroring
+#: _APPROVAL_HISTORY_EXACT/_WORKFLOW_HISTORY_EXACT above. Both route to
+#: the same ConfigTool - "config" and "settings" are two names for the
+#: same fixed, no-argument request, never two different operations.
+#: Neither collides with any existing prefix: no other command anywhere
+#: in this module contains "config" or "settings" as a substring.
+_CONFIG_EXACT_COMMANDS: frozenset[str] = frozenset({"show config", "show settings"})
+
 #: The one exact, mandatory prefix for Jarvis's first external-network
 #: command (Phase 16). Routes to the read-only WebSearchTool. Checked
 #: directly against every other exact/prefix table in this module during
@@ -525,6 +534,15 @@ class CommandRouter:
             lowered.startswith(prefix) for prefix in _WORKFLOW_DETAIL_PREFIXES
         ) and self._registry.has_tool("workflow_history"):
             return "workflow_history"
+
+        # Configuration status (Phase 31): read-only and GREEN. Exact
+        # phrases only, checked here alongside the other simple "show X"
+        # history commands above - never a prefix/substring match, so
+        # this can never be confused with any other command family.
+        if lowered.strip() in _CONFIG_EXACT_COMMANDS and self._registry.has_tool(
+            "config"
+        ):
+            return "config"
 
         # Web search (Phase 16): Jarvis's first external-network command.
         # Read-only and GREEN - see WebSearchTool.action_for()'s own fixed,

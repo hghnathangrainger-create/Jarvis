@@ -24,6 +24,10 @@ Read-only tools (GREEN) - these never change any state:
     - ScheduleListTool: lists Nathan's configured web-search-summary
       schedules (Phase 21). Read-only; never creates, enables, disables,
       claims, or runs anything.
+    - ConfigTool: reports Jarvis's current configuration status (Phase
+      31). Reads only the already-loaded Settings object - never .env
+      or os.environ directly, never mutates anything. The API key is
+      reported only as "set"/"not set", never its value.
 
 Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
@@ -55,6 +59,7 @@ deletes, and never touches directories.
 from __future__ import annotations
 from tools.builtin.approval_history_tool import ApprovalHistoryTool
 
+from tools.builtin.config_tool import ConfigTool
 from tools.builtin.echo_tool import EchoTool
 from tools.builtin.file_append_tool import FileAppendTool
 from tools.builtin.file_copy_tool import FileCopyTool
@@ -76,6 +81,7 @@ from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 
 __all__ = [
     "ApprovalHistoryTool",
+    "ConfigTool",
     "EchoTool",
     "InfoTool",
     "MemoryTool",
