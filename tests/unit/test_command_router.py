@@ -49,6 +49,7 @@ _ALL_TOOL_NAMES = (
     "memory_forget",
     "file_list",
     "file_read",
+    "file_search",
     "file_create",
     "file_append",
     "approval_history",
@@ -112,6 +113,107 @@ def test_match_file_create(router: CommandRouter) -> None:
 
 def test_match_file_append(router: CommandRouter) -> None:
     assert router.match("append to file a.txt hello") == "file_append"
+
+
+# --- match(): file search (Phase 24) -------------------------------------------
+
+
+def test_match_file_search_name_prefixes(router: CommandRouter) -> None:
+    assert router.match("search files for readme") == "file_search"
+    assert router.match("find files named readme") == "file_search"
+
+
+def test_match_file_search_content_prefixes(router: CommandRouter) -> None:
+    assert router.match("find files containing jarvis") == "file_search"
+    assert router.match("search files containing jarvis") == "file_search"
+
+
+def test_match_file_search_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("SEARCH FILES FOR readme") == "file_search"
+    assert router.match("FIND FILES CONTAINING jarvis") == "file_search"
+
+
+def test_match_file_search_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "file_search":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("search files for readme") is None
+    assert router.match("find files containing jarvis") is None
+
+
+def test_match_file_search_does_not_collide_with_web_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search the web for readme") == "web_search"
+    assert router.match("search files for readme") == "file_search"
+
+
+def test_match_file_search_does_not_collide_with_memory_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search memories for readme") == "memory"
+    assert router.match("search files for readme") == "file_search"
+
+
+def test_match_file_search_does_not_collide_with_schedule_commands(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match("schedule web search summary for readme at 08:00")
+        == "schedule_create"
+    )
+    assert router.match("search files for readme") == "file_search"
+
+
+def test_match_file_search_does_not_collide_with_file_list_or_read(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list files") == "file_list"
+    assert router.match("read file README.md") == "file_read"
+    assert router.match("search files for readme") == "file_search"
+
+
+def test_match_file_search_query_containing_memory_word_is_not_misrouted(
+    router: CommandRouter,
+) -> None:
+    """A query that happens to contain a substring like "memory" (e.g. a
+    filename) must still route to file_search, never to the generic
+    memory keyword fallback - this is exactly why file_search is checked
+    before the memory-keyword block in match()'s own dispatch order."""
+    assert router.match("search files for memory.py") == "file_search"
+    assert router.match("find files containing remember") == "file_search"
+
+
+def test_match_ambiguous_search_files_text_without_grammar_is_none(
+    router: CommandRouter,
+) -> None:
+    """Free-form text that merely mentions "search"/"files" without the
+    exact required grammar must not match file_search at all - this
+    router is deterministic, not natural-language."""
+    assert router.match("please search my files") is None
+    assert router.match("files search readme") is None
+
+
+def test_build_input_file_search_name_extracts_query(router: CommandRouter) -> None:
+    assert router.build_input("file_search", "search files for readme") == {
+        "mode": "name",
+        "query": "readme",
+    }
+    assert router.build_input("file_search", "find files named readme") == {
+        "mode": "name",
+        "query": "readme",
+    }
+
+
+def test_build_input_file_search_content_extracts_query(router: CommandRouter) -> None:
+    assert router.build_input(
+        "file_search", "find files containing jarvis ai"
+    ) == {"mode": "content", "query": "jarvis ai"}
+    assert router.build_input(
+        "file_search", "search files containing jarvis ai"
+    ) == {"mode": "content", "query": "jarvis ai"}
 
 
 # --- match(): workflow aliases -------------------------------------------------

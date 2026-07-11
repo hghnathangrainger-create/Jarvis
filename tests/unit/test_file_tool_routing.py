@@ -2,12 +2,13 @@
 test_file_tool_routing.py
 
 Unit tests for registering and routing the read-only file tools in the live
-Core path (Phase 3 Step 7).
+Core path (Phase 3 Step 7; extended Phase 24 with FileSearchTool).
 
-These tests confirm that FileListTool and FileReadTool are reachable through
-the orchestrator: natural commands like "list files in ." and "read file
-README.md" route to the right tool, extract the path, and run as GREEN actions
-without approval. RED still blocks and the YELLOW approval flow still works.
+These tests confirm that FileListTool, FileReadTool, and FileSearchTool
+are reachable through the orchestrator: natural commands like "list files
+in .", "read file README.md", and "search files for readme" route to the
+right tool, extract the right input, and run as GREEN actions without
+approval. RED still blocks and the YELLOW approval flow still works.
 
 Run with:
     pytest tests/unit/test_file_tool_routing.py
@@ -28,6 +29,7 @@ from tools.builtin import (
     EchoTool,
     FileListTool,
     FileReadTool,
+    FileSearchTool,
     InfoTool,
     MemoryTool,
 )
@@ -56,6 +58,7 @@ def registry() -> ToolRegistry:
     reg.register_tool(MemoryTool(_FakeMemory()))  # type: ignore[arg-type]
     reg.register_tool(FileListTool())
     reg.register_tool(FileReadTool())
+    reg.register_tool(FileSearchTool())
     return reg
 
 
@@ -164,6 +167,60 @@ def test_show_file_routes_to_file_read(
     assert "Hello from README" in response.message
 
 
+# --- Routing to file_search (Phase 24) ----------------------------------------
+
+
+def test_search_files_for_name_finds_matching_file(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    response = orchestrator.handle_request("search files for README")
+    assert response.success is True
+    assert response.approval_request is None
+    assert "README.md" in response.message
+
+
+def test_find_files_named_routes_to_file_search(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    response = orchestrator.handle_request("find files named notes")
+    assert response.success is True
+    assert "notes.txt" in response.message
+
+
+def test_find_files_containing_finds_matching_content(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    response = orchestrator.handle_request("find files containing Hello from README")
+    assert response.success is True
+    assert "README.md" in response.message
+
+
+def test_search_files_containing_routes_to_file_search(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    response = orchestrator.handle_request("search files containing some notes here")
+    assert response.success is True
+    assert "notes.txt" in response.message
+
+
+def test_file_search_no_match_is_honest_and_still_success(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    response = orchestrator.handle_request("search files for zzz_nonexistent_zzz")
+    assert response.success is True
+    assert "No matching files found" in response.message
+
+
+def test_file_search_never_modifies_the_workspace(
+    orchestrator: JarvisOrchestrator, workspace: Path
+) -> None:
+    before = (workspace / "README.md").read_bytes()
+    response = orchestrator.handle_request("find files containing README")
+    after = (workspace / "README.md").read_bytes()
+    assert response.success is True
+    assert before == after
+
+
 # --- File commands are GREEN -------------------------------------------------
 
 
@@ -172,7 +229,8 @@ def test_file_commands_run_without_approval(
 ) -> None:
     listing = orchestrator.handle_request("list files in .")
     reading = orchestrator.handle_request("read file README.md")
-    for response in (listing, reading):
+    searching = orchestrator.handle_request("search files for README")
+    for response in (listing, reading, searching):
         assert response.requires_confirmation is False
         assert response.approval_request is None
 

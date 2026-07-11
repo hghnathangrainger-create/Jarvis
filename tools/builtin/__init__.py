@@ -9,6 +9,10 @@ Read-only tools (GREEN) - these never change any state:
     - MemoryTool: lists or searches stored memories.
     - FileListTool: lists files and folders in a directory (Phase 2).
     - FileReadTool: reads the contents of a text file (Phase 2).
+    - FileSearchTool: searches for files by name or by content within a
+      directory tree (Phase 24). Never returns full file content -
+      names/paths and, for content matches, a short context snippet
+      only.
     - ApprovalHistoryTool: shows durable approval history (Phase 6).
     - WorkflowHistoryTool: shows durable workflow lifecycle history
       (Durable Workflow Lifecycle Foundation - a prerequisite turn, not a
@@ -46,6 +50,7 @@ from tools.builtin.file_append_tool import FileAppendTool
 from tools.builtin.file_create_tool import FileCreateTool
 from tools.builtin.file_list_tool import FileListTool
 from tools.builtin.file_read_tool import FileReadTool
+from tools.builtin.file_search_tool import FileSearchTool
 from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
@@ -64,6 +69,7 @@ __all__ = [
     "MemoryTool",
     "FileListTool",
     "FileReadTool",
+    "FileSearchTool",
     "FileCreateTool",
     "FileAppendTool",
     "MemoryUpdateTool",

@@ -696,6 +696,31 @@ Desktop/OS toast notifications, a system tray icon, email notifications, phone/p
 
 ---
 
+## Phase 24 — File Search Tool (complete)
+
+The one concrete gap in the existing file-command family: `list files`/`read file` require already knowing a path, with no way to find one. Phase 24 adds a single, narrow, read-only tool that searches for files by name or by content across a directory tree — nothing else changes. See `docs/phase_24_completion_report.md` for the full closure write-up.
+
+### File search commands
+
+```
+search files for jarvis
+find files named jarvis
+find files containing scheduled_web_search_summary
+search files containing scheduled_web_search_summary
+```
+
+The first two are aliases for a **name** search (a case-insensitive substring match against each file's own name); the last two are aliases for a **content** search (a case-insensitive substring match against each file's text, showing a short one-line context snippet per match — never the full file). Both always search recursively from the project directory; there is no `in <directory>` clause. Both are GREEN and run immediately, with no approval required — exactly as read-only as `list files`/`read file`.
+
+### Safety note: read-only, bounded, and inert by construction
+
+`FileSearchTool.action_for()` always returns the same fixed string ("search files") regardless of the search mode or the user's own query text, so its Security Manager classification can never vary with input. Results are capped (50 by default, configurable up to 500, mirroring `FileListTool`'s own limit convention) and a fixed set of noisy directories (`.git`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, virtual environments, `node_modules`, build/cache folders) is never descended into. A content search skips binary files (sniffed the same way `FileReadTool` already does), skips files over 2MB, and treats any unreadable/undecodable file as "no match" rather than an error — one bad file can never abort the rest of a search. No file is ever created, modified, moved, renamed, or deleted by this tool; it calls no AI, no web search, and no subprocess.
+
+### What is deliberately NOT included in Phase 24
+
+File move, copy, rename, or delete of any kind; local application launching; a content-indexing database or cache; semantic or fuzzy AI-assisted search; a background crawler; any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; and Research Agent or voice/phone work. This is exactly one small, read-only addition to the existing file-command family — not a file manager, not an indexing service, and not a step toward file-write automation.
+
+---
+
 ## Example Session
 
 ```

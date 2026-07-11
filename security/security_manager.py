@@ -205,6 +205,11 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("search memories", SecurityTier.GREEN, "Searching memory is read-only and safe."),
     _Rule("search memory", SecurityTier.GREEN, "Searching memory is read-only and safe."),
     _Rule("list memories", SecurityTier.GREEN, "Listing memory is read-only and safe."),
+    # Phase 24: file search. Already covered by the generic "search" rule
+    # below without this entry, but listed explicitly, matching every
+    # other command family's own tailored reason rather than the
+    # generic fallback wording.
+    _Rule("search files", SecurityTier.GREEN, "Searching files by name or content is read-only and safe."),
     _Rule("search", SecurityTier.GREEN, "Searching is read-only and safe."),
     _Rule("read file", SecurityTier.GREEN, "Reading a file does not change anything."),
     _Rule("read", SecurityTier.GREEN, "Reading does not change anything."),

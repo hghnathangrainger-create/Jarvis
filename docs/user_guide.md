@@ -11,7 +11,7 @@ Everything described here was verified directly against the current codebase whi
 Jarvis is a personal, local, single-user AI assistant with three cooperating processes and a durable SQLite database. Today it can:
 
 - Remember and recall notes (memory), with optional AI-generated summaries of them.
-- Read, list, create, and append to files on your machine.
+- Read, list, search (by name or content), create, and append to files on your machine.
 - Search the web (snippets/metadata only) and optionally get an AI summary of the results.
 - Run a small number of daily, fixed-time scheduled web-search summaries automatically, saved to a durable Inbox.
 - Show you, at CLI startup, a short heads-up if new scheduled results have shown up since you last checked.
@@ -111,9 +111,13 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 |---|---|---|
 | `list files`, `list files in <path>`, `show files in <path>`, `list directory`, `list dir` | Lists a directory. | GREEN |
 | `read file <path>`, `show file <path>`, `open file <path>`, `cat file <path>` | Shows a file's contents. | GREEN |
+| `search files for <pattern>` / `find files named <pattern>` | Finds files whose **name** contains `<pattern>` (case-insensitive), recursively from the project directory. | GREEN |
+| `find files containing <text>` / `search files containing <text>` | Finds files whose **content** contains `<text>` (case-insensitive), recursively from the project directory. Shows a short one-line context snippet per match — never the full file. | GREEN |
 | `create file <path> with <content>` | Creates a new file. `with <content>` is optional (creates an empty file). | YELLOW |
 | `append <content> to file <path>` or `append to file <path> <content>` | Appends text to an existing file. | YELLOW |
 | `summarise file <path>` / `summarize file <path>` | Reads a file and produces an AI summary of it (advisory only; requires `AI_REASONING_ENABLED`). | GREEN (reading), summary is advisory |
+
+**File search notes (Phase 24):** always searches from the project directory (there is no "in `<directory>`" clause); results are capped at 50 by default (a message tells you if more may exist); noisy directories are always skipped (`.git`, `__pycache__`, `.pytest_cache`, virtual environments, `node_modules`, build/cache folders); binary and unreadable files are silently skipped rather than causing an error; content search never shows more than a short snippet of the matching line — never a full file's contents. File search cannot move, rename, copy, or delete anything — it is exactly as read-only as `list files`/`read file`.
 
 ### Web search commands
 
@@ -244,6 +248,20 @@ you> remember this and show it back: buy milk on Friday
 you> show memories
 you> search memories for milk
 ```
+
+**Find a file without knowing its exact path:**
+```
+you> search files for readme
+jarvis> [OK] File search (name) for 'readme' in .:
+          README.md
+          docs/user_guide.md
+
+you> find files containing scheduled_web_search_summary
+jarvis> [OK] File search (content) for 'scheduled_web_search_summary' in .:
+          storage/models.py: source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+          ...
+```
+No approval needed — file search is read-only, exactly like `list files`/`read file`.
 
 **Create a file (requires your approval):**
 ```

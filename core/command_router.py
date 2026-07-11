@@ -149,6 +149,28 @@ _FILE_APPEND_PREFIXES: tuple[str, ...] = (
 )
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 
+#: Leading phrases for a filename search (Phase 24). Two aliases are
+#: recognised for the same operation, mirroring the project's existing
+#: "summarise"/"summarize" alias convention. Checked directly against
+#: every existing prefix table: neither phrase starts with, or is a
+#: prefix of, _WEB_SEARCH_PREFIXES ("search the web for" - diverges at
+#: the 3rd word, "files" vs "the"), _MEMORY_QUERY_SUMMARY_PREFIXES
+#: ("summarise memories about"), any _FILE_*_PREFIXES tuple, or any
+#: _SCHEDULE_*_PREFIXES tuple - confirmed by direct string comparison,
+#: not assumed.
+_FILE_SEARCH_NAME_PREFIXES: tuple[str, ...] = ("search files for", "find files named")
+
+#: Leading phrases for a file-content search (Phase 24) - a distinct
+#: operation from _FILE_SEARCH_NAME_PREFIXES above, never confused with
+#: it: "search files for"/"find files named" vs "find files containing"/
+#: "search files containing" diverge at the word immediately following
+#: "files", so a single _file_prefix() lookup against each tuple
+#: separately can never misroute one as the other.
+_FILE_SEARCH_CONTENT_PREFIXES: tuple[str, ...] = (
+    "find files containing",
+    "search files containing",
+)
+
 #: Leading phrases that indicate an explicit file-summary request (Phase 8,
 #: Batch 2). The text after the phrase is treated as the file path. This is
 #: deliberately a separate, narrow match from the file_read prefixes above:
@@ -514,6 +536,16 @@ class CommandRouter:
             self._registry.has_tool("file_append")
         ):
             return "file_append"
+
+        # File search (Phase 24): read-only, GREEN. Checked here, before
+        # the generic memory-keyword fallback below, so a query that
+        # happens to contain a substring like "memory" (e.g. "search
+        # files for memory.py") is never misrouted to the memory tool.
+        if (
+            self._file_prefix(lowered, _FILE_SEARCH_NAME_PREFIXES) is not None
+            or self._file_prefix(lowered, _FILE_SEARCH_CONTENT_PREFIXES) is not None
+        ) and self._registry.has_tool("file_search"):
+            return "file_search"
 
         # Bulk forget is dangerous (RED). Route it to the forget tool so its
         # action string ("forget all memories") is classified RED by the
@@ -1093,6 +1125,10 @@ class CommandRouter:
             path, content = self._extract_append_input(text)
             return {"path": path, "content": content}
 
+        if tool_name == "file_search":
+            mode, query = self._extract_file_search_input(text)
+            return {"mode": mode, "query": query}
+
         if tool_name == "schedule_create":
             query, time_of_day = self._extract_schedule_create_input(text)
             return {"query": query, "time_of_day": time_of_day}
@@ -1218,6 +1254,41 @@ class CommandRouter:
         query = remainder[:idx].strip()
         time_of_day = remainder[idx + len(separator) :].strip()
         return query, time_of_day
+
+    @classmethod
+    def _extract_file_search_input(cls, text: str) -> tuple[str, str]:
+        """Extract (mode, query) from a file-search command.
+
+        Checks the name-search prefixes before the content-search
+        prefixes; since the two prefix tuples never overlap (they
+        diverge at the word immediately following "files" - "for"/
+        "named" vs "containing" - see _FILE_SEARCH_NAME_PREFIXES/
+        _FILE_SEARCH_CONTENT_PREFIXES's own docstrings), checking order
+        between them does not affect correctness.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (mode, query), where mode is "name" or "content".
+            query may be empty, in which case FileSearchTool itself
+            reports the problem - this method never validates, it only
+            splits text. This method is only ever called after match()
+            has already confirmed one of the two prefix tuples matched,
+            so the defensive "name", "" fallback below is never actually
+            reached in practice.
+        """
+        lowered = text.casefold()
+
+        name_prefix = cls._file_prefix(lowered, _FILE_SEARCH_NAME_PREFIXES)
+        if name_prefix is not None:
+            return "name", text[len(name_prefix) :].strip()
+
+        content_prefix = cls._file_prefix(lowered, _FILE_SEARCH_CONTENT_PREFIXES)
+        if content_prefix is not None:
+            return "content", text[len(content_prefix) :].strip()
+
+        return "name", ""  # defensive; unreachable via match()'s own gating
 
     @classmethod
     def _extract_append_input(cls, text: str) -> tuple[str, str]:
