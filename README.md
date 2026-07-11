@@ -766,6 +766,24 @@ File delete of any kind (a distinct, separately-scoped future decision); directo
 
 ---
 
+## Phase 27 — Durable Pending-Approval / Resumable Workflow State (complete)
+
+Closes a real, previously-silent gap: `ApprovalManager`'s pending approvals and `WorkflowEngine`'s paused workflows lived only in memory — a crash or restart between "prompt shown" and "answer given" silently discarded them, with no record anywhere that anything had been lost. Phase 27 makes both durable, safely. See `docs/phase_27_implementation_plan.md` and `docs/phase_27_completion_report.md` for the full design and closure write-up.
+
+### What survives a restart now
+
+A pending YELLOW approval (for a plain tool call, or for the step a paused workflow is waiting on) and a paused workflow's own plan/progress are both persisted to two new, narrowly-scoped SQLite tables — `pending_approval_state` and `paused_workflow_state` — the moment they're created, and removed the moment they're decided, resumed, or found invalid. Neither table is a history log: `approval_history`/`workflow_history` remain completely unchanged, still permanently hold no tool name, tool input, or serialized plan, and are never read from or written to by this feature.
+
+### Fail-closed by design — reload never executes anything by itself
+
+On every startup, `main.py` reloads any persisted pending approval, then any persisted paused workflow (in that order — a paused workflow's own resumability depends on its linked approval having already been reloaded). Every row is independently re-validated against **live** code before being treated as pending/paused again: the tool must still be registered, its action must still classify YELLOW under a fresh `SecurityManager.classify_action()` call, the JSON must parse, the schema version must be recognised, and the row must not be older than the configured approval timeout. A paused workflow additionally requires its own linked approval to have survived that same check. Anything that fails is removed and recorded as an honest, terminal entry in the existing approval/workflow history — never silently dropped, never executed, never auto-approved, and never auto-resumed. Reload only ever makes a row available for you to explicitly approve or decline, exactly as if the process had never restarted.
+
+### What is deliberately NOT included in Phase 27
+
+No new tools, no file delete, no dashboard write actions or command box, no Core service or multi-client architecture, no approval scheduling, no auto-approval or auto-denial, no changes to Security Manager classification rules, no changes to any file tool's behaviour, no webpage fetching, no notifications, no goals/projects/tasks, and no new workflow templates. Day-to-day use is unchanged unless a restart happens to land exactly mid-approval or mid-workflow-pause — which previously lost that state silently, and now either resumes it safely or tells you honestly that it couldn't.
+
+---
+
 ## Example Session
 
 ```

@@ -234,6 +234,8 @@ Every action Jarvis can take is classified into exactly one of three tiers befor
 
 Anything that doesn't match a known safe pattern defaults to **YELLOW**, never GREEN — Jarvis is conservative by default.
 
+**Pending approvals and paused workflows can survive a restart (Phase 27).** If Jarvis is closed or crashes while a YELLOW action is awaiting your decision, or while a multi-step workflow is paused waiting for one, that state is durably saved and re-checked the next time Jarvis starts. Day-to-day this is invisible — you won't see or need to do anything differently. What changes is only what happens if a restart lands exactly mid-approval: previously that pending state vanished silently with no record; now it is either safely restored (still requiring your explicit approval before anything runs — reload never auto-approves or auto-executes) or, if it can no longer be safely resumed (its tool no longer exists, its action's risk level has changed, the saved data is corrupt, or too much time has passed), it is honestly closed out and recorded in the same approval/workflow history you can already review — never silently dropped, and never run without your say-so.
+
 **Other important safety facts, all true today:**
 - AI-generated suggestions are always advisory — they're shown to you as information, never automatically acted on.
 - Stored text (memories, Inbox entries, file content) is never treated as an instruction Jarvis follows — it's always just data.
@@ -347,7 +349,6 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 - No arbitrary command scheduling — the scheduler runs exactly one hard-coded action type (search + AI summary + save).
 - No workflow-triggering, YELLOW, or RED scheduled actions — only the one GREEN scheduled action exists; scheduling itself (create/enable/disable) is YELLOW, but what runs is always GREEN.
 - No goals/projects/tasks system.
-- No durable, restart-surviving pending approvals or paused workflows — both currently live only in memory while the CLI process is running; if the CLI is closed with something pending, that pending state is gone (though its history, if any was recorded, remains durable and viewable).
 - No file delete command — `create`/`append`/`copy`/`move`/`rename` are the only file-write operations; deleting a file remains a future, separately-scoped decision.
 
 ---
@@ -372,7 +373,6 @@ These are real candidates that have been evaluated in past architectural reviews
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
 - Webpage fetch/read safety foundation, and eventual webpage summarization / Research Agent work built on it.
 - A Core service allowing an interactive dashboard, voice, or phone client.
-- Durable (restart-surviving) pending approvals and paused workflows.
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
