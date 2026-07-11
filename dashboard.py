@@ -6,8 +6,9 @@ Entry point for the local, read-only Jarvis dashboard (Phase 19).
 Responsibilities:
     - Load configuration and open the same configured SQLite-backed
       Jarvis database main.py uses, independently.
-    - Construct MemoryManager, ApprovalHistoryStore, and
-      WorkflowHistoryStore, and compose them into a DashboardReadModel.
+    - Construct MemoryManager, ApprovalHistoryStore,
+      WorkflowHistoryStore, and InboxStore, and compose them into a
+      DashboardReadModel.
     - Start the tkinter/ttk dashboard window.
 
 Does NOT:
@@ -32,6 +33,7 @@ import tkinter as tk
 from approval.approval_history_store import ApprovalHistoryStore
 from config.settings import load_settings
 from dashboard.read_model import DashboardReadModel
+from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from storage.database import (
@@ -62,7 +64,8 @@ def build_read_model() -> DashboardReadModel:
     memory = MemoryManager(EpisodicMemoryStore(session_factory))
     approvals = ApprovalHistoryStore(session_factory)
     workflows = WorkflowHistoryStore(session_factory)
-    return DashboardReadModel(memory, approvals, workflows)
+    inbox = InboxStore(session_factory)
+    return DashboardReadModel(memory, approvals, workflows, inbox)
 
 
 def main() -> None:

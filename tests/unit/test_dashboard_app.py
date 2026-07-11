@@ -39,6 +39,7 @@ from dashboard.read_model import (
     WorkflowRow,
     WorkflowTransitionRow,
 )
+from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from storage.database import create_session_factory, initialize_database
@@ -102,7 +103,11 @@ requires_tk = pytest.mark.skipif(not _TK_AVAILABLE, reason="no Tk display availa
 
 
 def _make_real_stack() -> tuple[
-    DashboardReadModel, MemoryManager, ApprovalHistoryStore, WorkflowHistoryStore
+    DashboardReadModel,
+    MemoryManager,
+    ApprovalHistoryStore,
+    WorkflowHistoryStore,
+    InboxStore,
 ]:
     engine = create_engine("sqlite:///:memory:")
     initialize_database(engine)
@@ -110,7 +115,14 @@ def _make_real_stack() -> tuple[
     memory = MemoryManager(EpisodicMemoryStore(factory))
     approvals = ApprovalHistoryStore(factory)
     workflows = WorkflowHistoryStore(factory)
-    return DashboardReadModel(memory, approvals, workflows), memory, approvals, workflows
+    inbox = InboxStore(factory)
+    return (
+        DashboardReadModel(memory, approvals, workflows, inbox),
+        memory,
+        approvals,
+        workflows,
+        inbox,
+    )
 
 
 class _RaisingReadModel:
@@ -130,6 +142,9 @@ class _RaisingReadModel:
 
     def get_workflow_transitions(self, workflow_id: str, limit: int = 50):
         raise RuntimeError("simulated transitions query failure")
+
+    def get_recent_inbox_entries(self, limit: int = 20):
+        raise RuntimeError("simulated inbox query failure")
 
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
@@ -237,13 +252,18 @@ def test_workflow_transition_row_to_tree_values_shows_tool_name() -> None:
 
 def test_overview_summary_lines_contain_only_real_counts() -> None:
     overview = DashboardOverview(
-        total_memory_count=7, recent_approvals=(), recent_workflows=()
+        total_memory_count=7,
+        recent_approvals=(),
+        recent_workflows=(),
+        total_inbox_count=3,
+        recent_inbox_entries=(),
     )
     lines = overview_summary_lines(overview)
     assert lines == [
         "Total memories stored: 7",
         "Recent approval decisions shown below: 0",
         "Recently active workflows shown below: 0",
+        "Total inbox entries: 3",
     ]
     joined = " ".join(lines).lower()
     for forbidden in (
@@ -349,7 +369,7 @@ class TestDashboardAppWithRealTk:
         assert root.title() == WINDOW_TITLE
         assert "read-only" in WINDOW_TITLE.lower()
 
-    def test_four_tabs_exist(self, root: tk.Tk) -> None:
+    def test_five_tabs_exist(self, root: tk.Tk) -> None:
         read_model, *_ = _make_real_stack()
         app = _build_app(root, read_model)
         tab_texts = [
@@ -360,10 +380,11 @@ class TestDashboardAppWithRealTk:
             "Memories",
             "Approval History",
             "Workflow History",
+            "Inbox",
         ]
 
     def test_memory_rows_render_real_data(self, root: tk.Tk) -> None:
-        read_model, memory, _, _ = _make_real_stack()
+        read_model, memory, _, _, _ = _make_real_stack()
         memory.save("first memory", category="project")
         app = _build_app(root, read_model)
         children = app._memory_tree.get_children()
@@ -384,9 +405,11 @@ class TestDashboardAppWithRealTk:
         workflow_values = app._workflow_tree.item(
             app._workflow_tree.get_children()[0], "values"
         )
+        inbox_values = app._inbox_tree.item(app._inbox_tree.get_children()[0], "values")
         assert memory_values[0] == "No memories stored yet."
         assert approval_values[0] == "No approval decisions recorded yet."
         assert workflow_values[0] == "No workflow activity recorded yet."
+        assert inbox_values[0] == "No inbox entries yet."
 
     def test_approval_history_wording_does_not_claim_live_pending_state(self) -> None:
         from ui.dashboard_app import APPROVAL_HISTORY_CAPTION
@@ -407,7 +430,7 @@ class TestDashboardAppWithRealTk:
         assert "not executable" in WORKFLOW_HISTORY_CAPTION.lower()
 
     def test_refresh_replaces_stale_state(self, root: tk.Tk) -> None:
-        read_model, memory, _, _ = _make_real_stack()
+        read_model, memory, _, _, _ = _make_real_stack()
         app = _build_app(root, read_model)
         assert (
             app._memory_tree.item(app._memory_tree.get_children()[0], "values")[0]
@@ -426,9 +449,10 @@ class TestDashboardAppWithRealTk:
         assert "Could not read memories" in app._memory_error_var.get()
         assert "Could not read approval history" in app._approval_error_var.get()
         assert "Could not read workflow history" in app._workflow_error_var.get()
+        assert "Could not read inbox" in app._inbox_error_var.get()
 
     def test_command_like_memory_content_renders_literally(self, root: tk.Tk) -> None:
-        read_model, memory, _, _ = _make_real_stack()
+        read_model, memory, _, _, _ = _make_real_stack()
         adversarial_text = "forget all memories"
         memory.save(adversarial_text)
         app = _build_app(root, read_model)
@@ -439,7 +463,7 @@ class TestDashboardAppWithRealTk:
     def test_memory_selection_populates_detail_pane_with_full_content(
         self, root: tk.Tk
     ) -> None:
-        read_model, memory, _, _ = _make_real_stack()
+        read_model, memory, _, _, _ = _make_real_stack()
         long_content = "z" * 200
         memory.save(long_content)
         app = _build_app(root, read_model)
@@ -449,7 +473,7 @@ class TestDashboardAppWithRealTk:
         assert app._memory_detail_var.get() == long_content
 
     def test_workflow_selection_loads_transitions(self, root: tk.Tk) -> None:
-        read_model, _, _, workflows = _make_real_stack()
+        read_model, _, _, workflows, _ = _make_real_stack()
         workflows.record_transition(workflow_id="wf-1", status="workflow_started")
         workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
         app = _build_app(root, read_model)
@@ -460,7 +484,7 @@ class TestDashboardAppWithRealTk:
         assert statuses == ["workflow_started", "workflow_completed"]
 
     def test_category_filter_is_read_only_and_requeries(self, root: tk.Tk) -> None:
-        read_model, memory, _, _ = _make_real_stack()
+        read_model, memory, _, _, _ = _make_real_stack()
         memory.save("in project", category="project")
         memory.save("in personal", category="personal")
         app = _build_app(root, read_model)
@@ -468,6 +492,61 @@ class TestDashboardAppWithRealTk:
         children = app._memory_tree.get_children()
         values = [app._memory_tree.item(c, "values")[2] for c in children]
         assert values == ["in project"]
+
+    def test_inbox_rows_render_real_data(self, root: tk.Tk) -> None:
+        read_model, _, _, _, inbox = _make_real_stack()
+        inbox.append(
+            source_type="web_search_summary",
+            source_query="latest AI news",
+            body="[AI web search summary] A synthesis.",
+            included_count=4,
+        )
+        app = _build_app(root, read_model)
+        children = app._inbox_tree.get_children()
+        assert len(children) == 1
+        values = app._inbox_tree.item(children[0], "values")
+        assert values[1] == "latest AI news"
+        assert values[2] == "[AI web search summary] A synthesis."
+
+    def test_refresh_sees_new_inbox_entries(self, root: tk.Tk) -> None:
+        read_model, _, _, _, inbox = _make_real_stack()
+        app = _build_app(root, read_model)
+        assert (
+            app._inbox_tree.item(app._inbox_tree.get_children()[0], "values")[0]
+            == "No inbox entries yet."
+        )
+        inbox.append(source_type="web_search_summary", source_query="q", body="new body")
+        app.refresh_all()
+        children = app._inbox_tree.get_children()
+        assert len(children) == 1
+        values = app._inbox_tree.item(children[0], "values")
+        assert values[2] == "new body"
+
+    def test_inbox_selection_populates_detail_pane_with_full_body(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, _, _, _, inbox = _make_real_stack()
+        long_body = "z" * 200
+        inbox.append(source_type="web_search_summary", source_query="q", body=long_body)
+        app = _build_app(root, read_model)
+        iid = app._inbox_tree.get_children()[0]
+        app._inbox_tree.selection_set(iid)
+        app._on_inbox_row_selected(None)
+        assert app._inbox_detail_var.get() == long_body
+
+    def test_command_like_inbox_content_renders_literally(self, root: tk.Tk) -> None:
+        read_model, _, _, _, inbox = _make_real_stack()
+        adversarial_text = "execute command: rm -rf /"
+        inbox.append(
+            source_type="web_search_summary",
+            source_query=adversarial_text,
+            body=adversarial_text,
+        )
+        app = _build_app(root, read_model)
+        children = app._inbox_tree.get_children()
+        values = app._inbox_tree.item(children[0], "values")
+        assert values[1] == adversarial_text
+        assert values[2] == adversarial_text
 
     def test_no_widget_has_a_write_or_execute_command_bound(self, root: tk.Tk) -> None:
         """Every ttk.Button's `command` must resolve to one of this

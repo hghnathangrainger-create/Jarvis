@@ -1,34 +1,34 @@
 """
 read_model.py
 
-Narrow, read-only composition layer over Jarvis's three existing durable
-stores, for the local dashboard (Phase 19).
+Narrow, read-only composition layer over Jarvis's durable stores, for the
+local dashboard (Phase 19; extended Phase 20 with the inbox).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
       display (MemoryRow, ApprovalRow, WorkflowRow, WorkflowTransitionRow,
-      DashboardOverview).
+      InboxRow, DashboardOverview).
     - Define DashboardReadModel, which composes MemoryManager,
-      ApprovalHistoryStore, and WorkflowHistoryStore's existing public
-      read methods into those view models.
+      ApprovalHistoryStore, WorkflowHistoryStore, and InboxStore's
+      existing public read methods into those view models.
 
 Does NOT:
     - Call any write/mutating method on any store (save, update_content,
       update_category, forget, record_request, record_decision,
-      record_timeout, record_transition).
+      record_timeout, record_transition, append).
     - Parse CLI output, tool output, or any formatted display string.
     - Import CommandRouter, ToolExecutor, the live ApprovalManager,
       WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
     - Implement a generic CQRS, event-sourcing, or reporting framework.
-      This module exists only to compose the three approved dashboard
-      domains; it has exactly as many methods as the dashboard's four
+      This module exists only to compose the four approved dashboard
+      domains; it has exactly as many methods as the dashboard's five
       views need, no more.
-    - Truncate, summarise, or otherwise rewrite memory content using AI.
-      Preview truncation here is a fixed, deterministic character cut,
-      never a semantic rewrite.
+    - Truncate, summarise, or otherwise rewrite memory or inbox content
+      using AI. Preview truncation here is a fixed, deterministic
+      character cut, never a semantic rewrite.
 
-This is the sole persistence-facing layer the dashboard UI (Batch 2)
-depends on - the UI never imports a store directly.
+This is the sole persistence-facing layer the dashboard UI depends on -
+the UI never imports a store directly.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from approval.approval_history_store import ApprovalHistoryStore
+from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
 from workflow.workflow_history_store import WorkflowHistoryStore
 
@@ -185,6 +186,38 @@ class WorkflowRow:
 
 
 @dataclass(frozen=True, slots=True)
+class InboxRow:
+    """A single saved inbox entry, shaped for dashboard display.
+
+    This describes a durably saved copy of an AI-generated output that
+    was already shown to Nathan once (Phase 20) - today, exactly one
+    producer: a "summarise web search for <query>" advisory summary.
+    `full_body` already includes its fixed disclosure label, stored
+    verbatim from the original response - this row never re-derives or
+    reconstructs anything.
+
+    Attributes:
+        id: The entry's primary key.
+        source_query: The literal query this entry is about.
+        preview: A deterministically truncated preview of the body, for
+            list-view display (same convention as MemoryRow.preview).
+        full_body: The untruncated, exact final text Nathan was shown,
+            for a detail view shown only after explicit row selection.
+        included_count: The number of search results the summary was
+            based on, if known.
+        created_at: UTC-in-substance timestamp of when this entry was
+            saved.
+    """
+
+    id: int
+    source_query: str
+    preview: str
+    full_body: str
+    included_count: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardOverview:
     """The small, at-a-glance summary shown on the Overview tab.
 
@@ -198,25 +231,30 @@ class DashboardOverview:
             history, not live pending state - see ApprovalRow).
         recent_workflows: The most recently active distinct workflows
             (durable history, not live runtime state - see WorkflowRow).
+        total_inbox_count: The total number of saved inbox entries.
+        recent_inbox_entries: The most recent saved inbox entries.
     """
 
     total_memory_count: int
     recent_approvals: tuple[ApprovalRow, ...]
     recent_workflows: tuple[WorkflowRow, ...]
+    total_inbox_count: int
+    recent_inbox_entries: tuple[InboxRow, ...]
 
 
 class DashboardReadModel:
-    """Composes the three approved durable stores into dashboard view models.
+    """Composes the four approved durable stores into dashboard view models.
 
-    This is the only object the dashboard UI (Batch 2) depends on for
-    data. It holds no write path of any kind - every method here calls
-    only an existing read method already present on MemoryManager,
-    ApprovalHistoryStore, or WorkflowHistoryStore.
+    This is the only object the dashboard UI depends on for data. It
+    holds no write path of any kind - every method here calls only an
+    existing read method already present on MemoryManager,
+    ApprovalHistoryStore, WorkflowHistoryStore, or InboxStore.
 
     Attributes:
         _memory: The memory manager to read from.
         _approvals: The approval history store to read from.
         _workflows: The workflow history store to read from.
+        _inbox: The inbox store to read from.
     """
 
     def __init__(
@@ -224,25 +262,29 @@ class DashboardReadModel:
         memory: MemoryManager,
         approvals: ApprovalHistoryStore,
         workflows: WorkflowHistoryStore,
+        inbox: InboxStore,
     ) -> None:
-        """Initialise the read model with the three approved durable stores.
+        """Initialise the read model with the four approved durable stores.
 
         Args:
             memory: The memory manager to read from.
             approvals: The approval history store to read from.
             workflows: The workflow history store to read from.
+            inbox: The inbox store to read from.
         """
         self._memory = memory
         self._approvals = approvals
         self._workflows = workflows
+        self._inbox = inbox
 
     def get_overview(self) -> DashboardOverview:
         """Return the small, real-data-only Overview summary.
 
         Returns:
             A DashboardOverview built from the total memory count, the
-            most recent approval history rows, and the most recently
-            active distinct workflows.
+            most recent approval history rows, the most recently active
+            distinct workflows, the total inbox count, and the most
+            recent inbox entries.
         """
         return DashboardOverview(
             total_memory_count=self._memory.count(),
@@ -251,6 +293,10 @@ class DashboardReadModel:
             ),
             recent_workflows=tuple(
                 self.get_recent_workflows(limit=_OVERVIEW_PREVIEW_LIMIT)
+            ),
+            total_inbox_count=self._inbox.count(),
+            recent_inbox_entries=tuple(
+                self.get_recent_inbox_entries(limit=_OVERVIEW_PREVIEW_LIMIT)
             ),
         )
 
@@ -355,6 +401,28 @@ class DashboardReadModel:
                 step_total=record.step_total,
                 tool_name=record.tool_name,
                 detail=record.detail,
+                created_at=record.created_at,
+            )
+            for record in records
+        ]
+
+    def get_recent_inbox_entries(self, limit: int = 20) -> list[InboxRow]:
+        """Return the most recent saved inbox entries as InboxRows.
+
+        Args:
+            limit: Maximum number of entries to return.
+
+        Returns:
+            A list of InboxRow objects, newest first.
+        """
+        records = self._inbox.list_recent(limit=limit)
+        return [
+            InboxRow(
+                id=record.id,
+                source_query=record.source_query,
+                preview=_truncate_preview(record.body),
+                full_body=record.body,
+                included_count=record.included_count,
                 created_at=record.created_at,
             )
             for record in records

@@ -59,6 +59,7 @@ from ai.web_search_ingestion import ingest_web_search_for_ai
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
+from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -425,6 +426,7 @@ class JarvisOrchestrator:
         memory_manager: MemoryManager | None = None,
         workflow_engine: WorkflowEngine | None = None,
         web_search_provider: WebSearchProvider | None = None,
+        inbox_store: InboxStore | None = None,
         logger: _AuditLogger | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
@@ -471,6 +473,16 @@ class JarvisOrchestrator:
                 requests fail honestly instead. Every existing
                 construction site that omits this parameter continues to
                 behave exactly as before Phase 18.
+            inbox_store: An optional InboxStore, used only to save a
+                durable copy of a successfully-produced "summarise web
+                search for <query>" advisory summary (Phase 20, Batch 2).
+                Purely additive: the write happens only after the exact
+                same success JarvisResponse this method already returns
+                has been built, and a failed write never changes,
+                delays, or blocks that response. No new instance is ever
+                created here if omitted; when omitted, the command
+                behaves exactly as it did before Phase 20 - no entry is
+                ever saved, but nothing else changes.
             logger: Optional audit logger for the unexpected-action verdict.
                 The verdict is always evaluated; when logger is omitted,
                 nothing is recorded, matching how approval_manager behaves
@@ -486,6 +498,7 @@ class JarvisOrchestrator:
         self._memory_manager = memory_manager
         self._workflow_engine = workflow_engine
         self._web_search_provider = web_search_provider
+        self._inbox_store = inbox_store
         self._logger = logger
 
     @property
@@ -1353,7 +1366,123 @@ class JarvisOrchestrator:
         # every other request's advisory suggestion already goes through.
         self._evaluate_unexpected_actions(response, result, session_id)
 
+        # Phase 20, Batch 2: purely additive. This is the one and only
+        # place in the codebase that writes to the inbox - reached only
+        # after the exact success `response` above (identical to what the
+        # CLI will return) already exists. A failed save is caught inside
+        # _save_web_search_summary_to_inbox itself and never changes,
+        # delays, or replaces `response`.
+        self._save_web_search_summary_to_inbox(
+            query=query,
+            body=response.message,
+            included_count=ingestion.included_count,
+            session_id=session_id,
+        )
+
         return response
+
+    def _save_web_search_summary_to_inbox(
+        self,
+        *,
+        query: str,
+        body: str,
+        included_count: int | None,
+        session_id: int | None,
+    ) -> None:
+        """Save one durable inbox entry for a successful web-search summary.
+
+        Phase 20, Batch 2. Called only once, from the single success
+        path of _handle_web_search_summary_request, after the exact
+        JarvisResponse the CLI will return already exists. `body` is that
+        response's own message text verbatim - disclosure label included,
+        suggested-steps appendage included if present - never
+        reconstructed separately, so the saved entry is always exactly
+        what Nathan was shown.
+
+        When self._inbox_store is None (the default, matching every
+        other optional collaborator on this class), this is a no-op: no
+        entry is saved, and the command behaves exactly as it did before
+        Phase 20.
+
+        A raising InboxStore.append() call is caught here and audited
+        (never re-raised) - a failed save must never change, delay, or
+        replace the response this method's caller has already built and
+        is about to return.
+
+        Args:
+            query: The literal search query this entry is about, stored
+                verbatim (Phase 20's own reasoned query-privacy decision -
+                this is a user-facing store only Nathan ever reads, not
+                the audit log).
+            body: The exact final response text to store.
+            included_count: The number of search results the summary was
+                based on, if known.
+            session_id: Optional session identifier for the audit trail.
+        """
+        if self._inbox_store is None:
+            return
+
+        try:
+            self._inbox_store.append(
+                source_type="web_search_summary",
+                source_query=query,
+                body=body,
+                included_count=included_count,
+                session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a save failure must never break the response
+            self._audit_inbox_entry_creation(
+                outcome=EventOutcome.FAILURE,
+                detail=f"source_type=web_search_summary error={exc}",
+                session_id=session_id,
+            )
+            return
+
+        self._audit_inbox_entry_creation(
+            outcome=EventOutcome.SUCCESS,
+            detail="source_type=web_search_summary",
+            session_id=session_id,
+        )
+
+    def _audit_inbox_entry_creation(
+        self, *, outcome: EventOutcome, detail: str, session_id: int | None
+    ) -> None:
+        """Emit one inbox_entry_created/inbox_entry_creation_failed audit
+        event, if a logger is configured.
+
+        A new, narrow, genuinely distinct event (Phase 20, Batch 2) -
+        never a duplication of _audit_web_search_summary_acquisition
+        (which records the earlier *search* step's included/omitted
+        counts) or AIRouter's own ai_call event (which records the
+        *reasoning* step). This records only the separate *persistence*
+        step's outcome. Never embeds the raw query or body text in the
+        audit detail - only the source_type and, on failure, the
+        exception message.
+
+        When no logger is configured, this is a no-op. A raising logger
+        is caught here so a failing audit event can never break the
+        already-decided inbox-save outcome.
+
+        Args:
+            outcome: SUCCESS if the entry was saved, FAILURE otherwise.
+            detail: A short, content-free detail string.
+            session_id: Optional session identifier for the audit trail.
+        """
+        if self._logger is None:
+            return
+
+        try:
+            self._logger.emit(
+                source=_SOURCE,
+                action_type="inbox_entry_created"
+                if outcome is EventOutcome.SUCCESS
+                else "inbox_entry_creation_failed",
+                outcome=outcome,
+                detail=detail,
+                session_id=session_id,
+            )
+        except Exception:  # noqa: BLE001 - observability must never break execution
+            pass
 
     def _audit_web_search_summary_acquisition(
         self, ingestion: object, session_id: int | None

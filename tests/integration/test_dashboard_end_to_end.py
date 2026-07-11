@@ -45,6 +45,7 @@ from approval.approval_history_store import ApprovalHistoryStore
 from approval.approval_manager import ApprovalManager
 from core.command_router import CommandRouter
 from dashboard.read_model import DashboardReadModel
+from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from security.security_manager import SecurityManager
@@ -140,8 +141,9 @@ def _build_stack(db_path: Path):
     memory = MemoryManager(EpisodicMemoryStore(factory))
     approvals = ApprovalHistoryStore(factory)
     workflows = WorkflowHistoryStore(factory)
-    read_model = DashboardReadModel(memory, approvals, workflows)
-    return engine, memory, approvals, workflows, read_model
+    inbox = InboxStore(factory)
+    read_model = DashboardReadModel(memory, approvals, workflows, inbox)
+    return engine, memory, approvals, workflows, inbox, read_model
 
 
 # --- full pipeline: real data -> read model -> view models -> UI render state --
@@ -151,7 +153,7 @@ def test_full_pipeline_real_data_to_rendered_ui_state(
     tmp_path: Path, root: tk.Tk
 ) -> None:
     db_path = tmp_path / "dashboard_e2e.db"
-    _engine, memory, approvals, workflows, read_model = _build_stack(db_path)
+    _engine, memory, approvals, workflows, _inbox, read_model = _build_stack(db_path)
 
     memory.save("buy milk", category="general")
     approvals.record_request(
@@ -187,7 +189,7 @@ def test_refresh_sees_a_committed_memory_write_from_another_session(
     tmp_path: Path, root: tk.Tk
 ) -> None:
     db_path = tmp_path / "dashboard_refresh_memory.db"
-    _engine, memory, _approvals, _workflows, read_model = _build_stack(db_path)
+    _engine, memory, _approvals, _workflows, _inbox, read_model = _build_stack(db_path)
 
     app = DashboardApp(root, read_model)
     assert (
@@ -206,7 +208,7 @@ def test_refresh_sees_a_committed_approval_history_write(
     tmp_path: Path, root: tk.Tk
 ) -> None:
     db_path = tmp_path / "dashboard_refresh_approval.db"
-    _engine, _memory, approvals, _workflows, read_model = _build_stack(db_path)
+    _engine, _memory, approvals, _workflows, _inbox, read_model = _build_stack(db_path)
 
     app = DashboardApp(root, read_model)
     approvals.record_request(
@@ -224,7 +226,7 @@ def test_refresh_sees_a_committed_workflow_transition(
     tmp_path: Path, root: tk.Tk
 ) -> None:
     db_path = tmp_path / "dashboard_refresh_workflow.db"
-    _engine, _memory, _approvals, workflows, read_model = _build_stack(db_path)
+    _engine, _memory, _approvals, workflows, _inbox, read_model = _build_stack(db_path)
 
     app = DashboardApp(root, read_model)
     workflows.record_transition(workflow_id="wf-new", status="workflow_started")
@@ -244,11 +246,11 @@ def test_write_via_one_connection_is_read_via_a_second_independent_connection(
     database file."""
     db_path = tmp_path / "concurrency_check.db"
 
-    writer_engine, writer_memory, _, _, _ = _build_stack(db_path)
+    writer_engine, writer_memory, _, _, _, _ = _build_stack(db_path)
     writer_memory.save("from the writer connection")
     writer_engine.dispose()
 
-    reader_engine, reader_memory, _, _, reader_read_model = _build_stack(db_path)
+    reader_engine, reader_memory, _, _, _, reader_read_model = _build_stack(db_path)
     try:
         rows = reader_read_model.get_recent_memories()
         assert rows[0].full_content == "from the writer connection"
@@ -261,7 +263,7 @@ def test_repeated_open_read_close_cycles_do_not_accumulate_errors(
 ) -> None:
     db_path = tmp_path / "repeated_cycles.db"
 
-    setup_engine, setup_memory, _, _, _ = _build_stack(db_path)
+    setup_engine, setup_memory, _, _, _, _ = _build_stack(db_path)
     setup_memory.save("seed row")
     setup_engine.dispose()
 
@@ -272,7 +274,8 @@ def test_repeated_open_read_close_cycles_do_not_accumulate_errors(
         memory = MemoryManager(EpisodicMemoryStore(factory))
         approvals = ApprovalHistoryStore(factory)
         workflows = WorkflowHistoryStore(factory)
-        read_model = DashboardReadModel(memory, approvals, workflows)
+        inbox = InboxStore(factory)
+        read_model = DashboardReadModel(memory, approvals, workflows, inbox)
 
         rows = read_model.get_recent_memories()
         assert len(rows) == 1
@@ -313,7 +316,7 @@ def test_sequential_write_then_read_interleaving_succeeds_repeatedly(
     behaviour (docs/phase_19_implementation_plan.md, section 8), not
     something re-derived here."""
     db_path = tmp_path / "sequential_interleave.db"
-    writer_engine, writer_memory, writer_approvals, writer_workflows, _ = (
+    writer_engine, writer_memory, writer_approvals, writer_workflows, _, _ = (
         _build_stack(db_path)
     )
 
@@ -329,7 +332,7 @@ def test_sequential_write_then_read_interleaving_succeeds_repeatedly(
             workflow_id=f"wf-{i}", status="workflow_started"
         )
 
-        reader_engine, _, _, _, reader_read_model = _build_stack(db_path)
+        reader_engine, _, _, _, _, reader_read_model = _build_stack(db_path)
         try:
             memories = reader_read_model.get_recent_memories(limit=1)
             assert memories[0].full_content == f"memory {i}"
@@ -358,7 +361,7 @@ def test_dashboard_cannot_affect_a_real_live_jarvis_runtime_sharing_the_process(
     no tool_call audit event, no pending approval created, no workflow
     started, no subprocess launched, no URL opened."""
     db_path = tmp_path / "adversarial_shared_process.db"
-    _engine, memory, approvals, workflows, read_model = _build_stack(db_path)
+    _engine, memory, approvals, workflows, _inbox, read_model = _build_stack(db_path)
 
     adversarial_snippets = [
         "delete all files",

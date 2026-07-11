@@ -2,13 +2,13 @@
 dashboard_app.py
 
 tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
-(Phase 19).
+(Phase 19; extended Phase 20, Batch 2 with the Inbox tab).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
-      WorkflowRow, WorkflowTransitionRow, DashboardOverview) into a
-      four-tab ttk.Notebook window: Overview, Memories, Approval History,
-      Workflow History.
+      WorkflowRow, WorkflowTransitionRow, InboxRow, DashboardOverview)
+      into a five-tab ttk.Notebook window: Overview, Memories, Approval
+      History, Workflow History, Inbox.
     - Refresh displayed state manually (a button) and periodically (a
       fixed-interval Tk `.after()` tick calling the same refresh code) -
       never claimed as "live" or "real-time".
@@ -43,6 +43,7 @@ from dashboard.read_model import (
     ApprovalRow,
     DashboardOverview,
     DashboardReadModel,
+    InboxRow,
     MemoryRow,
     WorkflowRow,
     WorkflowTransitionRow,
@@ -61,6 +62,7 @@ _MEMORY_EMPTY_STATE = "No memories stored yet."
 _APPROVAL_EMPTY_STATE = "No approval decisions recorded yet."
 _WORKFLOW_EMPTY_STATE = "No workflow activity recorded yet."
 _TRANSITIONS_EMPTY_STATE = "Select a workflow above to see its recorded history."
+_INBOX_EMPTY_STATE = "No inbox entries yet."
 
 #: Careful, durable-history-only wording (authorizing instructions, items
 #: 15-16): never implies a durable "pending" row is a live, currently
@@ -77,6 +79,16 @@ WORKFLOW_HISTORY_CAPTION = (
     "after a restart."
 )
 MEMORY_DETAIL_PLACEHOLDER = "Select a memory above to see its full content."
+
+#: Read-only wording for the Inbox tab (Phase 20): a saved entry is a
+#: durable copy of something already shown once - never a live queue,
+#: never re-runnable, never editable.
+INBOX_CAPTION = (
+    "Saved advisory summaries - durable copies of what Jarvis already "
+    "showed you once. Read-only: nothing here can be re-run, edited, or "
+    "sent anywhere."
+)
+INBOX_DETAIL_PLACEHOLDER = "Select an inbox entry above to see its full saved text."
 
 
 def format_timestamp(value: datetime) -> str:
@@ -167,6 +179,11 @@ def workflow_transition_row_to_tree_values(
     )
 
 
+def inbox_row_to_tree_values(row: InboxRow) -> tuple[str, str, str]:
+    """Map an InboxRow to the exact tuple shown in the Inbox Treeview."""
+    return (format_timestamp(row.created_at), row.source_query, row.preview)
+
+
 def overview_summary_lines(overview: DashboardOverview) -> list[str]:
     """Build the small set of real-data-only summary lines for the Overview tab.
 
@@ -184,6 +201,7 @@ def overview_summary_lines(overview: DashboardOverview) -> list[str]:
         f"Total memories stored: {overview.total_memory_count}",
         f"Recent approval decisions shown below: {len(overview.recent_approvals)}",
         f"Recently active workflows shown below: {len(overview.recent_workflows)}",
+        f"Total inbox entries: {overview.total_inbox_count}",
     ]
 
 
@@ -223,7 +241,7 @@ class DashboardApp:
 
         root.title(WINDOW_TITLE)
 
-        self._notebook = ttk.Notebook(root)
+        self._notebook = ttk.Notebook(root, padding=(6, 6))
         self._notebook.pack(fill="both", expand=True)
 
         self._last_refreshed_var = tk.StringVar(value="Last refreshed: never")
@@ -231,8 +249,9 @@ class DashboardApp:
         self._build_memories_tab()
         self._build_approval_history_tab()
         self._build_workflow_history_tab()
+        self._build_inbox_tab()
 
-        refresh_bar = ttk.Frame(root)
+        refresh_bar = ttk.Frame(root, padding=(6, 4))
         refresh_bar.pack(fill="x")
         ttk.Button(refresh_bar, text="Refresh now", command=self.refresh_all).pack(
             side="left"
@@ -247,7 +266,7 @@ class DashboardApp:
     # --- tab construction ----------------------------------------------------
 
     def _build_overview_tab(self) -> None:
-        frame = ttk.Frame(self._notebook)
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Overview")
         self._overview_frame = frame
         self._overview_labels: list[ttk.Label] = []
@@ -257,7 +276,7 @@ class DashboardApp:
         )
 
     def _build_memories_tab(self) -> None:
-        frame = ttk.Frame(self._notebook)
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Memories")
 
         controls = ttk.Frame(frame)
@@ -296,7 +315,7 @@ class DashboardApp:
         ).pack(fill="x", anchor="w")
 
     def _build_approval_history_tab(self) -> None:
-        frame = ttk.Frame(self._notebook)
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Approval History")
 
         ttk.Label(frame, text=APPROVAL_HISTORY_CAPTION, wraplength=480).pack(
@@ -332,7 +351,7 @@ class DashboardApp:
         self._approval_tree = tree
 
     def _build_workflow_history_tab(self) -> None:
-        frame = ttk.Frame(self._notebook)
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Workflow History")
 
         ttk.Label(frame, text=WORKFLOW_HISTORY_CAPTION, wraplength=480).pack(
@@ -365,10 +384,38 @@ class DashboardApp:
         transitions_tree.pack(fill="both", expand=True)
         self._transitions_tree = transitions_tree
 
+    def _build_inbox_tab(self) -> None:
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
+        self._notebook.add(frame, text="Inbox")
+
+        ttk.Label(frame, text=INBOX_CAPTION, wraplength=480).pack(anchor="w")
+        self._inbox_error_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self._inbox_error_var, foreground="red").pack(
+            anchor="w"
+        )
+
+        columns = ("created_at", "query", "preview")
+        headings = ("Created At", "Query", "Preview")
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, heading in zip(columns, headings):
+            tree.heading(column, text=heading)
+        tree.column("created_at", width=170, stretch=False)
+        tree.column("query", width=220)
+        tree.column("preview", width=320)
+        tree.pack(fill="both", expand=True, pady=(4, 4))
+        tree.bind("<<TreeviewSelect>>", self._on_inbox_row_selected)
+        self._inbox_tree = tree
+        self._inbox_rows_by_id: dict[str, InboxRow] = {}
+
+        self._inbox_detail_var = tk.StringVar(value=INBOX_DETAIL_PLACEHOLDER)
+        ttk.Label(
+            frame, textvariable=self._inbox_detail_var, wraplength=480, justify="left"
+        ).pack(fill="x", anchor="w")
+
     # --- refresh ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
-        """Requery all four panels and update their displayed state.
+        """Requery all five panels and update their displayed state.
 
         Each panel's query is isolated: a failure in one (a transient
         SQLite lock, a malformed row) renders that panel's own error
@@ -380,6 +427,7 @@ class DashboardApp:
         self._refresh_memories()
         self._refresh_approval_history()
         self._refresh_workflow_history()
+        self._refresh_inbox()
         self._last_refreshed_var.set(
             f"Last refreshed: {format_timestamp(datetime.now(timezone.utc))}"
         )
@@ -474,6 +522,24 @@ class DashboardApp:
                 "", "end", values=workflow_transition_row_to_tree_values(transition)
             )
 
+    def _refresh_inbox(self) -> None:
+        try:
+            rows = self._read_model.get_recent_inbox_entries()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._inbox_error_var.set(format_error_state("inbox", exc))
+            return
+        self._inbox_error_var.set("")
+        tree = self._inbox_tree
+        tree.delete(*tree.get_children())
+        self._inbox_rows_by_id.clear()
+        if not rows:
+            tree.insert("", "end", values=(_INBOX_EMPTY_STATE, "", ""))
+            return
+        for row in rows:
+            iid = str(row.id)
+            tree.insert("", "end", iid=iid, values=inbox_row_to_tree_values(row))
+            self._inbox_rows_by_id[iid] = row
+
     def _schedule_next_refresh(self) -> None:
         """Schedule the next periodic requery via Tk's own `.after()`.
 
@@ -517,3 +583,17 @@ class DashboardApp:
             return
         self._selected_workflow_id = selection[0]
         self._refresh_transitions_for_selected_workflow()
+
+    def _on_inbox_row_selected(self, _event: object) -> None:
+        """Populate the detail pane with one inbox entry's full saved text.
+
+        Selecting a row only reads already-loaded local state - it never
+        triggers a database query, a tool call, or any external action.
+        """
+        selection = self._inbox_tree.selection()
+        if not selection:
+            return
+        row = self._inbox_rows_by_id.get(selection[0])
+        if row is None:
+            return
+        self._inbox_detail_var.set(row.full_body)

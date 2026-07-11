@@ -33,6 +33,7 @@ from approval.approval_manager import ApprovalManager
 from config.settings import load_settings
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
+from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from observability.logger import EventLogger
@@ -132,6 +133,14 @@ def build_orchestrator() -> JarvisOrchestrator:
     workflow_history = WorkflowHistoryStore(session_factory)
     registry.register_tool(WorkflowHistoryTool(workflow_history))
 
+    # Durable inbox (Phase 20, Batch 1/2): a durable, append-only record of
+    # saved Jarvis-produced outputs - today, exactly one producer, the
+    # "summarise web search for <query>" advisory summary. No tool is
+    # registered for it: it is written directly by the orchestrator (below)
+    # and read directly by the dashboard's own read model, never through
+    # ToolExecutor.
+    inbox_store = InboxStore(session_factory)
+
     # Web search (Phase 16): Jarvis's first external-network tool.
     # Read-only, GREEN, and deliberately provider-independent - this is
     # the only place a concrete search vendor (DuckDuckGo) is constructed.
@@ -216,6 +225,10 @@ def build_orchestrator() -> JarvisOrchestrator:
         # web search for <query>" AI-summary workflow, called directly -
         # never through WebSearchTool/ToolExecutor.
         web_search_provider=web_search_provider,
+        # Phase 20, Batch 2: the same InboxStore instance already built
+        # above (not a second one) lets the web-search-summary workflow
+        # save a durable copy of its own successful advisory summary.
+        inbox_store=inbox_store,
         logger=logger,
     )
 
