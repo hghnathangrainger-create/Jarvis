@@ -721,6 +721,28 @@ File move, copy, rename, or delete of any kind; local application launching; a c
 
 ---
 
+## Phase 25 — File Copy Tool (complete)
+
+The safest possible next increment in the file-tool family after search: a way to duplicate a file — for example, to back it up before editing — without touching move, rename, or delete. See `docs/phase_25_completion_report.md` for the full closure write-up.
+
+### File copy command
+
+```
+copy file notes.txt to notes.txt.bak
+```
+
+Copies exactly one existing file to one new destination path. Requires approval (YELLOW), exactly like `create file`/`append to file`. There is no directory-copy, no recursive copy, and no `in <directory>` clause — the source and destination are both plain paths.
+
+### Safety note: never overwrites, never touches the source, approval cannot waive it
+
+The destination must not already exist — this is enforced unconditionally, even after approval: approving a copy command only authorises the *attempt*, never a decision to overwrite something already at the destination. The source file is never opened for anything but a raw, byte-for-byte read (no text interpretation, so binary files copy correctly) and is never modified, moved, renamed, or deleted — verified directly by comparing its bytes before and after every copy. The destination's parent folder must already exist, matching `create file`'s own established behaviour exactly — this tool does not create folders. `FileCopyTool.action_for()` always returns the same fixed string ("copy file") regardless of the source/destination paths, so its Security Manager classification can never vary with input.
+
+### What is deliberately NOT included in Phase 25
+
+File move, rename, or delete of any kind (each a distinct, separately-scoped future decision — move/rename in particular share an underlying mechanism that removes the file from its original location, a different risk class from copy); directory or recursive copying; any overwrite option, with or without approval; local application launching; any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; and Research Agent or voice/phone work. This is exactly one small, narrow write capability, built by directly reusing `FileCreateTool`'s own proven approval/path-safety pattern — not a file manager and not a step toward broader file automation.
+
+---
+
 ## Example Session
 
 ```

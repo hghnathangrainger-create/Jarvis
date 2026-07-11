@@ -149,6 +149,16 @@ _FILE_APPEND_PREFIXES: tuple[str, ...] = (
 )
 _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 
+#: The leading phrase for a file-copy request (Phase 25). Checked
+#: directly against every existing prefix table: it does not start with
+#: (or overlap as a prefix of) "create file"/"create a file"/"new
+#: file"/"make file" (_FILE_CREATE_PREFIXES), "append text file"/
+#: "append to file"/"append to"/"append" (_FILE_APPEND_PREFIXES), any
+#: _FILE_SEARCH_*_PREFIXES phrase, "search the web for"
+#: (_WEB_SEARCH_PREFIXES), or any _SCHEDULE_*_PREFIXES phrase -
+#: confirmed by direct string comparison, not assumed.
+_FILE_COPY_PREFIXES: tuple[str, ...] = ("copy file",)
+
 #: Leading phrases for a filename search (Phase 24). Two aliases are
 #: recognised for the same operation, mirroring the project's existing
 #: "summarise"/"summarize" alias convention. Checked directly against
@@ -536,6 +546,15 @@ class CommandRouter:
             self._registry.has_tool("file_append")
         ):
             return "file_append"
+
+        # File copy (Phase 25): YELLOW, requires approval. Checked here,
+        # before the generic memory-keyword fallback below, so a source/
+        # destination path that happens to contain a substring like
+        # "memory" is never misrouted to the memory tool.
+        if self._file_prefix(lowered, _FILE_COPY_PREFIXES) is not None and (
+            self._registry.has_tool("file_copy")
+        ):
+            return "file_copy"
 
         # File search (Phase 24): read-only, GREEN. Checked here, before
         # the generic memory-keyword fallback below, so a query that
@@ -1129,6 +1148,10 @@ class CommandRouter:
             mode, query = self._extract_file_search_input(text)
             return {"mode": mode, "query": query}
 
+        if tool_name == "file_copy":
+            source, destination = self._extract_copy_input(text)
+            return {"source": source, "destination": destination}
+
         if tool_name == "schedule_create":
             query, time_of_day = self._extract_schedule_create_input(text)
             return {"query": query, "time_of_day": time_of_day}
@@ -1289,6 +1312,37 @@ class CommandRouter:
             return "content", text[len(content_prefix) :].strip()
 
         return "name", ""  # defensive; unreachable via match()'s own gating
+
+    @classmethod
+    def _extract_copy_input(cls, text: str) -> tuple[str, str]:
+        """Extract (source, destination) from a copy-file command.
+
+        The recognised shape is: "copy file <source> to <destination>".
+        Splits on the *first* occurrence of " to ", mirroring
+        _extract_append_input's own precedent for the same "X to Y"
+        grammar shape - a disclosed, accepted limitation: a source path
+        that itself legitimately contains the literal substring " to "
+        will be split at that first occurrence, exactly the same
+        limitation this project already accepts for append's own
+        "<content> to file <path>" splitting.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (source, destination). Either may be empty, in
+            which case FileCopyTool itself reports the problem - this
+            method never validates, it only splits text.
+        """
+        remainder = cls._strip_write_prefix(text, _FILE_COPY_PREFIXES)
+        lowered = remainder.casefold()
+        separator = " to "
+        if separator in lowered:
+            idx = lowered.index(separator)
+            source = remainder[:idx].strip()
+            destination = remainder[idx + len(separator) :].strip()
+            return cls._clean_path(source), cls._clean_path(destination)
+        return cls._clean_path(remainder), ""
 
     @classmethod
     def _extract_append_input(cls, text: str) -> tuple[str, str]:

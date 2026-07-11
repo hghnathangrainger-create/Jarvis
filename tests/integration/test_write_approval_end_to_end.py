@@ -2,10 +2,10 @@
 test_write_approval_end_to_end.py
 
 End-to-end integration tests for the guarded write approval flow
-(Phase 4, Batch 2).
+(Phase 4, Batch 2; extended Phase 25 with FileCopyTool).
 
 These wire the real Security Manager, Tool Registry, Tool Executor, Approval
-Manager, and the two write tools together, and trace a write action through its
+Manager, and the write tools together, and trace a write action through its
 full journey: request -> YELLOW approval -> approved-and-written or
 declined-and-untouched. They prove the filesystem only changes when a write is
 actually approved, that a RED action stays blocked even with an approval, and
@@ -30,6 +30,7 @@ from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.builtin import (
     EchoTool,
     FileAppendTool,
+    FileCopyTool,
     FileCreateTool,
     FileListTool,
     FileReadTool,
@@ -85,6 +86,7 @@ class _System:
         self.registry.register_tool(FileReadTool())
         self.registry.register_tool(FileCreateTool())
         self.registry.register_tool(FileAppendTool())
+        self.registry.register_tool(FileCopyTool())
         self.registry.register_tool(self.red)
         self.executor = ToolExecutor(
             registry=self.registry,
@@ -176,6 +178,83 @@ def test_declined_append_leaves_file_unchanged(
 
     assert executed.success is False
     assert target.read_text() == "original"
+
+
+# --- Copy: approved copies, declined does not, never overwrites (Phase 25) ------
+
+
+def test_approved_copy_creates_the_destination(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "source.txt"
+    source.write_text("original content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "copy file source.txt to dest.txt"
+    )
+    assert response.requires_confirmation is True
+    assert not destination.exists()  # not yet copied
+
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert destination.read_text() == "original content"
+    assert source.read_text() == "original content"  # source untouched
+
+
+def test_declined_copy_creates_nothing(system: _System, workspace: Path) -> None:
+    source = workspace / "source.txt"
+    source.write_text("original content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "copy file source.txt to dest.txt"
+    )
+    decision = system.approvals.decline(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert not destination.exists()
+
+
+def test_approval_cannot_override_existing_destination_refusal(
+    system: _System, workspace: Path
+) -> None:
+    """The no-overwrite rule is not something approval can waive - even a
+    fully approved copy still refuses if the destination already exists."""
+    source = workspace / "source.txt"
+    source.write_text("new content")
+    destination = workspace / "dest.txt"
+    destination.write_text("pre-existing content, must survive")
+
+    response = system.orchestrator.handle_request(
+        "copy file source.txt to dest.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert destination.read_text() == "pre-existing content, must survive"
+
+
+def test_copy_requires_no_direct_bypass_around_approval_manager(
+    system: _System, workspace: Path
+) -> None:
+    """A copy request that is never approved or declined at all must
+    never write anything - there is no path from handle_request() to a
+    written file that skips ApprovalManager entirely."""
+    source = workspace / "source.txt"
+    source.write_text("content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "copy file source.txt to dest.txt"
+    )
+    assert response.requires_confirmation is True
+    assert response.success is False  # nothing has run yet
+    assert not destination.exists()
 
 
 # --- RED stays blocked, writes are audited -----------------------------------

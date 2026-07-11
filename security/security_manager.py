@@ -176,6 +176,12 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("write file", SecurityTier.YELLOW, "Writing a file changes state and should be confirmed."),
     _Rule("modify file", SecurityTier.YELLOW, "Modifying a file changes state and should be confirmed."),
     _Rule("edit file", SecurityTier.YELLOW, "Editing a file changes state and should be confirmed."),
+    # Phase 25: already covered by the generic "write file"-adjacent
+    # default-YELLOW fallback without this entry (no existing rule
+    # contains "copy"), but listed explicitly, matching every other
+    # command family's own tailored reason rather than the generic
+    # fallback wording.
+    _Rule("copy file", SecurityTier.YELLOW, "Copying a file creates new state and should be confirmed."),
     _Rule("move file", SecurityTier.YELLOW, "Moving a file changes its location and should be confirmed."),
     _Rule("rename", SecurityTier.YELLOW, "Renaming changes state and should be confirmed."),
     _Rule("download", SecurityTier.YELLOW, "Downloading brings external content onto the system."),

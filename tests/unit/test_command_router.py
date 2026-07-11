@@ -52,6 +52,7 @@ _ALL_TOOL_NAMES = (
     "file_search",
     "file_create",
     "file_append",
+    "file_copy",
     "approval_history",
     "workflow_history",
     "web_search",
@@ -113,6 +114,83 @@ def test_match_file_create(router: CommandRouter) -> None:
 
 def test_match_file_append(router: CommandRouter) -> None:
     assert router.match("append to file a.txt hello") == "file_append"
+
+
+# --- match(): file copy (Phase 25) ---------------------------------------------
+
+
+def test_match_file_copy(router: CommandRouter) -> None:
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+
+
+def test_match_file_copy_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("COPY FILE a.txt TO b.txt") == "file_copy"
+
+
+def test_match_file_copy_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "file_copy":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("copy file a.txt to b.txt") is None
+
+
+def test_match_file_copy_does_not_collide_with_file_create(
+    router: CommandRouter,
+) -> None:
+    assert router.match("create file a.txt with x") == "file_create"
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+
+
+def test_match_file_copy_does_not_collide_with_file_append(
+    router: CommandRouter,
+) -> None:
+    assert router.match("append to file a.txt hello") == "file_append"
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+
+
+def test_match_file_copy_does_not_collide_with_file_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search files for a.txt") == "file_search"
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+
+
+def test_match_file_copy_does_not_collide_with_web_search_or_memory_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search the web for a.txt") == "web_search"
+    assert router.match("search memories for a.txt") == "memory"
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+
+
+def test_match_file_copy_path_containing_memory_word_is_not_misrouted(
+    router: CommandRouter,
+) -> None:
+    assert router.match("copy file memory_notes.txt to backup.txt") == "file_copy"
+
+
+def test_match_ambiguous_copy_text_without_grammar_is_none(
+    router: CommandRouter,
+) -> None:
+    assert router.match("please copy my file somewhere") is None
+    assert router.match("copy a.txt b.txt") is None
+
+
+def test_build_input_file_copy_extracts_source_and_destination(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("file_copy", "copy file a.txt to b.txt") == {
+        "source": "a.txt",
+        "destination": "b.txt",
+    }
+
+
+def test_build_input_file_copy_with_nested_paths(router: CommandRouter) -> None:
+    assert router.build_input(
+        "file_copy", "copy file docs/notes.txt to backup/notes.txt"
+    ) == {"source": "docs/notes.txt", "destination": "backup/notes.txt"}
 
 
 # --- match(): file search (Phase 24) -------------------------------------------

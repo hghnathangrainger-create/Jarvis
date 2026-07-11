@@ -11,7 +11,7 @@ Everything described here was verified directly against the current codebase whi
 Jarvis is a personal, local, single-user AI assistant with three cooperating processes and a durable SQLite database. Today it can:
 
 - Remember and recall notes (memory), with optional AI-generated summaries of them.
-- Read, list, search (by name or content), create, and append to files on your machine.
+- Read, list, search (by name or content), create, append to, and copy files on your machine.
 - Search the web (snippets/metadata only) and optionally get an AI summary of the results.
 - Run a small number of daily, fixed-time scheduled web-search summaries automatically, saved to a durable Inbox.
 - Show you, at CLI startup, a short heads-up if new scheduled results have shown up since you last checked.
@@ -115,9 +115,12 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `find files containing <text>` / `search files containing <text>` | Finds files whose **content** contains `<text>` (case-insensitive), recursively from the project directory. Shows a short one-line context snippet per match — never the full file. | GREEN |
 | `create file <path> with <content>` | Creates a new file. `with <content>` is optional (creates an empty file). | YELLOW |
 | `append <content> to file <path>` or `append to file <path> <content>` | Appends text to an existing file. | YELLOW |
+| `copy file <source> to <destination>` | Copies an existing file to a new path. | YELLOW |
 | `summarise file <path>` / `summarize file <path>` | Reads a file and produces an AI summary of it (advisory only; requires `AI_REASONING_ENABLED`). | GREEN (reading), summary is advisory |
 
 **File search notes (Phase 24):** always searches from the project directory (there is no "in `<directory>`" clause); results are capped at 50 by default (a message tells you if more may exist); noisy directories are always skipped (`.git`, `__pycache__`, `.pytest_cache`, virtual environments, `node_modules`, build/cache folders); binary and unreadable files are silently skipped rather than causing an error; content search never shows more than a short snippet of the matching line — never a full file's contents. File search cannot move, rename, copy, or delete anything — it is exactly as read-only as `list files`/`read file`.
+
+**File copy notes (Phase 25):** copies exactly one file to one new path — never a directory, never recursive. The source file is never read as text and never modified, moved, renamed, or deleted; it is byte-for-byte unchanged after the copy (verified even for binary files). **The destination must not already exist** — this tool will never overwrite anything, and approving the command does not change that: if the destination exists, the copy is refused regardless of your decision. The destination's parent folder must already exist (this tool does not create folders), matching `create file`'s own behavior exactly. There is no move, rename, or delete command — copying is the only file-write operation beyond create/append that exists today.
 
 ### Web search commands
 
@@ -278,6 +281,22 @@ jarvis> [APPROVED] You approved 'create text file'.
 jarvis> [OK] ...
 ```
 
+**Back up a file before editing it (requires your approval):**
+```
+you> copy file notes.txt to notes.txt.bak
+jarvis> [NEEDS APPROVAL] ...
+=================================================
+  APPROVAL REQUIRED - Jarvis needs your decision
+=================================================
+  Action:     copy file
+  Reason:     Copying a file creates new state and should be confirmed.
+  Risk tier:  YELLOW (sensitive - needs your approval)
+Approve this action? [y]es / [n]o: y
+jarvis> [APPROVED] You approved 'copy file'.
+jarvis> [OK] Copied 'notes.txt' to 'notes.txt.bak' (27 bytes).
+```
+If `notes.txt.bak` already existed, the copy is refused — even after approval — and nothing is overwritten.
+
 **Get an AI-summarized web search, saved to the Inbox automatically:**
 ```
 you> summarise web search for latest AI news
@@ -310,6 +329,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 - No workflow-triggering, YELLOW, or RED scheduled actions — only the one GREEN scheduled action exists; scheduling itself (create/enable/disable) is YELLOW, but what runs is always GREEN.
 - No goals/projects/tasks system.
 - No durable, restart-surviving pending approvals or paused workflows — both currently live only in memory while the CLI process is running; if the CLI is closed with something pending, that pending state is gone (though its history, if any was recorded, remains durable and viewable).
+- No file move, rename, or delete command — `copy file` is the only file-write operation beyond create/append; moving, renaming, and deleting files all remain future, separately-scoped decisions.
 
 ---
 
@@ -337,5 +357,6 @@ These are real candidates that have been evaluated in past architectural reviews
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
+- A file move/rename tool, and a file delete tool (each a distinct, separately-scoped future decision from `copy file`).
 
 None of these should be assumed available — always check this guide or the codebase directly rather than assuming a feature exists.
