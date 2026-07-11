@@ -289,9 +289,9 @@ class WebFetchPolicy:
                 ),
             )
 
-        ip_literal = _parse_ip_literal(hostname)
+        ip_literal = parse_ip_literal(hostname)
         if ip_literal is not None:
-            blocked_reason = _blocked_ip_reason(ip_literal)
+            blocked_reason = blocked_ip_reason(ip_literal)
             if blocked_reason is not None:
                 return RejectedTarget(
                     original_url=candidate,
@@ -312,7 +312,7 @@ class WebFetchPolicy:
         )
 
 
-def _parse_ip_literal(
+def parse_ip_literal(
     hostname: str,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """Parse a hostname as an IP literal, without any DNS resolution.
@@ -331,14 +331,16 @@ def _parse_ip_literal(
         return None
 
 
-def _blocked_ip_reason(
+def blocked_ip_reason(
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> str | None:
     """Decide whether a resolved-or-literal IP address must be blocked.
 
     Uses the standard library's own ipaddress predicates directly
     rather than hand-rolled CIDR math, per the Phase 32 plan's explicit
-    Batch 1 risk mitigation.
+    Batch 1 risk mitigation. Public (not module-private) because Batch
+    2's SafeWebFetcher reuses this exact predicate to check DNS-resolved
+    IP addresses, not just IP literals typed directly into a URL.
 
     Args:
         ip: The IP address to check.
