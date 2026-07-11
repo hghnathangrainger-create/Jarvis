@@ -24,6 +24,7 @@ Jarvis is **not** a chatbot. It is an orchestration layer that plans requests, c
 **Phase 17 complete: Broader Deterministic Workflow Commands.**
 **Phase 18 complete: AI Summarization of Web Search Results.**
 **Phase 19 complete: Local Read-Only Dashboard for Existing Jarvis State.**
+**Phase 20 complete: Durable Jarvis Inbox with a Web-Search-Summary Producer.**
 
 Building on the advisory AI reasoning and guarded write actions from Phase 4, Jarvis now has a real personal knowledge system. Memories can be organised into categories, listed and searched (including within a category), reviewed one at a time, and — behind approval — corrected, re-filed, or forgotten. Reading memory is effortless and automatic; anything that changes or removes a memory asks first.
 
@@ -57,9 +58,11 @@ Phase 18 gives Jarvis its **first AI-facing use of live web search**: an explici
 
 Phase 19 gives Jarvis its **first visual surface**: a separate, local, strictly read-only dashboard (`poetry run python dashboard.py`) that displays real durable state — memory, approval history, and workflow lifecycle history — without reading CLI scrollback or issuing multiple `show`/`list` commands by hand. It is a second, independent process that only ever reads the same SQLite file the CLI already writes to; it cannot execute a tool, approve or deny anything, mutate memory, or start a workflow, and its failure never affects the Jarvis CLI process. See the Phase 19 section below.
 
+Phase 20 gives Jarvis its **first durable output**: a `summarise web search for <query>` (or `summarize ...`) command now also saves its advisory AI summary to a durable Inbox, shown in a new dashboard tab, so it survives past CLI scrollback and a restart instead of disappearing the moment the terminal session ends. Every other command is completely unaffected; the CLI's own response is byte-for-byte unchanged. See the Phase 20 section below.
+
 > **Note on API credits:** Jarvis still runs **without any Anthropic API credits**. AI reasoning is off by default and, when off, Jarvis behaves exactly as it did in Phase 3. Every test uses a fake provider, so no live Claude call is ever required to run or test Jarvis, and no test makes a real web search either.
 
-> **Verified:** `poetry run pytest -v` — **2181 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–19 test plus the Durable Workflow Lifecycle Foundation.
+> **Verified:** `poetry run pytest -v` — **2252 passed, 0 failed** (Python 3.14.6, pytest 9.1.1). This covers every Phase 1–20 test plus the Durable Workflow Lifecycle Foundation.
 
 ---
 
@@ -575,6 +578,35 @@ The dashboard cannot construct a `ToolRequest`, call `ToolExecutor` or `CommandR
 ### What is deliberately NOT included in Phase 19
 
 An HTTP server, listener, or served frontend of any kind (no FastAPI, no Uvicorn, no Flask, no WebSocket, no REST API); any remote, LAN, phone, or browser reachability; authentication, sessions, or accounts; any write, execute, approve, decline, cancel, resume, or schedule action from the dashboard; any change to `SecurityManager`, `ToolExecutor`, `ApprovalManager`, `WorkflowEngine`, `CommandRouter`, or any AI-facing module; any new tool; live web-search results or AI web-search summaries (ephemeral, not durable); AI provider status or cost tracking; system-health, plugin, or agent simulations; goals, projects, or tasks; a durable inbox, notification, or scheduled-task model (no producer exists yet — building one now would be infrastructure ahead of a second real use case); voice; and computer control. This is not the Master Specification's full Chapter 21 Dashboard, its "Web Dashboard chat interface," or the FastAPI server named in Chapter 29's startup sequence.
+
+---
+
+## Phase 20 — Durable Jarvis Inbox with a Web-Search-Summary Producer (complete)
+
+Jarvis's first durable output: a saved copy of an AI-generated result that used to disappear the moment CLI scrollback was gone. `summarise web search for <query>` (or `summarize ...`) still works exactly as it did in Phase 18 — same parsing, same single search, same `WebSearchProvider`/`SearchResult` objects, same `UNTRUSTED` context handling, same `PromptBuilder`/`AIRouter`/`AIReasoningEngine` path, same fixed snippet-only disclosure label, same CLI response — but now, only after a real, validated AI summary has been produced, that exact response is also saved as a durable Inbox entry, visible in a new dashboard tab. See `docs/phase_20_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Durable storage.** A new `inbox_entries` table and `InboxStore` (`inbox/inbox_store.py`), following the same non-`ForeignKey` `session_id` convention `ApprovalHistoryStore`/`WorkflowHistoryStore` already use. Append-only by construction: the store exposes exactly four methods (`append`, `list_recent`, `count`, `get`) and no update, delete, or read/unread-mutation method exists anywhere on it.
+- **Batch 2 — Producer wiring and dashboard consumer.** One disclosed, additive line in `_handle_web_search_summary_request`: after the exact success response is built, it saves one entry via the new optional `inbox_store` collaborator — a failed save is caught and audited, never surfaced in, or allowed to delay, the CLI's own response. `dashboard/read_model.py` gained `get_recent_inbox_entries()`; `ui/dashboard_app.py` gained a fifth "Inbox" tab and a real total-count Overview line, plus a modest padding/column-width pass across all five tabs.
+- **Batch 3 — End-to-end verification and closure.** Full real-stack proof (a real temporary SQLite database, a real orchestrator, a fake search provider and fake AI provider through the real `AIRouter`/`AIReasoningEngine` path, a real `InboxStore`, a real dashboard) that both command spellings each create exactly one entry, that every failure path (search failure, zero results, AI disabled/unavailable/failed, a raising `InboxStore`) creates none and never alters the CLI response, that no other AI-summary command can reach the inbox, and — the strongest adversarial proof in this phase — that a full, real, live Jarvis execution stack sharing the same process as the dashboard shows zero effect, including a direct spy proving `InboxStore.append()` is never called from the dashboard side.
+
+### Inbox entries
+
+| Field | What it holds |
+|---|---|
+| Query | The literal search query, stored verbatim — a deliberate choice, since this is a user-facing record only Nathan ever reads, not the audit log Phase 18 already keeps content-free. |
+| Body | The exact final text Nathan was shown, disclosure label included, stored byte-for-byte — never reconstructed or re-derived later. |
+| Result count | How many search results the summary was based on, if known. |
+| Created at | When the entry was saved (UTC). |
+
+The Inbox tab shows these newest-first, with a truncated preview and the full saved body on row selection — the same pattern the Memories tab already established.
+
+### Safety note: a saved summary, not a new authority
+
+An Inbox entry is a stored, user-visible **display string** — never a `ToolRequest`, never a `Plan`, never approval authority, and never fed into `CommandRouter`, `ToolExecutor`, `ApprovalManager`, `WorkflowEngine`, or `AIReasoningEngine` by anything added in this phase. It is not executable, not trusted system context, not a notification, and not a scheduled task — it is exactly, and only, a durable copy of something already shown once. Adversarial content stored in an entry (fake commands, fake tool-call JSON, fake approval/workflow instructions, prompt-injection phrasing, malicious-looking URLs) renders as plain, literal text in the dashboard; storing it changes nothing about its (lack of) authority. Entries are append-only: there is no edit, delete, read/unread, or pin control anywhere, because the store itself has no method capable of mutating one.
+
+### What is deliberately NOT included in Phase 20
+
+Any scheduler, timer loop, background runner, recurring job, missed-run or duplicate-run policy, or timezone scheduling logic; any notification delivery of any kind (desktop, email, push, phone, or CLI-on-next-launch); any dashboard command box, command execution, write action, or URL-opening control; any Core service, HTTP server, IPC bridge, socket bridge, or client/server refactor; an `InboxTool`; and automatic persistence of any other AI-summary command family (file, single-memory, multi-memory, query-based, category-based, recency-based, or count-based memory summaries) — only the web-search-summary command writes to the inbox. Repeated identical queries append separate entries; nothing is deduplicated. This closes one real gap (a saved copy of one kind of AI output) — it does not, by itself, make Jarvis proactive, notify Nathan of anything, or add any new execution authority anywhere.
 
 ---
 
