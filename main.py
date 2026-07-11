@@ -58,6 +58,7 @@ from tools.builtin import (
     FileCopyTool,
     FileCreateTool,
     FileListTool,
+    FileMoveTool,
     FileReadTool,
     FileSearchTool,
     InfoTool,
@@ -136,6 +137,7 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileCreateTool())
     registry.register_tool(FileAppendTool())
     registry.register_tool(FileCopyTool())
+    registry.register_tool(FileMoveTool())
     registry.register_tool(ApprovalHistoryTool(approval_history))
 
     # Durable workflow lifecycle history (Durable Workflow Lifecycle

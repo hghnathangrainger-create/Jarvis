@@ -743,6 +743,29 @@ File move, rename, or delete of any kind (each a distinct, separately-scoped fut
 
 ---
 
+## Phase 26 — File Move/Rename Tool (complete)
+
+The one remaining common file operation after copy: relocating or renaming an existing file. `move file` and `rename file` are two names for the exact same command — a same-directory destination is a rename, a cross-directory destination is a move, and both go through one tool via the same underlying mechanism. See `docs/phase_26_completion_report.md` for the full closure write-up.
+
+### File move/rename command
+
+```
+move file draft.txt to final.txt
+rename file draft.txt to final.txt
+```
+
+Moves or renames exactly one existing file to one new destination path. Requires approval (YELLOW) — the same tier as `copy file`/`create file`, and for the same reason: this changes filesystem state, and unlike copy, the source path stops existing afterward. There is no directory-move, no recursive move, and no `in <directory>` clause.
+
+### Safety note: never overwrites, approval cannot waive it, no delete capability introduced
+
+The destination must not already exist — enforced unconditionally, even after approval, exactly like `copy file`. The destination's parent folder must already exist (this tool does not create folders). `FileMoveTool.action_for()` always returns the same fixed string ("move file") regardless of the source/destination paths, so its Security Manager classification can never vary with input — and that exact phrase already matched a pre-existing YELLOW rule in `security/security_manager.py`, confirmed by direct inspection before writing any code, so no new Security Manager rule was needed. The source path genuinely stops existing after a successful move — that is the nature of "move," not a side effect to hide, and is exactly why approval is required every time. This tool introduces no delete capability of any kind: a failed or refused move always leaves the source exactly where it was.
+
+### What is deliberately NOT included in Phase 26
+
+File delete of any kind (a distinct, separately-scoped future decision); directory or recursive moves; any overwrite option, with or without approval; a separate "rename" tool distinct from "move" (one tool covers both, since they are the same underlying operation); any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; and Research Agent or voice/phone work. This is exactly one small, narrow write capability, built by directly reusing `FileCopyTool`'s own proven approval/path-safety pattern — not a file manager and not a step toward broader file automation.
+
+---
+
 ## Example Session
 
 ```

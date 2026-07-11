@@ -2,7 +2,8 @@
 test_write_approval_end_to_end.py
 
 End-to-end integration tests for the guarded write approval flow
-(Phase 4, Batch 2; extended Phase 25 with FileCopyTool).
+(Phase 4, Batch 2; extended Phase 25 with FileCopyTool; extended
+Phase 26 with FileMoveTool).
 
 These wire the real Security Manager, Tool Registry, Tool Executor, Approval
 Manager, and the write tools together, and trace a write action through its
@@ -33,6 +34,7 @@ from tools.builtin import (
     FileCopyTool,
     FileCreateTool,
     FileListTool,
+    FileMoveTool,
     FileReadTool,
 )
 from tools.executor import ToolExecutor
@@ -87,6 +89,7 @@ class _System:
         self.registry.register_tool(FileCreateTool())
         self.registry.register_tool(FileAppendTool())
         self.registry.register_tool(FileCopyTool())
+        self.registry.register_tool(FileMoveTool())
         self.registry.register_tool(self.red)
         self.executor = ToolExecutor(
             registry=self.registry,
@@ -254,6 +257,108 @@ def test_copy_requires_no_direct_bypass_around_approval_manager(
     )
     assert response.requires_confirmation is True
     assert response.success is False  # nothing has run yet
+    assert not destination.exists()
+
+
+# --- Move: approved moves, declined does not, never overwrites (Phase 26) -------
+
+
+def test_approved_move_relocates_the_file(system: _System, workspace: Path) -> None:
+    source = workspace / "source.txt"
+    source.write_text("original content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "move file source.txt to dest.txt"
+    )
+    assert response.requires_confirmation is True
+    assert source.exists()  # not yet moved
+    assert not destination.exists()
+
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert destination.read_text() == "original content"
+    assert not source.exists()  # source relocated, not just copied
+
+
+def test_approved_rename_alias_relocates_the_file(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "source.txt"
+    source.write_text("original content")
+    destination = workspace / "renamed.txt"
+
+    response = system.orchestrator.handle_request(
+        "rename file source.txt to renamed.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert destination.read_text() == "original content"
+    assert not source.exists()
+
+
+def test_declined_move_leaves_everything_unchanged(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "source.txt"
+    source.write_text("original content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "move file source.txt to dest.txt"
+    )
+    decision = system.approvals.decline(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert source.exists()
+    assert not destination.exists()
+
+
+def test_move_approval_cannot_override_existing_destination_refusal(
+    system: _System, workspace: Path
+) -> None:
+    """The no-overwrite rule is not something approval can waive - even a
+    fully approved move still refuses if the destination already
+    exists, and the source is correctly left in place (never
+    half-consumed by a refused move)."""
+    source = workspace / "source.txt"
+    source.write_text("new content")
+    destination = workspace / "dest.txt"
+    destination.write_text("pre-existing content, must survive")
+
+    response = system.orchestrator.handle_request(
+        "move file source.txt to dest.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert destination.read_text() == "pre-existing content, must survive"
+    assert source.exists()  # never consumed by the refused move
+    assert source.read_text() == "new content"
+
+
+def test_move_requires_no_direct_bypass_around_approval_manager(
+    system: _System, workspace: Path
+) -> None:
+    """A move request that is never approved or declined at all must
+    never relocate anything - there is no path from handle_request() to
+    a moved file that skips ApprovalManager entirely."""
+    source = workspace / "source.txt"
+    source.write_text("content")
+    destination = workspace / "dest.txt"
+
+    response = system.orchestrator.handle_request(
+        "move file source.txt to dest.txt"
+    )
+    assert response.requires_confirmation is True
+    assert response.success is False  # nothing has run yet
+    assert source.exists()
     assert not destination.exists()
 
 

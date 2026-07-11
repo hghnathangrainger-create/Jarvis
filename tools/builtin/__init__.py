@@ -32,6 +32,11 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - FileCopyTool: copies an EXISTING file to a new destination path
       (Phase 25); never overwrites an existing destination, never
       touches the source file, and never creates parent folders.
+    - FileMoveTool: moves/renames an EXISTING file to a new destination
+      path (Phase 26); never overwrites an existing destination, never
+      creates parent folders, and never deletes, copies, or executes
+      anything - a same-directory destination is a rename and a
+      cross-directory destination is a move, both via one tool.
     - MemoryUpdateTool: updates a memory's content or category by id.
     - MemoryForgetTool: forgets one specific memory by id; no bulk delete.
     - ScheduleCreateTool: creates a new daily web-search-summary schedule
@@ -41,8 +46,10 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - ScheduleDisableTool: disables a schedule by id (Phase 21) - the
       only way to stop a schedule from running; there is no delete tool.
 
-No built-in tool deletes, moves, renames, edits in place, installs software,
-runs commands, or controls the computer.
+No built-in tool deletes, edits in place, installs software, runs commands,
+or controls the computer. FileMoveTool is the sole exception to "no move" -
+it moves/renames a single file, with approval, and never overwrites, never
+deletes, and never touches directories.
 """
 
 from __future__ import annotations
@@ -53,6 +60,7 @@ from tools.builtin.file_append_tool import FileAppendTool
 from tools.builtin.file_copy_tool import FileCopyTool
 from tools.builtin.file_create_tool import FileCreateTool
 from tools.builtin.file_list_tool import FileListTool
+from tools.builtin.file_move_tool import FileMoveTool
 from tools.builtin.file_read_tool import FileReadTool
 from tools.builtin.file_search_tool import FileSearchTool
 from tools.builtin.info_tool import InfoTool
@@ -77,6 +85,7 @@ __all__ = [
     "FileCreateTool",
     "FileAppendTool",
     "FileCopyTool",
+    "FileMoveTool",
     "MemoryUpdateTool",
     "MemoryForgetTool",
     "WorkflowHistoryTool",

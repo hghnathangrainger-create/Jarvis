@@ -159,6 +159,20 @@ _SEARCH_KEYWORDS: tuple[str, ...] = ("search", "find", "look up", "lookup")
 #: confirmed by direct string comparison, not assumed.
 _FILE_COPY_PREFIXES: tuple[str, ...] = ("copy file",)
 
+#: Leading phrases for a file-move/rename request (Phase 26). Two
+#: aliases route to the same tool, since a same-directory destination
+#: (a rename) and a cross-directory destination (a move) are the exact
+#: same underlying operation - there is no separate "rename" tool.
+#: Checked directly against every existing prefix table: neither phrase
+#: starts with, or is a prefix of, "copy file" (_FILE_COPY_PREFIXES),
+#: any _FILE_CREATE_PREFIXES/_FILE_APPEND_PREFIXES phrase, any
+#: _FILE_SEARCH_*_PREFIXES phrase, "search the web for"
+#: (_WEB_SEARCH_PREFIXES), any _SCHEDULE_*_PREFIXES phrase, or "move
+#: memory"/"update memory" (the existing memory_update prefixes below -
+#: "move file"/"rename file" diverge from "move memory" at the second
+#: word) - confirmed by direct string comparison, not assumed.
+_FILE_MOVE_PREFIXES: tuple[str, ...] = ("move file", "rename file")
+
 #: Leading phrases for a filename search (Phase 24). Two aliases are
 #: recognised for the same operation, mirroring the project's existing
 #: "summarise"/"summarize" alias convention. Checked directly against
@@ -555,6 +569,16 @@ class CommandRouter:
             self._registry.has_tool("file_copy")
         ):
             return "file_copy"
+
+        # File move/rename (Phase 26): YELLOW, requires approval.
+        # Checked here, before the generic memory-keyword fallback
+        # below, so a source/destination path that happens to contain
+        # a substring like "memory" is never misrouted to the memory
+        # tool.
+        if self._file_prefix(lowered, _FILE_MOVE_PREFIXES) is not None and (
+            self._registry.has_tool("file_move")
+        ):
+            return "file_move"
 
         # File search (Phase 24): read-only, GREEN. Checked here, before
         # the generic memory-keyword fallback below, so a query that
@@ -1152,6 +1176,10 @@ class CommandRouter:
             source, destination = self._extract_copy_input(text)
             return {"source": source, "destination": destination}
 
+        if tool_name == "file_move":
+            source, destination = self._extract_move_input(text)
+            return {"source": source, "destination": destination}
+
         if tool_name == "schedule_create":
             query, time_of_day = self._extract_schedule_create_input(text)
             return {"query": query, "time_of_day": time_of_day}
@@ -1335,6 +1363,36 @@ class CommandRouter:
             method never validates, it only splits text.
         """
         remainder = cls._strip_write_prefix(text, _FILE_COPY_PREFIXES)
+        lowered = remainder.casefold()
+        separator = " to "
+        if separator in lowered:
+            idx = lowered.index(separator)
+            source = remainder[:idx].strip()
+            destination = remainder[idx + len(separator) :].strip()
+            return cls._clean_path(source), cls._clean_path(destination)
+        return cls._clean_path(remainder), ""
+
+    @classmethod
+    def _extract_move_input(cls, text: str) -> tuple[str, str]:
+        """Extract (source, destination) from a move/rename-file command.
+
+        The recognised shapes are: "move file <source> to
+        <destination>" and "rename file <source> to <destination>" -
+        both routed to the same file_move tool. Splits on the *first*
+        occurrence of " to ", mirroring _extract_copy_input's own
+        precedent for the same "X to Y" grammar shape exactly, with the
+        same disclosed limitation (a source path literally containing
+        " to " will be split at that first occurrence).
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (source, destination). Either may be empty, in
+            which case FileMoveTool itself reports the problem - this
+            method never validates, it only splits text.
+        """
+        remainder = cls._strip_write_prefix(text, _FILE_MOVE_PREFIXES)
         lowered = remainder.casefold()
         separator = " to "
         if separator in lowered:
