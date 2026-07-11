@@ -45,6 +45,24 @@ This is a narrow, fixed-shape factory - not a general Plan-building
 framework. It creates Plans only for the five workflow types named
 above, each always exactly two steps, in a fixed order, using fixed
 tool names.
+
+Design constraint (Phase 30, Post-Phase-29 review): every workflow this
+factory builds is deterministic and tool-only, by design, not by
+accident. AI reasoning steps are intentionally excluded and must not be
+added without a separate, approved architecture review. Reason: the
+approval prompt shown before a YELLOW step runs (ui/approval_prompt.py)
+displays only the action, reason, risk tier, and ApprovalRequest.metadata
+- never the step's full tool_input. That is safe today because every
+propagated or literal value written by an existing workflow is either
+text Nathan typed directly in his own command, or a plain path/id
+propagated from a trusted tool result (WorkflowEngine's own
+_PROPAGATED_FIELDS). It would not be safe for an AI-summary step whose
+generated text then flowed silently into a following write step: Nathan
+would be asked to approve a file write without ever seeing the text
+being written. Do not pipe AI-generated prose into a write tool this way.
+More templates beyond the five above are also paused, not closed - add
+one only for a specific request or a clearly demonstrated recurring
+task, not because the machinery exists.
 """
 
 from __future__ import annotations

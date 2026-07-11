@@ -696,6 +696,12 @@ Desktop/OS toast notifications, a system tray icon, email notifications, phone/p
 
 ---
 
+## Phase 23 — Jarvis Operating Guide (complete)
+
+A documentation-only phase, added retroactively to this section (Phase 30): a practical, task-oriented reference for running and using Jarvis, created as `docs/user_guide.md`. It covers how to run the CLI, dashboard, and scheduler; the full command grammar grouped by task; the Inbox/scheduled-summary/startup-notice flow; the dashboard; the GREEN/YELLOW/RED safety model; example sessions; troubleshooting; and an honest list of what Jarvis cannot do yet. No production code or test changed — every command and behavior described was verified directly against the codebase as it stood after Phase 22. This section was originally omitted from README's own phase list; the omission was never intentional, and is corrected here rather than left as drift.
+
+---
+
 ## Phase 24 — File Search Tool (complete)
 
 The one concrete gap in the existing file-command family: `list files`/`read file` require already knowing a path, with no way to find one. Phase 24 adds a single, narrow, read-only tool that searches for files by name or by content across a directory tree — nothing else changes. See `docs/phase_24_completion_report.md` for the full closure write-up.
@@ -815,6 +821,20 @@ The matched file's path never comes from parsing this tool's own human-readable 
 ### What is deliberately NOT included in Phase 29
 
 More than this one workflow template; an AI-generated summary as part of any workflow step (`WorkflowEngine` still executes only deterministic tool calls, never AI); file delete; new file tools; any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; notifications; goals/projects/tasks; and any database-tamper/integrity work. A small, corrective fix was also made to `workflow/engine.py`'s own module docstring, whose "Does NOT" claims about never calling `SecurityManager`/`ToolRegistry` and never persisting anything had gone stale since Phase 27 — corrected to accurately describe the now-existing, narrowly-scoped reload-revalidation exception.
+
+---
+
+## Phase 30 — Workflow & AI-Summary Direction Closure + Documentation Consolidation (complete)
+
+A documentation-only phase, recording two architectural conclusions reached during the Post-Phase-29 direction review, plus a documentation-accuracy fix. No production code, tool, or test behavior changed. See `docs/phase_30_completion_report.md` for the full write-up.
+
+**The workflow/AI-summary boundary is intentional, not an oversight.** `workflow/workflow_plan_factory.py` now documents directly why every workflow template is deterministic and tool-only: the approval prompt shown before a YELLOW step runs displays only the action, reason, risk tier, and metadata — never the step's full `tool_input`. That's safe today because everything written by an existing workflow is either text Nathan typed himself, or a plain path/id propagated from a trusted tool result. It would not be safe for an AI-generated summary to flow silently into a following write step: Nathan would be approving a file write without ever seeing the text being written. AI summaries remain advisory, terminal responses; saving one to a file remains a manual, separate step for now, and automating that is a distinct, separately-reviewable future decision, not a simple workflow template.
+
+**More workflow templates are paused, not closed.** Five templates now exist, proving the deterministic tool-only pattern twice over (Phases 17 and 29). The next one should come from a specific request or a clearly demonstrated recurring task — not merely because the machinery already exists.
+
+### What is deliberately NOT included in Phase 30
+
+Any AI workflow step; any save-summary-to-file automation; any new workflow template; file delete; new tools; any dashboard, scheduler, or Inbox change; any Core service, HTTP server, or IPC bridge; webpage fetching; notifications; goals/projects/tasks; any database-tamper/integrity work; any change to the approval prompt's own display format; and any change to `SecurityManager` or `WorkflowEngine` execution behavior. This phase only added documentation and code comments.
 
 ---
 

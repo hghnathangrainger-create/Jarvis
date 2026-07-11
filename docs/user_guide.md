@@ -166,6 +166,8 @@ Creating, enabling, or disabling a schedule requires approval because it commits
 | `update memory <id>: <content> and show it back` | Updates a memory (with approval), then shows the new content. |
 | `search files for <pattern> and copy first to <destination>` | Searches by filename; if exactly one file matches, asks approval to copy it. Zero or multiple matches stop honestly instead of guessing. No AI, no file delete — see below. |
 
+All five workflows above are fixed, deterministic sequences of existing tools — Jarvis does not currently run an AI-reasoning step as part of a workflow, and this is intentional, not a missing feature (see §9 and §11).
+
 ### Approval/workflow history commands (all GREEN, read-only)
 
 | Command | Does |
@@ -236,6 +238,8 @@ Every action Jarvis can take is classified into exactly one of three tiers befor
 Anything that doesn't match a known safe pattern defaults to **YELLOW**, never GREEN — Jarvis is conservative by default.
 
 **Pending approvals and paused workflows can survive a restart (Phase 27).** If Jarvis is closed or crashes while a YELLOW action is awaiting your decision, or while a multi-step workflow is paused waiting for one, that state is durably saved and re-checked the next time Jarvis starts. Day-to-day this is invisible — you won't see or need to do anything differently. What changes is only what happens if a restart lands exactly mid-approval: previously that pending state vanished silently with no record; now it is either safely restored (still requiring your explicit approval before anything runs — reload never auto-approves or auto-executes) or, if it can no longer be safely resumed (its tool no longer exists, its action's risk level has changed, the saved data is corrupt, or too much time has passed), it is honestly closed out and recorded in the same approval/workflow history you can already review — never silently dropped, and never run without your say-so.
+
+**Workflows never run an AI-reasoning step, and this is intentional (Phase 30).** The approval prompt you see before a YELLOW step runs shows the action, the reason, and the risk tier — but not the full content a step would write. That's safe today because every workflow only ever writes text you typed yourself, or a plain file path/id carried over from the previous step's result — never text generated on the fly. If an AI summary's own generated text were ever wired directly into a following file-write step, you could end up approving "create this file" without seeing what was actually about to be written into it. So Jarvis doesn't do that: AI summaries stay advisory, shown to you as a response, and saving one to a file is a manual step you do yourself (e.g. copy the text Jarvis showed you into a `create file <path> with <content>` command) — not something a workflow automates.
 
 **Other important safety facts, all true today:**
 - AI-generated suggestions are always advisory — they're shown to you as information, never automatically acted on.
@@ -367,6 +371,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 - No workflow-triggering, YELLOW, or RED scheduled actions — only the one GREEN scheduled action exists; scheduling itself (create/enable/disable) is YELLOW, but what runs is always GREEN.
 - No goals/projects/tasks system.
 - No file delete command — `create`/`append`/`copy`/`move`/`rename` are the only file-write operations; deleting a file remains a future, separately-scoped decision.
+- No AI-reasoning step inside a workflow, and no automatic "save this AI summary to a file/Inbox" action — both are a deliberate safety boundary (§9), not an oversight, and would need their own separate, reviewed design before being built.
 
 ---
 
@@ -394,5 +399,7 @@ These are real candidates that have been evaluated in past architectural reviews
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
 - A file delete tool (a distinct, separately-scoped future decision from `move file`/`copy file`).
+- More workflow templates beyond the current five — paused, not closed: the next one should come from a specific need, not just because the machinery exists.
+- Automated "save AI summary to file/Inbox" behavior — paused pending a separate design review of how to let you review the exact content before it's written (see §9).
 
 None of these should be assumed available — always check this guide or the codebase directly rather than assuming a feature exists.
