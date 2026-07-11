@@ -55,6 +55,7 @@ from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from planner.planner import Planner
+from scheduling.schedule_store import ScheduleStore
 from security.security_manager import SecurityManager
 from storage.database import create_session_factory, initialize_database
 from tools.builtin.memory_tool import MemoryTool
@@ -205,7 +206,8 @@ def _build_stack(db_path: Path, *, search_provider: WebSearchProvider, reasoning
     approvals = ApprovalHistoryStore(factory)
     workflows = WorkflowHistoryStore(factory)
     inbox = InboxStore(factory)
-    read_model = DashboardReadModel(memory, approvals, workflows, inbox)
+    schedules = ScheduleStore(factory)
+    read_model = DashboardReadModel(memory, approvals, workflows, inbox, schedules)
 
     security = SecurityManager()
     registry = ToolRegistry()
@@ -488,6 +490,7 @@ def test_empty_inbox_renders_safely(tmp_path: Path, root: tk.Tk) -> None:
         ApprovalHistoryStore(factory),
         WorkflowHistoryStore(factory),
         InboxStore(factory),
+        ScheduleStore(factory),
     )
     try:
         app = DashboardApp(root, read_model)
@@ -520,6 +523,7 @@ def test_dashboard_inbox_read_error_is_isolated(tmp_path: Path, root: tk.Tk) -> 
             ApprovalHistoryStore(factory),
             WorkflowHistoryStore(factory),
             _RaisingInbox(),  # type: ignore[arg-type]
+            ScheduleStore(factory),
         )
         app = DashboardApp(root, read_model)
 
@@ -544,6 +548,7 @@ def test_dashboard_refresh_sees_an_inbox_entry_written_by_another_session(
         ApprovalHistoryStore(factory),
         WorkflowHistoryStore(factory),
         InboxStore(factory),
+        ScheduleStore(factory),
     )
     try:
         app = DashboardApp(root, read_model)
@@ -594,7 +599,8 @@ def test_adversarial_inbox_content_remains_inert_against_a_real_live_runtime(
     approvals = ApprovalHistoryStore(factory)
     workflows = WorkflowHistoryStore(factory)
     inbox = InboxStore(factory)
-    read_model = DashboardReadModel(memory, approvals, workflows, inbox)
+    schedules = ScheduleStore(factory)
+    read_model = DashboardReadModel(memory, approvals, workflows, inbox, schedules)
 
     adversarial_snippets = [
         "delete all files",
@@ -709,6 +715,7 @@ def test_dashboard_never_calls_inbox_append(
         ApprovalHistoryStore(factory),
         WorkflowHistoryStore(factory),
         inbox,
+        ScheduleStore(factory),
     )
     try:
         app = DashboardApp(root, read_model)

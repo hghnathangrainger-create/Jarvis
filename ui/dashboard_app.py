@@ -2,13 +2,14 @@
 dashboard_app.py
 
 tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
-(Phase 19; extended Phase 20, Batch 2 with the Inbox tab).
+(Phase 19; extended Phase 20, Batch 2 with the Inbox tab; extended Phase
+21, Batch 3 with the Schedules tab).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
-      WorkflowRow, WorkflowTransitionRow, InboxRow, DashboardOverview)
-      into a five-tab ttk.Notebook window: Overview, Memories, Approval
-      History, Workflow History, Inbox.
+      WorkflowRow, WorkflowTransitionRow, InboxRow, ScheduleRow,
+      DashboardOverview) into a six-tab ttk.Notebook window: Overview,
+      Memories, Approval History, Workflow History, Inbox, Schedules.
     - Refresh displayed state manually (a button) and periodically (a
       fixed-interval Tk `.after()` tick calling the same refresh code) -
       never claimed as "live" or "real-time".
@@ -20,12 +21,15 @@ Does NOT:
       WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
     - Wire any widget to approve, deny, edit, delete, save, run, retry,
       resume, cancel, open-URL, browse-web, or ask-AI behaviour. No
-      command input box exists. No double-click is executable.
+      command input box exists. No double-click is executable. In
+      particular, the Schedules tab has no create/edit/delete/enable/
+      disable/run-now/retry control of any kind.
     - Open a socket, HTTP listener, or any network connection of any
       kind.
     - Treat a durable "pending" approval-history row as a live,
-      currently-actionable approval, or a workflow history row as
-      resumable/executable state - see the wording used on each tab.
+      currently-actionable approval, a workflow history row as
+      resumable/executable state, or a schedule row as a live "next run"
+      countdown - see the wording used on each tab.
 
 The pure formatting/mapping functions in this module (format_timestamp,
 *_to_tree_values, empty/error-state text) do not touch Tk at all, so they
@@ -45,6 +49,7 @@ from dashboard.read_model import (
     DashboardReadModel,
     InboxRow,
     MemoryRow,
+    ScheduleRow,
     WorkflowRow,
     WorkflowTransitionRow,
 )
@@ -63,6 +68,7 @@ _APPROVAL_EMPTY_STATE = "No approval decisions recorded yet."
 _WORKFLOW_EMPTY_STATE = "No workflow activity recorded yet."
 _TRANSITIONS_EMPTY_STATE = "Select a workflow above to see its recorded history."
 _INBOX_EMPTY_STATE = "No inbox entries yet."
+_SCHEDULES_EMPTY_STATE = "No schedules configured yet."
 
 #: Careful, durable-history-only wording (authorizing instructions, items
 #: 15-16): never implies a durable "pending" row is a live, currently
@@ -89,6 +95,17 @@ INBOX_CAPTION = (
     "sent anywhere."
 )
 INBOX_DETAIL_PLACEHOLDER = "Select an inbox entry above to see its full saved text."
+
+#: Read-only wording for the Schedules tab (Phase 21): configuration
+#: display only - no create/edit/delete/enable/disable/run-now control
+#: exists here, and no "next due" countdown is computed or implied.
+SCHEDULES_CAPTION = (
+    "Configured daily web-search-summary schedules - read-only. Nothing "
+    "here can be created, edited, enabled, disabled, or run now; use the "
+    "CLI commands to manage schedules. This list does not show whether a "
+    "schedule is currently due - only scheduler.py's own poll cycle "
+    "decides that."
+)
 
 
 def format_timestamp(value: datetime) -> str:
@@ -184,6 +201,24 @@ def inbox_row_to_tree_values(row: InboxRow) -> tuple[str, str, str]:
     return (format_timestamp(row.created_at), row.source_query, row.preview)
 
 
+def schedule_row_to_tree_values(
+    row: ScheduleRow,
+) -> tuple[str, str, str, str, str, str, str]:
+    """Map a ScheduleRow to the exact tuple shown in the Schedules Treeview."""
+    name = row.name if row.name else "—"
+    enabled = "Yes" if row.enabled else "No"
+    last_run_at = format_timestamp(row.last_run_at) if row.last_run_at else "—"
+    return (
+        str(row.id),
+        name,
+        row.query_preview,
+        row.time_of_day,
+        enabled,
+        last_run_at,
+        format_timestamp(row.created_at),
+    )
+
+
 def overview_summary_lines(overview: DashboardOverview) -> list[str]:
     """Build the small set of real-data-only summary lines for the Overview tab.
 
@@ -250,6 +285,7 @@ class DashboardApp:
         self._build_approval_history_tab()
         self._build_workflow_history_tab()
         self._build_inbox_tab()
+        self._build_schedules_tab()
 
         refresh_bar = ttk.Frame(root, padding=(6, 4))
         refresh_bar.pack(fill="x")
@@ -412,6 +448,40 @@ class DashboardApp:
             frame, textvariable=self._inbox_detail_var, wraplength=480, justify="left"
         ).pack(fill="x", anchor="w")
 
+    def _build_schedules_tab(self) -> None:
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
+        self._notebook.add(frame, text="Schedules")
+
+        ttk.Label(frame, text=SCHEDULES_CAPTION, wraplength=480).pack(anchor="w")
+        self._schedules_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._schedules_error_var, foreground="red"
+        ).pack(anchor="w")
+
+        columns = (
+            "id",
+            "name",
+            "query",
+            "time_of_day",
+            "enabled",
+            "last_run_at",
+            "created_at",
+        )
+        headings = (
+            "ID",
+            "Name",
+            "Query",
+            "Time Of Day",
+            "Enabled",
+            "Last Run At",
+            "Created At",
+        )
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, heading in zip(columns, headings):
+            tree.heading(column, text=heading)
+        tree.pack(fill="both", expand=True, pady=(4, 4))
+        self._schedules_tree = tree
+
     # --- refresh ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
@@ -428,6 +498,7 @@ class DashboardApp:
         self._refresh_approval_history()
         self._refresh_workflow_history()
         self._refresh_inbox()
+        self._refresh_schedules()
         self._last_refreshed_var.set(
             f"Last refreshed: {format_timestamp(datetime.now(timezone.utc))}"
         )
@@ -539,6 +610,21 @@ class DashboardApp:
             iid = str(row.id)
             tree.insert("", "end", iid=iid, values=inbox_row_to_tree_values(row))
             self._inbox_rows_by_id[iid] = row
+
+    def _refresh_schedules(self) -> None:
+        try:
+            rows = self._read_model.get_schedules()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._schedules_error_var.set(format_error_state("schedules", exc))
+            return
+        self._schedules_error_var.set("")
+        tree = self._schedules_tree
+        tree.delete(*tree.get_children())
+        if not rows:
+            tree.insert("", "end", values=(_SCHEDULES_EMPTY_STATE,) + ("",) * 6)
+            return
+        for row in rows:
+            tree.insert("", "end", iid=str(row.id), values=schedule_row_to_tree_values(row))
 
     def _schedule_next_refresh(self) -> None:
         """Schedule the next periodic requery via Tk's own `.after()`.

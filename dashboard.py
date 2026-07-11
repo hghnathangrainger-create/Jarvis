@@ -1,26 +1,29 @@
 """
 dashboard.py
 
-Entry point for the local, read-only Jarvis dashboard (Phase 19).
+Entry point for the local, read-only Jarvis dashboard (Phase 19; extended
+Phase 21 with the Schedules tab's read path).
 
 Responsibilities:
     - Load configuration and open the same configured SQLite-backed
       Jarvis database main.py uses, independently.
     - Construct MemoryManager, ApprovalHistoryStore,
-      WorkflowHistoryStore, and InboxStore, and compose them into a
-      DashboardReadModel.
+      WorkflowHistoryStore, InboxStore, and ScheduleStore, and compose
+      them into a DashboardReadModel.
     - Start the tkinter/ttk dashboard window.
 
 Does NOT:
     - Import or depend on main.py, JarvisOrchestrator, JarvisCLI,
       CommandRouter, ToolExecutor, the live ApprovalManager,
-      WorkflowEngine, AIReasoningEngine, or AIRouter.
-    - Require the Jarvis CLI process to be running. This is a wholly
-      separate local process that shares only the SQLite database file
-      on disk - no IPC, no socket, no shared Python objects.
+      WorkflowEngine, AIReasoningEngine, AIRouter, or scheduler.py.
+    - Require the Jarvis CLI process or scheduler.py to be running. This
+      is a wholly separate local process that shares only the SQLite
+      database file on disk - no IPC, no socket, no shared Python
+      objects.
     - Write to the database in any way beyond the same idempotent
       initialize_database() call main.py itself already makes on every
-      startup.
+      startup. In particular, this module never calls
+      ScheduleStore.create/enable/disable/claim_due.
 
 Run with:
     poetry run python dashboard.py
@@ -36,6 +39,7 @@ from dashboard.read_model import DashboardReadModel
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from scheduling.schedule_store import ScheduleStore
 from storage.database import (
     create_database_engine,
     create_session_factory,
@@ -65,7 +69,8 @@ def build_read_model() -> DashboardReadModel:
     approvals = ApprovalHistoryStore(session_factory)
     workflows = WorkflowHistoryStore(session_factory)
     inbox = InboxStore(session_factory)
-    return DashboardReadModel(memory, approvals, workflows, inbox)
+    schedules = ScheduleStore(session_factory)
+    return DashboardReadModel(memory, approvals, workflows, inbox, schedules)
 
 
 def main() -> None:

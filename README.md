@@ -610,6 +610,53 @@ Any scheduler, timer loop, background runner, recurring job, missed-run or dupli
 
 ---
 
+## Phase 21 — GREEN-Only Scheduled Web-Search Summaries to Inbox (complete)
+
+Jarvis's first proactive, unattended behaviour: Nathan can now define a small number of daily, fixed-time web-search-summary schedules that run without him touching the keyboard, saving a successful result straight into the durable Inbox Phase 20 already built. Exactly one scheduled action type exists — there is no general-purpose scheduler, no arbitrary command scheduling, and no stored command string ever executed later. See `docs/phase_21_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Schedule storage, CRUD tools, and CLI grammar.** A new `schedules` table and `ScheduleStore` (`scheduling/schedule_store.py`) — the first durable table in the project that is mutable rather than append-only, since a schedule's `enabled`/`last_run_at` fields change in place. Four ordinary tools (`schedule_create`, `schedule_list`, `schedule_enable`, `schedule_disable`) are routed through the completely unmodified `CommandRouter` → `ToolExecutor` → `SecurityManager` → `ApprovalManager` pipeline — creating, enabling, or disabling a schedule is YELLOW and requires the same explicit confirmation as any other guarded write; listing is GREEN.
+- **Batch 2 — Runner, atomic claim, and trust-safe execution.** `scheduler.py`, a fourth independent composition root (mirroring `dashboard.py`), polls once a minute and, for each enabled schedule, atomically claims it via one SQL `UPDATE ... WHERE ...` statement if it is due — closing the two-runner race at the database layer itself, not in Python. A new, narrow helper (`scheduling/scheduled_summary_runner.py`) performs the search and AI summary; the interactive `summarise web search for <query>` command (`core/orchestrator.py`) and `ai/web_search_ingestion.py` are both completely unmodified.
+- **Batch 3 — Dashboard Schedules tab, end-to-end verification, adversarial proof, and closure.** A sixth, read-only dashboard tab; a real-SQLite, real-CLI-approval, real-runner end-to-end proof that a schedule created through the approved command path is later claimed and run exactly once per due day; and — the strongest adversarial proof in this phase — a full, real, live Jarvis execution stack sharing the same process as the dashboard and the runner, seeded with prompt-injection-style scheduled queries, showing zero effect anywhere.
+
+### Schedule commands
+
+```
+schedule web search summary for jarvis ai news at 08:00
+list schedules
+enable schedule 1
+disable schedule 1
+```
+
+`schedule web search summary for <query> at <HH:MM>` requires approval, exactly like `create file` or `append to file` — Nathan is asked to confirm before Jarvis commits to running something unattended in the future. `time_of_day` is a strict 24-hour `HH:MM`; there is no natural-language time parser and no cron-expression syntax. There is no `update`/`edit`/`reschedule` command — `disable` is the only way to stop a schedule from running, and there is no `delete`.
+
+### The scheduler runner
+
+```powershell
+poetry run python scheduler.py
+```
+
+A third independent process, alongside `main.py`/the CLI and `dashboard.py` — it does not require either to be running, and shares only the same SQLite database file on disk. It polls every 60 seconds; for each enabled schedule whose `time_of_day` has been reached in host local time and that has not already run today, it atomically claims it, runs the one hard-coded search-and-summarise action, and — only on genuine, validated success — saves one entry to the Inbox with `source_type="scheduled_web_search_summary"` (a distinct value from the interactive command's `"web_search_summary"`, so an overnight result is always honestly distinguishable from one Nathan asked for directly). A schedule "missed" because the runner wasn't running catches up the same day it's next checked, but never backfills more than once, no matter how many days were missed. A claim that is followed by a search failure, an unavailable/failed/invalid AI response, or a failed Inbox write creates no entry and does not retry until the next calendar day — `last_run_at` is set at claim time, before the run's own outcome is known. If AI reasoning is not configured at all, nothing is claimed, so every due schedule remains eligible to catch up later the same day once it becomes available.
+
+**A stored scheduled query is never treated as live input.** The interactive command's `user_message` prompt slot exists specifically because a live human is typing it that moment, and is therefore the one part of a prompt never scanned for injection. A scheduled run has no live human present, so the runner never reuses that path: it passes a fixed, Jarvis-authored instruction as `user_input`, and the stored query only ever appears inside the same scanned, labelled `UNTRUSTED` context block every other piece of external content already receives — a stricter posture than the interactive path, deliberately, because nothing here is confirmed by a human each time it fires.
+
+### Dashboard Schedules tab
+
+| Column | What it shows |
+|---|---|
+| ID, Name, Query, Time Of Day, Enabled, Last Run At, Created At | Every configured schedule, in the same stable, oldest-first order `ScheduleStore` itself uses. |
+
+Read-only, like every other tab: there is no create, edit, delete, enable, disable, or run-now control anywhere on it, and no "next due" countdown is computed or shown — only `scheduler.py`'s own poll cycle decides whether a schedule is currently due.
+
+### Safety note: one hard-coded action, gated the same way every write already is
+
+There is no `action_type` column and no dispatch table — every claimed schedule runs the exact same, single, hard-coded search-and-summarise call; a second schedule action type, if ever proposed, would be its own separately-reviewed decision, not something this phase's schema quietly already supports. `scheduler.py` never imports `CommandRouter`, `ToolExecutor`, `ApprovalManager`, or `WorkflowEngine` — there is no live command to route and no approval to gate at run time, because the schedule was already approved when it was created. Audit events for the runner (`schedule_claimed`, `scheduled_summary_succeeded`, `scheduled_summary_failed`) are metadata-only, exactly like every other audit event in this project — never the query, never the summary text.
+
+### What is deliberately NOT included in Phase 21
+
+Any general-purpose scheduler, task queue, or background-agent framework (no `Celery`, `Redis`, `APScheduler`); any workflow-triggering, YELLOW, or RED scheduled *action* (only the schedule's own creation/enable/disable is YELLOW — what it runs is always the one GREEN action); approval scheduling; any notification delivery of any kind (desktop, email, push, phone, or CLI-on-next-launch); any dashboard write action, including schedule creation, editing, enabling, disabling, or run-now; any Core service, HTTP server, IPC bridge, socket bridge, or client/server refactor; a natural-language schedule parser or cron-expression system; and full webpage fetching (scheduled summaries use the same search-result snippets/metadata Phase 18 already used — never a full page read). This closes one narrow gap (Jarvis can now do one useful thing without being asked in the moment) — it does not, by itself, make Jarvis a general automation platform, notify Nathan through any channel other than the Inbox he already has to open, or add any new execution authority anywhere.
+
+---
+
 ## Example Session
 
 ```

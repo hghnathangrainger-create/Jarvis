@@ -2,26 +2,29 @@
 read_model.py
 
 Narrow, read-only composition layer over Jarvis's durable stores, for the
-local dashboard (Phase 19; extended Phase 20 with the inbox).
+local dashboard (Phase 19; extended Phase 20 with the inbox; extended
+Phase 21 with schedules).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
       display (MemoryRow, ApprovalRow, WorkflowRow, WorkflowTransitionRow,
-      InboxRow, DashboardOverview).
+      InboxRow, ScheduleRow, DashboardOverview).
     - Define DashboardReadModel, which composes MemoryManager,
-      ApprovalHistoryStore, WorkflowHistoryStore, and InboxStore's
-      existing public read methods into those view models.
+      ApprovalHistoryStore, WorkflowHistoryStore, InboxStore, and
+      ScheduleStore's existing public read methods into those view
+      models.
 
 Does NOT:
     - Call any write/mutating method on any store (save, update_content,
       update_category, forget, record_request, record_decision,
-      record_timeout, record_transition, append).
+      record_timeout, record_transition, append, create, enable, disable,
+      claim_due).
     - Parse CLI output, tool output, or any formatted display string.
     - Import CommandRouter, ToolExecutor, the live ApprovalManager,
       WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
     - Implement a generic CQRS, event-sourcing, or reporting framework.
-      This module exists only to compose the four approved dashboard
-      domains; it has exactly as many methods as the dashboard's five
+      This module exists only to compose the five approved dashboard
+      domains; it has exactly as many methods as the dashboard's six
       views need, no more.
     - Truncate, summarise, or otherwise rewrite memory or inbox content
       using AI. Preview truncation here is a fixed, deterministic
@@ -39,6 +42,7 @@ from datetime import datetime
 from approval.approval_history_store import ApprovalHistoryStore
 from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
+from scheduling.schedule_store import ScheduleStore
 from workflow.workflow_history_store import WorkflowHistoryStore
 
 #: Maximum length of a memory content preview shown in list views. Full,
@@ -218,6 +222,39 @@ class InboxRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleRow:
+    """A single configured schedule, shaped for dashboard display.
+
+    This describes durable schedule configuration only - it is never a
+    live "next run in N minutes" countdown (no such value is computed or
+    stored anywhere; see docs/phase_21_implementation_plan.md section
+    15). Whether a schedule is currently due is decided solely by
+    scheduler.py's own poll cycle, never by this row.
+
+    Attributes:
+        id: The schedule's primary key.
+        name: The optional user-supplied label, or None.
+        query_preview: A deterministically truncated preview of the
+            query (same 120-character truncation convention as
+            MemoryRow/InboxRow).
+        time_of_day: The scheduled time, as "HH:MM" in host local time.
+        enabled: Whether the schedule is currently active.
+        last_run_at: UTC-in-substance timestamp of the most recent
+            claimed run, or None if it has never run.
+        created_at: UTC-in-substance timestamp of when the schedule was
+            created.
+    """
+
+    id: int
+    name: str | None
+    query_preview: str
+    time_of_day: str
+    enabled: bool
+    last_run_at: datetime | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardOverview:
     """The small, at-a-glance summary shown on the Overview tab.
 
@@ -263,19 +300,22 @@ class DashboardReadModel:
         approvals: ApprovalHistoryStore,
         workflows: WorkflowHistoryStore,
         inbox: InboxStore,
+        schedules: ScheduleStore,
     ) -> None:
-        """Initialise the read model with the four approved durable stores.
+        """Initialise the read model with the five approved durable stores.
 
         Args:
             memory: The memory manager to read from.
             approvals: The approval history store to read from.
             workflows: The workflow history store to read from.
             inbox: The inbox store to read from.
+            schedules: The schedule store to read from.
         """
         self._memory = memory
         self._approvals = approvals
         self._workflows = workflows
         self._inbox = inbox
+        self._schedules = schedules
 
     def get_overview(self) -> DashboardOverview:
         """Return the small, real-data-only Overview summary.
@@ -401,6 +441,35 @@ class DashboardReadModel:
                 step_total=record.step_total,
                 tool_name=record.tool_name,
                 detail=record.detail,
+                created_at=record.created_at,
+            )
+            for record in records
+        ]
+
+    def get_schedules(self, limit: int = 50) -> list[ScheduleRow]:
+        """Return configured schedules, in ScheduleStore's own stable order.
+
+        Reuses ScheduleStore.list_all() unchanged - no new store API
+        surface is added specifically for the dashboard. Ordering
+        (id ascending, a small stable configuration list rather than a
+        "most recent history" view) is ScheduleStore's own decision, not
+        re-derived here.
+
+        Args:
+            limit: Maximum number of schedules to return.
+
+        Returns:
+            A list of ScheduleRow objects.
+        """
+        records = self._schedules.list_all(limit=limit)
+        return [
+            ScheduleRow(
+                id=record.id,
+                name=record.name,
+                query_preview=_truncate_preview(record.query),
+                time_of_day=record.time_of_day,
+                enabled=record.enabled,
+                last_run_at=record.last_run_at,
                 created_at=record.created_at,
             )
             for record in records

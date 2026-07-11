@@ -2,14 +2,15 @@
 test_dashboard_read_model.py
 
 Unit tests for dashboard/read_model.py (Phase 19, Batch 1; extended Phase
-20, Batch 2 for the inbox): the narrow, read-only composition layer over
-MemoryManager, ApprovalHistoryStore, WorkflowHistoryStore, and InboxStore
+20, Batch 2 for the inbox; extended Phase 21, Batch 3 for schedules): the
+narrow, read-only composition layer over MemoryManager,
+ApprovalHistoryStore, WorkflowHistoryStore, InboxStore, and ScheduleStore
 that the dashboard UI depends on.
 
 These use a real in-memory SQLite database (not a fake), exercising the
 same storage layer Jarvis uses at runtime, plus a structural (AST-based)
 test proving dashboard/read_model.py never calls a write-capable method on
-any of the four stores.
+any of the five stores.
 
 Run with:
     pytest tests/unit/test_dashboard_read_model.py
@@ -31,6 +32,7 @@ from dashboard.read_model import DashboardReadModel
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from scheduling.schedule_store import ScheduleStore
 from storage.database import create_session_factory, initialize_database
 from workflow.workflow_history_store import WorkflowHistoryStore
 
@@ -43,9 +45,10 @@ def _make_read_model() -> tuple[
     ApprovalHistoryStore,
     WorkflowHistoryStore,
     InboxStore,
+    ScheduleStore,
 ]:
-    """Build a DashboardReadModel over four stores sharing one fresh
-    in-memory database, plus the four underlying stores themselves so
+    """Build a DashboardReadModel over five stores sharing one fresh
+    in-memory database, plus the five underlying stores themselves so
     tests can seed real data through their own real write methods."""
     engine = create_engine("sqlite:///:memory:")
     initialize_database(engine)
@@ -55,8 +58,9 @@ def _make_read_model() -> tuple[
     approvals = ApprovalHistoryStore(factory)
     workflows = WorkflowHistoryStore(factory)
     inbox = InboxStore(factory)
-    read_model = DashboardReadModel(memory, approvals, workflows, inbox)
-    return read_model, memory, approvals, workflows, inbox
+    schedules = ScheduleStore(factory)
+    read_model = DashboardReadModel(memory, approvals, workflows, inbox, schedules)
+    return read_model, memory, approvals, workflows, inbox, schedules
 
 
 @pytest.fixture()
@@ -66,6 +70,7 @@ def rm() -> tuple[
     ApprovalHistoryStore,
     WorkflowHistoryStore,
     InboxStore,
+    ScheduleStore,
 ]:
     return _make_read_model()
 
@@ -74,7 +79,7 @@ def rm() -> tuple[
 
 
 def test_recent_memories_are_newest_first(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     memory.save("first")
     memory.save("second")
     memory.save("third")
@@ -84,7 +89,7 @@ def test_recent_memories_are_newest_first(rm) -> None:
 
 
 def test_memory_preview_unchanged_at_exactly_120_chars(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     content = "x" * 120
     memory.save(content)
 
@@ -94,7 +99,7 @@ def test_memory_preview_unchanged_at_exactly_120_chars(rm) -> None:
 
 
 def test_memory_preview_truncated_above_120_chars(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     content = "y" * 121
     memory.save(content)
 
@@ -104,7 +109,7 @@ def test_memory_preview_truncated_above_120_chars(rm) -> None:
 
 
 def test_memory_row_fields_map_from_real_record(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     memory.save("budget notes", category="project")
 
     row = read_model.get_recent_memories()[0]
@@ -114,7 +119,7 @@ def test_memory_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_memory_category_filter_is_honoured(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     memory.save("a", category="project")
     memory.save("b", category="personal")
 
@@ -124,7 +129,7 @@ def test_memory_category_filter_is_honoured(rm) -> None:
 
 def test_memory_rows_remain_usable_after_call_returns(rm) -> None:
     """Detached data: no lazy-loading, no dependency on an open session."""
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     memory.save("detached check")
 
     rows = read_model.get_recent_memories()
@@ -136,7 +141,7 @@ def test_memory_rows_remain_usable_after_call_returns(rm) -> None:
 
 
 def test_recent_memories_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     assert read_model.get_recent_memories() == []
 
 
@@ -144,7 +149,7 @@ def test_recent_memories_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_approval_row_fields_map_exactly_from_history(rm) -> None:
-    read_model, _, approvals, _, _ = rm
+    read_model, _, approvals, _, _, _ = rm
     approvals.record_request(
         request_id="req-1",
         action="forget memory",
@@ -164,7 +169,7 @@ def test_approval_row_fields_map_exactly_from_history(rm) -> None:
 def test_approval_row_reflects_a_recorded_decision(rm) -> None:
     from datetime import datetime, timezone
 
-    read_model, _, approvals, _, _ = rm
+    read_model, _, approvals, _, _, _ = rm
     approvals.record_request(
         request_id="req-2",
         action="update memory",
@@ -185,7 +190,7 @@ def test_approval_row_reflects_a_recorded_decision(rm) -> None:
 
 
 def test_recent_approvals_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     assert read_model.get_recent_approvals() == []
 
 
@@ -193,7 +198,7 @@ def test_recent_approvals_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_recent_workflow_ids_are_distinct(rm) -> None:
-    read_model, _, _, workflows, _ = rm
+    read_model, _, _, workflows, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
 
@@ -202,7 +207,7 @@ def test_recent_workflow_ids_are_distinct(rm) -> None:
 
 
 def test_recent_workflows_ordering_is_deterministic(rm) -> None:
-    read_model, _, _, workflows, _ = rm
+    read_model, _, _, workflows, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-2", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
@@ -214,7 +219,7 @@ def test_recent_workflows_ordering_is_deterministic(rm) -> None:
 def test_transition_heavy_workflow_does_not_crowd_out_others_in_read_model(
     rm,
 ) -> None:
-    read_model, _, _, workflows, _ = rm
+    read_model, _, _, workflows, _, _ = rm
     workflows.record_transition(workflow_id="wf-quiet", status="workflow_started")
     for step in range(1, 8):
         workflows.record_transition(
@@ -231,7 +236,7 @@ def test_transition_heavy_workflow_does_not_crowd_out_others_in_read_model(
 
 
 def test_workflow_row_latest_status_matches_store_semantics(rm) -> None:
-    read_model, _, _, workflows, _ = rm
+    read_model, _, _, workflows, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_step_waiting")
 
@@ -242,7 +247,7 @@ def test_workflow_row_latest_status_matches_store_semantics(rm) -> None:
 
 
 def test_workflow_transitions_are_oldest_first(rm) -> None:
-    read_model, _, _, workflows, _ = rm
+    read_model, _, _, workflows, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
 
@@ -251,12 +256,12 @@ def test_workflow_transitions_are_oldest_first(rm) -> None:
 
 
 def test_workflow_transitions_unknown_id_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     assert read_model.get_workflow_transitions("does-not-exist") == []
 
 
 def test_recent_workflows_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     assert read_model.get_recent_workflows() == []
 
 
@@ -264,7 +269,7 @@ def test_recent_workflows_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_overview_total_memory_count_uses_the_existing_count_path(rm) -> None:
-    read_model, memory, _, _, _ = rm
+    read_model, memory, _, _, _, _ = rm
     memory.save("one")
     memory.save("two")
     memory.save("three")
@@ -274,7 +279,7 @@ def test_overview_total_memory_count_uses_the_existing_count_path(rm) -> None:
 
 
 def test_overview_recent_approvals_and_workflows_populated(rm) -> None:
-    read_model, _, approvals, workflows, inbox = rm
+    read_model, _, approvals, workflows, inbox, _ = rm
     approvals.record_request(
         request_id="req-1",
         action="delete file",
@@ -292,7 +297,7 @@ def test_overview_recent_approvals_and_workflows_populated(rm) -> None:
 
 
 def test_overview_on_empty_database_is_a_valid_empty_view_model(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     overview = read_model.get_overview()
     assert overview.total_memory_count == 0
     assert overview.recent_approvals == ()
@@ -305,7 +310,7 @@ def test_overview_on_empty_database_is_a_valid_empty_view_model(rm) -> None:
 
 
 def test_recent_inbox_entries_are_newest_first(rm) -> None:
-    read_model, _, _, _, inbox = rm
+    read_model, _, _, _, inbox, _ = rm
     inbox.append(source_type="web_search_summary", source_query="first", body="b")
     inbox.append(source_type="web_search_summary", source_query="second", body="b")
     inbox.append(source_type="web_search_summary", source_query="third", body="b")
@@ -315,7 +320,7 @@ def test_recent_inbox_entries_are_newest_first(rm) -> None:
 
 
 def test_inbox_row_fields_map_from_real_record(rm) -> None:
-    read_model, _, _, _, inbox = rm
+    read_model, _, _, _, inbox, _ = rm
     inbox.append(
         source_type="web_search_summary",
         source_query="jarvis news",
@@ -332,7 +337,7 @@ def test_inbox_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_inbox_preview_truncated_above_120_chars(rm) -> None:
-    read_model, _, _, _, inbox = rm
+    read_model, _, _, _, inbox, _ = rm
     long_body = "z" * 121
     inbox.append(source_type="web_search_summary", source_query="q", body=long_body)
 
@@ -342,13 +347,73 @@ def test_inbox_preview_truncated_above_120_chars(rm) -> None:
 
 
 def test_recent_inbox_entries_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _ = rm
+    read_model, _, _, _, _, _ = rm
     assert read_model.get_recent_inbox_entries() == []
+
+
+# --- get_schedules ---------------------------------------------------------------
+
+
+def test_get_schedules_empty_store_returns_empty_list(rm) -> None:
+    read_model, _, _, _, _, _ = rm
+    assert read_model.get_schedules() == []
+
+
+def test_get_schedules_returns_real_data_in_id_ascending_order(rm) -> None:
+    read_model, _, _, _, _, schedules = rm
+    schedules.create(query="first", time_of_day="08:00")
+    schedules.create(query="second", time_of_day="09:00")
+
+    rows = read_model.get_schedules()
+    assert [row.query_preview for row in rows] == ["first", "second"]
+
+
+def test_schedule_row_fields_map_from_real_record(rm) -> None:
+    read_model, _, _, _, _, schedules = rm
+    schedules.create(query="jarvis ai news", time_of_day="08:30", name="Morning news")
+
+    row = read_model.get_schedules()[0]
+    assert row.name == "Morning news"
+    assert row.query_preview == "jarvis ai news"
+    assert row.time_of_day == "08:30"
+    assert row.enabled is True
+    assert row.last_run_at is None
+    assert row.created_at is not None
+
+
+def test_schedule_row_shows_disabled_state(rm) -> None:
+    read_model, _, _, _, _, schedules = rm
+    record = schedules.create(query="q", time_of_day="08:00")
+    schedules.disable(record.id)
+
+    row = read_model.get_schedules()[0]
+    assert row.enabled is False
+
+
+def test_schedule_row_shows_last_run_at_after_a_claim(rm) -> None:
+    from datetime import datetime, timezone
+
+    read_model, _, _, _, _, schedules = rm
+    record = schedules.create(query="q", time_of_day="00:00")
+    now = datetime.now(timezone.utc)
+    schedules.claim_due(record.id, now=now)
+
+    row = read_model.get_schedules()[0]
+    assert row.last_run_at is not None
+
+
+def test_schedule_query_preview_truncated_above_120_chars(rm) -> None:
+    read_model, _, _, _, _, schedules = rm
+    long_query = "z" * 200
+    schedules.create(query=long_query, time_of_day="08:00")
+
+    row = read_model.get_schedules()[0]
+    assert row.query_preview == ("z" * 120) + "..."
 
 
 # --- structural: no write path -------------------------------------------------
 
-#: Method names, on any of the three stores, that imply a mutation. If
+#: Method names, on any of the five stores, that imply a mutation. If
 #: dashboard/read_model.py ever calls any of these, the read-only boundary
 #: is broken.
 _WRITE_METHOD_NAMES = frozenset(
@@ -363,14 +428,20 @@ _WRITE_METHOD_NAMES = frozenset(
         "record_decision",
         "record_timeout",
         "record_transition",
-        # Deliberately NOT "append": InboxStore.append() is a real write
-        # method, but this AST scan matches any Call(Attribute) node's
-        # attribute name regardless of the object it's called on, and
-        # get_recent_workflows already legitimately calls Python's own
-        # list.append() to build its return value - including "append"
-        # here would be a false positive, not a real safety check.
-        # test_read_model_module_never_calls_inbox_append below proves
-        # the InboxStore-specific case precisely instead.
+        "enable",
+        "disable",
+        "claim_due",
+        # Deliberately NOT "append" or "create": InboxStore.append() and
+        # ScheduleStore.create() are real write methods, but this AST scan
+        # matches any Call(Attribute) node's attribute name regardless of
+        # the object it's called on, and get_recent_workflows already
+        # legitimately calls Python's own list.append() to build its
+        # return value, while nothing in this module calls anything named
+        # "create" at all today - included here as a deliberately absent
+        # entry, not an oversight. test_read_model_module_never_calls_
+        # inbox_append and test_read_model_module_never_calls_schedule_
+        # mutating_methods below prove the InboxStore/ScheduleStore-
+        # specific cases precisely instead.
     }
 )
 
@@ -390,6 +461,32 @@ def test_read_model_module_calls_no_write_method() -> None:
 
     forbidden_calls = called_attribute_names & _WRITE_METHOD_NAMES
     assert forbidden_calls == set()
+
+
+def test_read_model_module_never_calls_schedule_create() -> None:
+    """Precise structural proof for ScheduleStore.create() specifically -
+    the generic _WRITE_METHOD_NAMES scan above deliberately omits "create"
+    since it is not otherwise a generic collision risk in this module, but
+    this test still proves the specific `self._schedules.create(...)`
+    shape never appears, for parity with the inbox_append proof below."""
+    source = inspect.getsource(read_model_module)
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "create":
+            continue
+        target = node.func.value
+        is_self_schedules = (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_schedules"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+        assert not is_self_schedules, (
+            "dashboard/read_model.py must never call self._schedules.create()"
+        )
 
 
 def test_read_model_module_never_calls_inbox_append() -> None:
@@ -420,7 +517,7 @@ def test_read_model_module_imports_no_execution_component() -> None:
     """Structural proof that dashboard/read_model.py cannot reach
     CommandRouter, ToolExecutor, the live ApprovalManager, WorkflowEngine,
     AIReasoningEngine, AIRouter, or WebSearchTool - it only imports the
-    three approved read-side managers/stores."""
+    five approved read-side managers/stores."""
     source = inspect.getsource(read_model_module)
     tree = ast.parse(source)
 
