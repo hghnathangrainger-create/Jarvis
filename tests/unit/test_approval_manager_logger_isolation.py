@@ -368,7 +368,11 @@ def test_all_audit_sites_use_the_shared_helper() -> None:
             and node.func.attr == attr_name
         )
 
-    assert _count_calls("_emit_audit_event") == 2
+    # 3 call sites: _audit() (decide), _audit_timeout() (expire), and
+    # _audit_reload_invalidation() (Phase 27, Batch 1 - a pending row that
+    # fails reload revalidation) - all three reuse this one isolated
+    # helper rather than calling self._audit_logger.emit() directly.
+    assert _count_calls("_emit_audit_event") == 3
     assert _count_calls("emit") == 1
 
 

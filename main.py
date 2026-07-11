@@ -33,6 +33,7 @@ from ai.response_validator import ResponseValidator
 from ai.router import AIRouter
 from approval.approval_history_store import ApprovalHistoryStore
 from approval.approval_manager import ApprovalManager
+from approval.pending_approval_store import PendingApprovalStore
 from config.settings import load_settings
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
@@ -114,11 +115,20 @@ def build_orchestrator() -> JarvisOrchestrator:
     # timeout_seconds enables YELLOW approval-window expiry (Phase 6,
     # Batch 3): a pending YELLOW request unanswered for this many seconds
     # expires (ApprovalStatus.EXPIRED), never RED, and never as a decision.
+    #
+    # pending_approvals (Phase 27, Batch 1) durably persists the execution
+    # state (tool_name/tool_input) of a pending YELLOW approval, so it can
+    # survive a restart. This is a *different* table from approval_history
+    # above - see pending_approval_store.py's own module docstring. Nothing
+    # is reloaded from it yet here; reload_pending() is called explicitly,
+    # below, only once the tool registry is fully populated.
     approval_history = ApprovalHistoryStore(session_factory)
+    pending_approvals = PendingApprovalStore(session_factory)
     approvals = ApprovalManager(
         audit_logger=logger,
         history_store=approval_history,
         timeout_seconds=settings.approval_timeout_seconds,
+        pending_store=pending_approvals,
     )
 
     # Planning.
@@ -188,6 +198,14 @@ def build_orchestrator() -> JarvisOrchestrator:
         security_manager=security,
         logger=logger,
     )
+
+    # Phase 27, Batch 1: reload any pending approval persisted before a
+    # previous restart, now that every tool above is registered. Each row
+    # is independently revalidated against this live registry/security
+    # before being treated as pending again - see
+    # ApprovalManager.reload_pending()'s own docstring for the full
+    # fail-closed reasoning. Never executes anything by itself.
+    approvals.reload_pending(registry=registry, security_manager=security)
 
     # Command routing (Phase 7, Batch 1): matches request text to a
     # registered tool and builds its input. Extracted from the orchestrator

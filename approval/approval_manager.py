@@ -36,6 +36,7 @@ manager's behaviour is unchanged from before this feature existed.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -45,7 +46,11 @@ from approval.approval_models import (
     ApprovalRequest,
     ApprovalStatus,
 )
+from approval.pending_approval_store import SCHEMA_VERSION, PendingApprovalRecord
 from config.constants import EventOutcome, SecurityTier
+from security.security_manager import SecurityManager
+from tools.base_tool import ToolRequest
+from tools.registry import ToolRegistry
 
 
 def _default_clock() -> datetime:
@@ -140,6 +145,86 @@ class _ApprovalHistoryRecorder(Protocol):
         ...
 
 
+class _PendingApprovalStateStore(Protocol):
+    """The minimal pending-approval-state interface ApprovalManager depends on.
+
+    Matches the write/read-side methods of
+    approval.pending_approval_store.PendingApprovalStore. Declaring it as a
+    Protocol keeps the manager decoupled from the concrete store (Phase 27,
+    Batch 1), mirroring _ApprovalHistoryRecorder immediately above.
+
+    Unlike _ApprovalHistoryRecorder, this interface's whole purpose is to
+    let a pending request's execution state (tool_name/tool_input) survive
+    a restart - that is explicitly authorized for *this* table only (see
+    pending_approval_store.py's own module docstring), never for
+    approval_history, which remains completely untouched by this feature.
+    """
+
+    def save(
+        self,
+        *,
+        request_id: str,
+        action: str,
+        reason: str,
+        security_tier: str,
+        session_id: int | None = ...,
+        metadata: dict[str, str] | None = ...,
+        tool_name: str | None = ...,
+        tool_input: dict[str, object] | None = ...,
+    ) -> object:
+        """Persist (or replace) the pending state for one request_id."""
+        ...
+
+    def delete(self, request_id: str) -> None:
+        """Remove the persisted pending state for one request_id, if any."""
+        ...
+
+    def list_all(self) -> list[PendingApprovalRecord]:
+        """Return every currently persisted pending-approval row."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PendingToolState:
+    """The tool name and input needed to run a pending approval once it is
+    approved, for a request that has a backing tool at all (Phase 27,
+    Batch 1).
+
+    This is plain data only. It never lets anything execute by itself - a
+    caller (JarvisOrchestrator.execute_approved for a live request, or a
+    caller resuming a reloaded one) must still pass tool_name/tool_input
+    through the unmodified ToolExecutor.execute() gate, exactly as the
+    live approval flow already does via JarvisResponse.tool_name/
+    tool_input.
+
+    Attributes:
+        tool_name: The registered tool this request would run.
+        tool_input: The plain input dict this request would run with.
+    """
+
+    tool_name: str
+    tool_input: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalReloadReport:
+    """A small, honest summary of what reload_pending() did (Phase 27,
+    Batch 1).
+
+    Attributes:
+        resumed: Number of persisted rows that passed revalidation and are
+            now genuinely pending again, exactly as if the process had
+            never restarted.
+        invalidated: Number of persisted rows that failed revalidation and
+            were removed, with a terminal entry recorded in approval
+            history explaining why - never approved, declined, or
+            executed.
+    """
+
+    resumed: int
+    invalidated: int
+
+
 _SOURCE = "approval_manager"
 _ACTION_TYPE = "approval_decision"
 
@@ -175,6 +260,23 @@ class ApprovalManager:
             pending request's age against _timeout_seconds. Defaults to the
             real wall clock; tests may inject a fake clock to simulate
             elapsed time deterministically.
+        _pending_store: Optional durable pending-approval-state store
+            (Phase 27, Batch 1). When provided, the execution state
+            (tool_name/tool_input) needed to run a pending request once
+            approved is additionally persisted there, so it can survive a
+            restart. __init__ never reads from this store either - exactly
+            like history_store, a freshly constructed manager always
+            starts with empty _pending/_tool_state; a caller must
+            explicitly call reload_pending() to repopulate them from what
+            was persisted, after independently revalidating every row.
+        _tool_state: Mapping of request_id to the PendingToolState needed
+            to run that request's tool once approved. Populated by
+            create_request() (when a tool_name is supplied) and by
+            reload_pending() (for a row that passes revalidation).
+            Deliberately never cleared on decide/expire, mirroring
+            _decisions's own unbounded-for-the-session lifetime, so a
+            caller can still retrieve it immediately after approving a
+            request.
     """
 
     def __init__(
@@ -184,6 +286,7 @@ class ApprovalManager:
         history_store: _ApprovalHistoryRecorder | None = None,
         timeout_seconds: int | None = None,
         clock: Callable[[], datetime] | None = None,
+        pending_store: _PendingApprovalStateStore | None = None,
     ) -> None:
         """Initialise an empty approval manager.
 
@@ -207,6 +310,15 @@ class ApprovalManager:
             clock: Optional callable returning the current UTC time, used to
                 evaluate timeouts. Defaults to the real wall clock. Intended
                 for tests that need to simulate elapsed time exactly.
+            pending_store: Optional durable pending-approval-state store
+                (such as a PendingApprovalStore) used to persist the
+                execution state of every pending request (Phase 27, Batch
+                1). When omitted, the manager behaves exactly as it did
+                before this feature existed - purely in memory, and a
+                restart always loses every pending request, exactly as
+                today. This parameter only ever causes writes during
+                __init__/create_request()/decide/expire; reload_pending()
+                must be called explicitly to read anything back.
 
         Raises:
             ApprovalError: If timeout_seconds is provided but is not a
@@ -225,6 +337,8 @@ class ApprovalManager:
         self._history = history_store
         self._timeout_seconds = timeout_seconds
         self._clock = clock or _default_clock
+        self._pending_store = pending_store
+        self._tool_state: dict[str, PendingToolState] = {}
 
     def create_request(
         self,
@@ -234,6 +348,8 @@ class ApprovalManager:
         *,
         session_id: int | None = None,
         metadata: dict[str, str] | None = None,
+        tool_name: str | None = None,
+        tool_input: dict[str, object] | None = None,
     ) -> ApprovalRequest:
         """Create a pending approval request and store it.
 
@@ -247,6 +363,14 @@ class ApprovalManager:
             security_tier: The security tier of the action. Must be YELLOW.
             session_id: Optional session the request belongs to.
             metadata: Optional extra string details about the request.
+            tool_name: Optional registered tool this request would run once
+                approved (Phase 27, Batch 1). Omitted for a request with no
+                backing tool at all (a plan-only confirmation) - such a
+                request has never been resumable across a restart, and
+                still is not.
+            tool_input: Optional plain input dict this request would run
+                the tool with once approved. Only meaningful together with
+                tool_name.
 
         Returns:
             The newly created, pending ApprovalRequest.
@@ -263,8 +387,36 @@ class ApprovalManager:
             created_at=self._clock(),
         )
         self._pending[request.request_id] = request
+        if tool_name is not None:
+            self._tool_state[request.request_id] = PendingToolState(
+                tool_name=tool_name, tool_input=dict(tool_input or {})
+            )
         self._record_history_request(request)
+        self._record_pending_state(request, tool_name=tool_name, tool_input=tool_input)
         return request
+
+    def get_pending_tool_state(self, request_id: str) -> PendingToolState | None:
+        """Return the tool name/input needed to run a request once approved.
+
+        Returns None for a request with no backing tool at all (a
+        plan-only confirmation with nothing to execute) or for an unknown
+        request_id. This never executes anything itself - a caller (such
+        as JarvisOrchestrator, or a test resuming a reloaded approval)
+        must still pass the returned tool_name/tool_input through the
+        unmodified ToolExecutor.execute() gate, exactly as the live
+        approval flow already does via JarvisResponse.tool_name/
+        tool_input. Available for the life of this manager instance once
+        recorded - it is never cleared on decide/expire (see _tool_state's
+        own docstring above), so a caller can still retrieve it
+        immediately after approving a request.
+
+        Args:
+            request_id: The identifier of the request to look up.
+
+        Returns:
+            The PendingToolState, or None.
+        """
+        return self._tool_state.get(request_id)
 
     def get_pending(self, request_id: str) -> ApprovalRequest:
         """Return the pending request with the given id.
@@ -424,6 +576,7 @@ class ApprovalManager:
 
         self._audit(request, decision)
         self._record_history_decision(decision)
+        self._remove_pending_state(request_id)
         return decision
 
     def _audit(
@@ -573,6 +726,7 @@ class ApprovalManager:
         """
         self._audit_timeout(request, expired_at=expired_at)
         self._record_history_timeout(request, expired_at=expired_at)
+        self._remove_pending_state(request.request_id)
 
     def _audit_timeout(
         self, request: ApprovalRequest, *, expired_at: datetime
@@ -689,4 +843,282 @@ class ApprovalManager:
             reason=(
                 f"No response within {self._timeout_seconds} seconds."
             ),
+        )
+
+    # ----- durable pending-approval state (Phase 27, Batch 1) ---------------
+
+    def _record_pending_state(
+        self,
+        request: ApprovalRequest,
+        *,
+        tool_name: str | None,
+        tool_input: dict[str, object] | None,
+    ) -> None:
+        """Durably persist this request's pending execution state, if a
+        pending_store is configured.
+
+        When no pending_store is configured, this is a no-op and the
+        manager behaves purely in memory, exactly as before this feature
+        existed. Unlike _emit_audit_event, this is deliberately not
+        isolated in a try/except: a failing durable write here is treated
+        the same way _record_history_request already treats a failing
+        history_store - a real problem worth surfacing, not a purely
+        observational one.
+
+        Args:
+            request: The request that was just created and is now pending.
+            tool_name: The tool this request would run once approved, or
+                None.
+            tool_input: The input the tool would run with, or None.
+        """
+        if self._pending_store is None:
+            return
+
+        self._pending_store.save(
+            request_id=request.request_id,
+            action=request.action,
+            reason=request.reason,
+            security_tier=request.security_tier.value,
+            session_id=request.session_id,
+            metadata=dict(request.metadata),
+            tool_name=tool_name,
+            tool_input=dict(tool_input) if tool_input is not None else None,
+        )
+
+    def _remove_pending_state(self, request_id: str) -> None:
+        """Remove this request's durable pending-execution-state row, if a
+        pending_store is configured.
+
+        Only the durable row is removed here - self._tool_state (in
+        memory) is deliberately retained for the life of this manager
+        instance; see its own docstring on the class for why.
+
+        Args:
+            request_id: The identifier of the request that was just
+                decided or expired.
+        """
+        if self._pending_store is None:
+            return
+        self._pending_store.delete(request_id)
+
+    def reload_pending(
+        self,
+        *,
+        registry: ToolRegistry,
+        security_manager: SecurityManager | None = None,
+    ) -> ApprovalReloadReport:
+        """Reload every persisted pending approval, revalidating each
+        against live code before treating it as genuinely pending again
+        (Phase 27, Batch 1).
+
+        This is never called from __init__ - a freshly constructed
+        ApprovalManager always starts with empty _pending/_decisions/
+        _tool_state, exactly as before this feature existed. A caller
+        (the composition root, main.py) calls this explicitly, once,
+        after every tool has been registered on `registry`.
+
+        A persisted row is only ever treated as resumable if ALL of the
+        following hold:
+            - its metadata_json/tool_input_json decoded without error
+              (PendingApprovalRecord.corrupt is False);
+            - its schema_version is one this code recognises;
+            - its action string is non-empty;
+            - tool_name is either None (a plan-only confirmation - never
+              resumable, but not itself invalid on that basis alone) or
+              names a tool that is still registered in `registry`;
+            - classifying the tool's own fixed action_for() output (or,
+              when tool_name is None, the stored action text directly -
+              mirroring ToolExecutor.execute()'s own rule that only a
+              tool's fixed action string is ever classified) still
+              returns SecurityTier.YELLOW right now, not merely at
+              creation time;
+            - it is not older than this manager's own configured
+              timeout_seconds (if any), evaluated exactly as
+              _sweep_expired() already evaluates a live pending request.
+
+        A row that fails any check is never executed, never approved, and
+        never silently dropped: it is removed from the durable pending-
+        state table, and a terminal entry is recorded in approval history
+        (via the existing record_timeout() shape) explaining that it
+        could not be resumed - so it remains just as durably visible as
+        any other outcome. Nothing here ever auto-approves, auto-
+        declines, or auto-executes anything; a row that passes every
+        check is only ever added back to self._pending (and, if it has a
+        tool, self._tool_state) - a caller must still explicitly approve
+        or decline it, exactly as for a live request.
+
+        Args:
+            registry: The live ToolRegistry to check every stored
+                tool_name against. Should already have every tool
+                registered.
+            security_manager: The live SecurityManager to reclassify
+                every stored action against. Defaults to a new
+                SecurityManager() if omitted (it is stateless, so this is
+                equivalent to sharing the application's own instance).
+
+        Returns:
+            An ApprovalReloadReport summarising how many rows were
+            resumed versus invalidated.
+        """
+        if self._pending_store is None:
+            return ApprovalReloadReport(resumed=0, invalidated=0)
+
+        security = security_manager or SecurityManager()
+        now = self._clock()
+        resumed = 0
+        invalidated = 0
+
+        for record in self._pending_store.list_all():
+            rejection = self._reload_rejection_reason(
+                record, registry=registry, security=security, now=now
+            )
+            if rejection is not None:
+                self._invalidate_reloaded_row(record, reason=rejection, now=now)
+                invalidated += 1
+                continue
+
+            created_at = record.created_at
+            if created_at.tzinfo is None:
+                # See the matching normalisation in
+                # _reload_rejection_reason - SQLite does not durably
+                # round-trip timezone info, and this project's own
+                # established convention treats a naive value as
+                # UTC-in-substance.
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            request = ApprovalRequest(
+                action=record.action,
+                reason=record.reason,
+                security_tier=SecurityTier.YELLOW,
+                session_id=record.session_id,
+                metadata=dict(record.metadata),
+                request_id=record.request_id,
+                created_at=created_at,
+            )
+            self._pending[request.request_id] = request
+            if record.tool_name is not None:
+                self._tool_state[request.request_id] = PendingToolState(
+                    tool_name=record.tool_name,
+                    tool_input=dict(record.tool_input or {}),
+                )
+            resumed += 1
+
+        return ApprovalReloadReport(resumed=resumed, invalidated=invalidated)
+
+    def _reload_rejection_reason(
+        self,
+        record: PendingApprovalRecord,
+        *,
+        registry: ToolRegistry,
+        security: SecurityManager,
+        now: datetime,
+    ) -> str | None:
+        """Return why `record` must fail closed on reload, or None if it
+        may be safely treated as pending again.
+
+        Args:
+            record: The persisted row being considered for reload.
+            registry: The live ToolRegistry to resolve record.tool_name
+                against.
+            security: The live SecurityManager to reclassify against.
+            now: The current moment, from this manager's own clock.
+
+        Returns:
+            A short, human-readable rejection reason, or None if the row
+            passes every check.
+        """
+        if record.corrupt:
+            return "Persisted state could not be parsed."
+        if record.schema_version != SCHEMA_VERSION:
+            return (
+                "Persisted state uses an unsupported schema version "
+                f"({record.schema_version})."
+            )
+        if not record.action.strip():
+            return "Persisted state has no action to reclassify."
+
+        if record.tool_name is not None:
+            tool = registry.get_tool(record.tool_name)
+            if tool is None:
+                return f"Tool '{record.tool_name}' is no longer registered."
+            classify_text = tool.action_for(
+                ToolRequest(
+                    tool_name=record.tool_name,
+                    input_data=dict(record.tool_input or {}),
+                )
+            )
+        else:
+            classify_text = record.action
+
+        try:
+            decision = security.classify_action(classify_text)
+        except ValueError:
+            return "Persisted action text is empty and cannot be reclassified."
+        if decision.tier is not SecurityTier.YELLOW:
+            return (
+                "Action no longer classifies as YELLOW "
+                f"(now {decision.tier.value})."
+            )
+
+        if self._timeout_seconds is not None:
+            # SQLite does not durably round-trip timezone info even for a
+            # DateTime(timezone=True) column - a value read back may come
+            # back naive. This project's own established convention
+            # (see scheduling/schedule_store.py's own docstring) is that a
+            # naive value read back is always UTC-in-substance, since
+            # every created_at column is written via _utc_now(). Without
+            # this normalisation, comparing against self._clock()'s own
+            # timezone-aware "now" would raise TypeError.
+            created_at = record.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            age = (now - created_at).total_seconds()
+            if age >= self._timeout_seconds:
+                return "Persisted approval is older than the configured timeout."
+
+        return None
+
+    def _invalidate_reloaded_row(
+        self, record: PendingApprovalRecord, *, reason: str, now: datetime
+    ) -> None:
+        """Remove a persisted row that failed reload revalidation, and
+        record an honest terminal entry in approval history so the
+        outcome remains durably visible - never approved, declined, or
+        executed.
+
+        Args:
+            record: The persisted row that failed revalidation.
+            reason: The human-readable rejection reason.
+            now: The current moment, from this manager's own clock.
+        """
+        if self._pending_store is not None:
+            self._pending_store.delete(record.request_id)
+        self._audit_reload_invalidation(record, reason=reason)
+        if self._history is not None:
+            self._history.record_timeout(
+                request_id=record.request_id,
+                timed_out_at=now,
+                reason=f"Could not be resumed after restart: {reason}",
+            )
+
+    def _audit_reload_invalidation(
+        self, record: PendingApprovalRecord, *, reason: str
+    ) -> None:
+        """Record one audit event for a pending row invalidated on reload.
+
+        Reuses the existing _emit_audit_event isolation - a failing audit
+        logger can never affect whether a row is invalidated.
+
+        Args:
+            record: The persisted row that failed revalidation.
+            reason: The human-readable rejection reason.
+        """
+        self._emit_audit_event(
+            outcome=EventOutcome.TIMEOUT,
+            detail=(
+                f"request_id={record.request_id} action={record.action} "
+                f"status=invalidated_on_reload reason={reason}"
+            ),
+            security_tier=SecurityTier.YELLOW,
+            session_id=record.session_id,
         )

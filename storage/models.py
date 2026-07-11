@@ -539,3 +539,101 @@ class ScheduledInboxNoticeState(Base):
             f"<ScheduledInboxNoticeState id={self.id} "
             f"last_seen_entry_id={self.last_seen_entry_id!r}>"
         )
+
+
+class PendingApprovalState(Base):
+    """Durable operational state for a currently-pending YELLOW approval.
+
+    Phase 27, Batch 1. This is deliberately NOT a second approval-history
+    table - `ApprovalHistoryEntry` remains completely unchanged, and its
+    own long-standing discipline of never storing a tool_name or
+    tool_input is preserved exactly as before. This table exists for a
+    different, narrower, newly-authorized purpose: letting a pending
+    approval's execution state - which tool, with what input - survive a
+    process restart, so it can be independently revalidated and safely
+    resumed. See approval/pending_approval_store.py's own module
+    docstring, and docs/phase_27_implementation_plan.md section 4, for
+    the full trust-boundary reasoning this table's design rests on.
+
+    A row here is short-lived operational state, not history: it exists
+    only while its request is genuinely pending, and is deleted the
+    moment that request is decided, expires, or is found invalid on
+    reload. Nothing here is ever copied into approval_history, and
+    nothing in approval_history is ever read from here.
+
+    Row existence must never be treated as approval, and loading a row
+    must never, by itself, execute anything - ApprovalManager.
+    reload_pending() always independently re-validates every field
+    against live code (the current ToolRegistry and a fresh
+    SecurityManager.classify_action() call) before treating a row as
+    genuinely pending again; a row that fails that revalidation is
+    removed here and recorded as an honest terminal entry in
+    approval_history instead of ever being resumed.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        request_id: The approval request id this row describes (matches
+            ApprovalRequest.request_id). Unique - at most one row per
+            request.
+        session_id: The session the request belonged to, if any. Plain
+            Integer, not a ForeignKey, matching every newer table's own
+            convention.
+        action: The action string that required approval.
+        reason: A human-readable explanation of why approval was needed.
+        security_tier: The tier of the action, as a string. Always
+            "yellow" at write time - never trusted alone on reload; the
+            action is always reclassified fresh.
+        metadata_json: JSON-serialized copy of ApprovalRequest.metadata
+            (a plain dict[str, str] - for example workflow_id/
+            step_number, when this request is workflow-linked). Never
+            anything beyond that existing, already-narrow shape.
+        tool_name: The registered tool this request would run once
+            approved, or None when this request has no backing tool at
+            all (a plan-only confirmation with nothing to execute - see
+            core.orchestrator._confirmation_response) - such a row is
+            never resumable, by design, and is always invalidated on
+            reload rather than executed.
+        tool_input_json: JSON-serialized copy of the plain tool_input
+            dict this request would run with once approved. Null exactly
+            when tool_name is null. Plain, already-validated data only
+            (paths, ids, text) - never code, never a pickled object.
+        schema_version: The version of this row's own JSON shape. Used
+            so a future change to what is stored can safely refuse to
+            treat an older or newer row it no longer understands as
+            resumable, rather than guessing.
+        created_at: Timestamp marking when this request was first
+            created (UTC) - used to evaluate staleness on reload, using
+            the same timeout_seconds ceiling ApprovalManager already
+            applies to a live pending request.
+    """
+
+    __tablename__ = "pending_approval_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    security_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by request_id and tool_name.
+        """
+        return (
+            f"<PendingApprovalState request_id={self.request_id!r} "
+            f"tool_name={self.tool_name!r}>"
+        )

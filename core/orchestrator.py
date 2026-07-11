@@ -3595,11 +3595,22 @@ class JarvisOrchestrator:
             )
 
         if result.requires_confirmation:
+            # Phase 27, Batch 1: pass this request's own tool_name/tool_input
+            # through to ApprovalManager so its execution state can be
+            # durably persisted and safely resumed after a restart. This is
+            # purely additive - create_request() defaults both to None, so
+            # behaviour is unchanged for any caller (including
+            # _confirmation_response below) that omits them, and the
+            # JarvisResponse returned here still carries its own
+            # tool_name/tool_input exactly as before, unaffected by whether
+            # a pending_store is configured.
             approval = self._approvals.create_request(
                 action=action,
                 reason=result.error or "This action requires your confirmation.",
                 security_tier=SecurityTier.YELLOW,
                 session_id=session_id,
+                tool_name=tool_name,
+                tool_input=dict(tool_input),
             )
             return JarvisResponse(
                 success=False,
