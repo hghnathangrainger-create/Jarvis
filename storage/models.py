@@ -343,3 +343,66 @@ class WorkflowHistoryEntry(Base):
             f"<WorkflowHistoryEntry workflow_id={self.workflow_id!r} "
             f"status={self.status!r}>"
         )
+
+
+class InboxEntry(Base):
+    """A durable, append-only record of one saved Jarvis-produced output.
+
+    Phase 20. This table exists so a valuable AI-generated output - today,
+    exactly one producer: the "summarise web search for <query>" advisory
+    summary - survives past CLI scrollback and a restart, instead of
+    disappearing the moment the terminal session ends. Follows the same
+    newer, non-ForeignKey session_id convention ApprovalHistoryEntry and
+    WorkflowHistoryEntry already use, rather than the original
+    EpisodicMemory/AuditLogEntry ForeignKey convention.
+
+    Deliberately excluded, by design, not oversight: there is no status
+    column (every row here is, by construction, a successful entry - a
+    failed summary is never persisted), no error column (no failure is
+    ever stored), and no read/unread or pinned/starred column (this table
+    has no update method at all - see inbox/inbox_store.py - so nothing
+    could set such a flag even if the column existed). A row describes a
+    saved output only; it is never executable, never a ToolRequest, and
+    never trusted AI context - it is stored, user-facing display text,
+    nothing more.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        session_id: The session the entry was produced under; may be
+            None. Plain Integer, not a ForeignKey, matching
+            ApprovalHistoryEntry/WorkflowHistoryEntry.
+        source_type: The producer that created this entry (for example,
+            "web_search_summary" - the only value Phase 20 ever writes).
+        source_query: The literal query the entry is about, stored
+            verbatim (an explicit, reasoned privacy decision - see
+            docs/phase_20_implementation_plan.md section 6 - distinct
+            from the audit log's own raw-content-avoidance policy,
+            because this is a user-facing store only Nathan ever reads,
+            not cross-system telemetry).
+        body: The exact final text Nathan was shown for this entry,
+            including its fixed disclosure label, stored verbatim - never
+            re-derived or reconstructed later.
+        included_count: The number of search results the summary was
+            based on, if known; content-free metadata only.
+        created_at: Timestamp marking when this entry was saved (UTC).
+    """
+
+    __tablename__ = "inbox_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source_query: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    included_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the entry by id and source_type.
+        """
+        return f"<InboxEntry id={self.id} source_type={self.source_type!r}>"
