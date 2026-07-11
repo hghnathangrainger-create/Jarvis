@@ -45,6 +45,7 @@ from storage.database import (
     create_session_factory,
     initialize_database,
 )
+from scheduling.schedule_store import ScheduleStore
 from tools.builtin import (
     ApprovalHistoryTool,
     EchoTool,
@@ -56,6 +57,10 @@ from tools.builtin import (
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
+    ScheduleCreateTool,
+    ScheduleDisableTool,
+    ScheduleEnableTool,
+    ScheduleListTool,
     WebSearchTool,
     WorkflowHistoryTool,
 )
@@ -140,6 +145,22 @@ def build_orchestrator() -> JarvisOrchestrator:
     # and read directly by the dashboard's own read model, never through
     # ToolExecutor.
     inbox_store = InboxStore(session_factory)
+
+    # Durable web-search-summary schedules (Phase 21, Batch 1): storage
+    # and CRUD only - creating, listing, enabling, and disabling a
+    # schedule row. Unlike inbox_store above, schedule management IS
+    # registered as ordinary tools, since schedule creation/enable/
+    # disable are plain durable writes (like "remember this"), not an AI
+    # reasoning call - they go through the exact same, unmodified
+    # CommandRouter/ToolExecutor/SecurityManager/ApprovalManager pipeline
+    # every other write tool already uses. No runner/claim/execution
+    # logic exists yet; this batch never performs a search, calls AI, or
+    # writes an Inbox entry.
+    schedule_store = ScheduleStore(session_factory)
+    registry.register_tool(ScheduleCreateTool(schedule_store))
+    registry.register_tool(ScheduleListTool(schedule_store))
+    registry.register_tool(ScheduleEnableTool(schedule_store))
+    registry.register_tool(ScheduleDisableTool(schedule_store))
 
     # Web search (Phase 16): Jarvis's first external-network tool.
     # Read-only, GREEN, and deliberately provider-independent - this is

@@ -183,6 +183,17 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("execute", SecurityTier.YELLOW, "Executing code can change the system."),
     _Rule("purchase", SecurityTier.YELLOW, "Spending money should always be confirmed."),
     _Rule("pay", SecurityTier.YELLOW, "Spending money should always be confirmed."),
+    # Phase 21: schedule management. None of these three keywords appear
+    # anywhere else in this table; without them, all three would already
+    # fall through to the cautious YELLOW default - these rules exist
+    # only to give each one its own specific, honest reason, matching
+    # every other explicit rule's own tailored wording rather than the
+    # generic fallback message. Listed before the GREEN "search" rule
+    # below so "schedule web search" is never misclassified as a plain,
+    # automatically-allowed search.
+    _Rule("schedule web search", SecurityTier.YELLOW, "Creating a scheduled action commits Jarvis to run it unattended and should be confirmed."),
+    _Rule("enable schedule", SecurityTier.YELLOW, "Re-enabling a scheduled action resumes unattended runs and should be confirmed."),
+    _Rule("disable schedule", SecurityTier.YELLOW, "Disabling a scheduled action changes state and should be confirmed."),
     # ----- GREEN: safe, allowed automatically -----
     # A manual, user-requested memory save is read-only from the system's point
     # of view: the user has explicitly asked Jarvis to remember this exact text,

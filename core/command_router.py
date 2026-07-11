@@ -244,6 +244,22 @@ _MEMORY_SET_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize memories",
 )
 
+#: Phase 21: schedule management commands. All four are ordinary
+#: tool-backed commands (schedule_create/list/enable/disable), routed
+#: through the same unmodified CommandRouter -> ToolExecutor ->
+#: SecurityManager -> ApprovalManager pipeline every other write command
+#: already uses - no bypass dispatch, no orchestrator special-casing.
+#: Collision-checked directly against every existing prefix in this
+#: module: no prefix anywhere uses the words "schedule", "enable", or
+#: "disable", and "list schedules" cannot be confused with "list
+#: files"/"list directory" (different second word, the same
+#: disambiguation every other "list ..."/"show ..." family already
+#: relies on).
+_SCHEDULE_CREATE_PREFIXES: tuple[str, ...] = ("schedule web search summary for",)
+_SCHEDULE_LIST_EXACT: frozenset[str] = frozenset({"list schedules", "show schedules"})
+_SCHEDULE_ENABLE_PREFIXES: tuple[str, ...] = ("enable schedule",)
+_SCHEDULE_DISABLE_PREFIXES: tuple[str, ...] = ("disable schedule",)
+
 #: The exact, complete leading phrase for the Phase 15 all-GREEN workflow
 #: command "remember this and show it back: <text>" (Retrieval Workflow
 #: Maintenance's sibling capability turn - Phase 15, Batch 3). Includes the
@@ -446,6 +462,33 @@ class CommandRouter:
             self._registry.has_tool("web_search")
         ):
             return "web_search"
+
+        # Schedule management (Phase 21): ordinary tool-backed commands,
+        # checked before the file commands below so "schedule web search
+        # summary for ..." is never mistaken for a file command, and
+        # before the generic memory/file blocks so "enable schedule"/
+        # "disable schedule" are never mistaken for anything else. Exact
+        # matches and prefix checks only - never a natural-language
+        # schedule phrase.
+        if lowered.strip() in _SCHEDULE_LIST_EXACT and self._registry.has_tool(
+            "schedule_list"
+        ):
+            return "schedule_list"
+
+        if self._file_prefix(lowered, _SCHEDULE_CREATE_PREFIXES) is not None and (
+            self._registry.has_tool("schedule_create")
+        ):
+            return "schedule_create"
+
+        if lowered.startswith(_SCHEDULE_ENABLE_PREFIXES) and self._registry.has_tool(
+            "schedule_enable"
+        ):
+            return "schedule_enable"
+
+        if lowered.startswith(_SCHEDULE_DISABLE_PREFIXES) and self._registry.has_tool(
+            "schedule_disable"
+        ):
+            return "schedule_disable"
 
         # File commands are checked next because their phrasing is specific.
         # Only route to a file tool if it is actually registered.
@@ -1050,6 +1093,21 @@ class CommandRouter:
             path, content = self._extract_append_input(text)
             return {"path": path, "content": content}
 
+        if tool_name == "schedule_create":
+            query, time_of_day = self._extract_schedule_create_input(text)
+            return {"query": query, "time_of_day": time_of_day}
+
+        if tool_name == "schedule_enable":
+            return {
+                "schedule_id": self._extract_memory_id(text, "enable schedule")
+            }
+
+        if tool_name == "schedule_disable":
+            return {
+                "schedule_id": self._extract_memory_id(text, "disable schedule")
+            }
+
+        # schedule_list takes no input
         # info takes no input
         return {}
 
@@ -1129,6 +1187,37 @@ class CommandRouter:
         remainder = cls._strip_write_prefix(text, _FILE_CREATE_PREFIXES)
         path_part, content = cls._split_on_keyword(remainder, " with ")
         return cls._clean_path(path_part), content
+
+    @classmethod
+    def _extract_schedule_create_input(cls, text: str) -> tuple[str, str]:
+        """Extract (query, time_of_day) from a schedule-create command.
+
+        The recognised shape is: "<schedule-prefix> <query> at <HH:MM>".
+        Unlike _extract_create_input's " with " split (which splits on
+        the *first* occurrence), this splits on the *last* " at " in the
+        remainder, so a query that itself legitimately contains the
+        word " at " (for example "restaurants open late at night") is
+        never truncated at the wrong point - only the final " at
+        <time>" suffix is treated as the time separator.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (query, time_of_day). Either may be empty/invalid,
+            in which case ScheduleCreateTool/ScheduleStore.create()
+            itself reports the problem - this method never validates,
+            it only splits text.
+        """
+        remainder = cls._strip_write_prefix(text, _SCHEDULE_CREATE_PREFIXES)
+        lowered = remainder.casefold()
+        separator = " at "
+        idx = lowered.rfind(separator)
+        if idx == -1:
+            return remainder.strip(), ""
+        query = remainder[:idx].strip()
+        time_of_day = remainder[idx + len(separator) :].strip()
+        return query, time_of_day
 
     @classmethod
     def _extract_append_input(cls, text: str) -> tuple[str, str]:

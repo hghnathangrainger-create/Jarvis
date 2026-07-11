@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -406,3 +406,76 @@ class InboxEntry(Base):
             A string identifying the entry by id and source_type.
         """
         return f"<InboxEntry id={self.id} source_type={self.source_type!r}>"
+
+
+class ScheduleEntry(Base):
+    """A durable, user-configured daily web-search-summary schedule.
+
+    Phase 21. Unlike every other table in this project, this one is
+    neither append-only nor write-once-then-decided-once:
+    `enabled`/`last_run_at` change in place over the schedule's lifetime.
+    This is a deliberate, disclosed departure from the append-only
+    convention `ApprovalHistoryEntry`/`WorkflowHistoryEntry`/`InboxEntry`
+    all follow - compensated for by keeping the table's own shape, and
+    `scheduling/schedule_store.py`'s public API, as narrow as possible.
+
+    Deliberately excluded, by design, not oversight: there is no
+    arbitrary command-string column, no `action_type` dispatch column,
+    no workflow id, no tool name, no tool input, no approval id, no
+    recurrence/cron expression, no timezone column (host local time is
+    used uniformly - see docs/phase_21_implementation_plan.md section
+    10), and no notification/read-unread field of any kind. The only
+    "what to do" data this table ever holds is the literal search query
+    text - never a command, never code, never a reference to any other
+    action. The single hard-coded action (search, summarise, save to
+    Inbox) lives entirely in Python code added in a later batch, not in
+    this schema - extending to a second action type would require a
+    real code change and its own review, not a configuration change.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        name: An optional, user-supplied label for the schedule; purely
+            for display, never interpreted.
+        query: The literal search query this schedule runs, stored
+            verbatim (the same reasoned privacy decision as
+            InboxEntry.source_query - this is a user-facing record only
+            Nathan ever reads, not the audit log).
+        time_of_day: The scheduled time, as a strict 24-hour "HH:MM"
+            string, interpreted in the host machine's own local time
+            (never a stored per-schedule timezone).
+        enabled: Whether this schedule is currently active. Disabling a
+            schedule is the only way to stop it from running - there is
+            no delete method (see schedule_store.py).
+        last_run_at: UTC timestamp of this schedule's most recent claimed
+            run, or None if it has never run. Updated by the atomic claim
+            mechanism added in a later batch - Batch 1 never writes to
+            this field.
+        created_at: Timestamp marking when this schedule was created (UTC).
+    """
+
+    __tablename__ = "schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    time_of_day: Mapped[str] = mapped_column(String(5), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the schedule by id, time, and enabled state.
+        """
+        return (
+            f"<ScheduleEntry id={self.id} time_of_day={self.time_of_day!r} "
+            f"enabled={self.enabled!r}>"
+        )

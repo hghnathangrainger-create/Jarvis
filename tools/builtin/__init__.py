@@ -17,6 +17,9 @@ Read-only tools (GREEN) - these never change any state:
       and snippets - not full webpage content (Phase 16). Jarvis's first
       external-network tool; depends only on the WebSearchProvider
       abstraction, never a concrete search vendor directly.
+    - ScheduleListTool: lists Nathan's configured web-search-summary
+      schedules (Phase 21). Read-only; never creates, enables, disables,
+      claims, or runs anything.
 
 Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
@@ -24,6 +27,12 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - FileAppendTool: appends text to an EXISTING text file; never overwrites.
     - MemoryUpdateTool: updates a memory's content or category by id.
     - MemoryForgetTool: forgets one specific memory by id; no bulk delete.
+    - ScheduleCreateTool: creates a new daily web-search-summary schedule
+      (Phase 21). Persists a row only; never performs a search, calls AI,
+      or writes an Inbox entry itself.
+    - ScheduleEnableTool: re-enables a schedule by id (Phase 21).
+    - ScheduleDisableTool: disables a schedule by id (Phase 21) - the
+      only way to stop a schedule from running; there is no delete tool.
 
 No built-in tool deletes, moves, renames, edits in place, installs software,
 runs commands, or controls the computer.
@@ -41,6 +50,10 @@ from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
+from tools.builtin.schedule_create_tool import ScheduleCreateTool
+from tools.builtin.schedule_disable_tool import ScheduleDisableTool
+from tools.builtin.schedule_enable_tool import ScheduleEnableTool
+from tools.builtin.schedule_list_tool import ScheduleListTool
 from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 
@@ -57,4 +70,8 @@ __all__ = [
     "MemoryForgetTool",
     "WorkflowHistoryTool",
     "WebSearchTool",
+    "ScheduleCreateTool",
+    "ScheduleListTool",
+    "ScheduleEnableTool",
+    "ScheduleDisableTool",
 ]

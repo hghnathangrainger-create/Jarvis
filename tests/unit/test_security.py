@@ -124,6 +124,51 @@ def test_red_decision_is_blocked(manager: SecurityManager) -> None:
     assert not decision.requires_confirmation
 
 
+# --- Phase 21: schedule management classification -----------------------------
+
+
+def test_schedule_web_search_requires_confirmation(manager: SecurityManager) -> None:
+    """Creating a scheduled action commits Jarvis to running it
+    unattended, so it is YELLOW - with its own specific, honest reason
+    rather than the generic default-fallback message."""
+    decision = manager.classify_action("schedule web search")
+    assert decision.requires_confirmation
+    assert not decision.is_allowed_automatically
+    assert not decision.is_blocked
+    assert "unattended" in decision.reason.lower()
+
+
+def test_enable_schedule_requires_confirmation(manager: SecurityManager) -> None:
+    decision = manager.classify_action("enable schedule")
+    assert decision.requires_confirmation
+    assert "unattended" in decision.reason.lower()
+
+
+def test_disable_schedule_requires_confirmation(manager: SecurityManager) -> None:
+    decision = manager.classify_action("disable schedule")
+    assert decision.requires_confirmation
+    assert "confirmed" in decision.reason.lower()
+
+
+def test_list_schedules_is_green(manager: SecurityManager) -> None:
+    """Read-only, via the existing, unchanged "list" rule - no new rule
+    was needed or added for listing."""
+    decision = manager.classify_action("list schedules")
+    assert decision.is_allowed_automatically
+    assert not decision.requires_confirmation
+    assert not decision.is_blocked
+
+
+def test_schedule_rules_do_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does not
+    touch remains exactly as it was."""
+    assert manager.classify_action("search the web for jarvis").is_allowed_automatically
+    assert manager.classify_action("delete file notes.txt").requires_confirmation
+    assert manager.classify_action("format drive").is_blocked
+
+
 # --- Input validation --------------------------------------------------------
 
 
