@@ -224,7 +224,12 @@ def overview_summary_lines(overview: DashboardOverview) -> list[str]:
 
     Every value here traces to a real query on DashboardReadModel - no
     estimated, simulated, or fabricated metric is ever included (no
-    "intelligence percentage", "readiness score", or similar).
+    "intelligence percentage", "readiness score", or similar). The
+    scheduled-inbox line (Phase 22) is a plain total and latest
+    timestamp - never framed as "since you last checked", never an
+    unread badge, and never dependent on the CLI's own last-seen marker
+    (see notice/scheduled_inbox_notice_store.py), which this module
+    never reads or writes.
 
     Args:
         overview: The overview view model to summarise.
@@ -232,11 +237,17 @@ def overview_summary_lines(overview: DashboardOverview) -> list[str]:
     Returns:
         A short list of plain-text summary lines.
     """
+    if overview.latest_scheduled_inbox_created_at is not None:
+        latest_scheduled = format_timestamp(overview.latest_scheduled_inbox_created_at)
+    else:
+        latest_scheduled = "none yet"
     return [
         f"Total memories stored: {overview.total_memory_count}",
         f"Recent approval decisions shown below: {len(overview.recent_approvals)}",
         f"Recently active workflows shown below: {len(overview.recent_workflows)}",
         f"Total inbox entries: {overview.total_inbox_count}",
+        f"Scheduled inbox entries: {overview.total_scheduled_inbox_count} "
+        f"(most recent: {latest_scheduled})",
     ]
 
 

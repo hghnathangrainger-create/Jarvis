@@ -324,6 +324,68 @@ def test_banner_warns_against_typing_prompt(
     assert "you>" in banner
 
 
+# --- Startup notice (Phase 22, Batch 1) ---------------------------------------
+
+
+def test_startup_notice_omitted_by_default_is_backward_compatible(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Every existing JarvisCLI(orchestrator, ...) construction - with no
+    startup_notice argument - must behave exactly as it did before this
+    phase: no extra line printed anywhere."""
+    scripted = iter(["exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    assert not any("Jarvis notice:" in line for line in outputs)
+
+
+def test_startup_notice_is_printed_once_after_the_banner(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    scripted = iter(["exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        startup_notice="Jarvis notice: 2 scheduled inbox entries were added "
+        "since your last check. Latest: 2026-07-11 08:00. Open the "
+        "dashboard Inbox to review them.",
+    )
+    cli.run()
+
+    assert outputs.count(
+        "Jarvis notice: 2 scheduled inbox entries were added "
+        "since your last check. Latest: 2026-07-11 08:00. Open the "
+        "dashboard Inbox to review them."
+    ) == 1
+    banner_index = outputs.index("Jarvis Online.")
+    notice_index = next(
+        i for i, line in enumerate(outputs) if line.startswith("Jarvis notice:")
+    )
+    assert notice_index > banner_index
+
+
+def test_startup_notice_none_prints_no_extra_line(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    scripted = iter(["exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        startup_notice=None,
+    )
+    cli.run()
+    assert not any("Jarvis notice:" in line for line in outputs)
+
+
 # --- Entry point -------------------------------------------------------------
 
 

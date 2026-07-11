@@ -43,6 +43,7 @@ from approval.approval_history_store import ApprovalHistoryStore
 from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
 from scheduling.schedule_store import ScheduleStore
+from scheduling.scheduled_summary_runner import SCHEDULED_SOURCE_TYPE
 from workflow.workflow_history_store import WorkflowHistoryStore
 
 #: Maximum length of a memory content preview shown in list views. Full,
@@ -270,6 +271,15 @@ class DashboardOverview:
             (durable history, not live runtime state - see WorkflowRow).
         total_inbox_count: The total number of saved inbox entries.
         recent_inbox_entries: The most recent saved inbox entries.
+        total_scheduled_inbox_count: The total number of saved inbox
+            entries produced by the scheduler specifically (source_type
+            "scheduled_web_search_summary"), a subset of
+            total_inbox_count. Deliberately independent of the CLI's own
+            last-seen marker (Phase 22) - this is a plain, real total,
+            never framed as "since you last checked", so the dashboard
+            never depends on, or implies ownership of, the CLI's marker.
+        latest_scheduled_inbox_created_at: The most recent scheduled
+            inbox entry's timestamp, or None if none exist yet.
     """
 
     total_memory_count: int
@@ -277,6 +287,8 @@ class DashboardOverview:
     recent_workflows: tuple[WorkflowRow, ...]
     total_inbox_count: int
     recent_inbox_entries: tuple[InboxRow, ...]
+    total_scheduled_inbox_count: int
+    latest_scheduled_inbox_created_at: datetime | None
 
 
 class DashboardReadModel:
@@ -323,9 +335,16 @@ class DashboardReadModel:
         Returns:
             A DashboardOverview built from the total memory count, the
             most recent approval history rows, the most recently active
-            distinct workflows, the total inbox count, and the most
-            recent inbox entries.
+            distinct workflows, the total inbox count, the most recent
+            inbox entries, and the scheduled-inbox-specific total/latest
+            timestamp (Phase 22) - the latter computed via
+            InboxStore.count_since(after_id=None), never via the CLI's
+            own last-seen marker, so this read model never depends on or
+            implies ownership of that marker.
         """
+        scheduled_count, _, scheduled_latest_created_at = self._inbox.count_since(
+            source_type=SCHEDULED_SOURCE_TYPE, after_id=None
+        )
         return DashboardOverview(
             total_memory_count=self._memory.count(),
             recent_approvals=tuple(
@@ -338,6 +357,8 @@ class DashboardReadModel:
             recent_inbox_entries=tuple(
                 self.get_recent_inbox_entries(limit=_OVERVIEW_PREVIEW_LIMIT)
             ),
+            total_scheduled_inbox_count=scheduled_count,
+            latest_scheduled_inbox_created_at=scheduled_latest_created_at,
         )
 
     def get_recent_memories(

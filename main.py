@@ -9,6 +9,9 @@ Responsibilities:
     - Wire together every Phase 1 subsystem: Observability, Security, Memory,
       Planner, Tool Manager, and the Core orchestrator.
     - Register the built-in tools.
+    - Independently build the Phase 22 CLI startup notice (see
+      build_startup_notice()) - a small, separate composition step, not
+      part of build_orchestrator()'s own wiring.
     - Start the terminal CLI.
 
 Does NOT:
@@ -36,6 +39,8 @@ from core.orchestrator import JarvisOrchestrator
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
+from notice.scheduled_inbox_notice_store import ScheduledInboxNoticeStore
 from observability.logger import EventLogger
 from planner.planner import Planner
 from security.audit_log import AuditLog
@@ -254,10 +259,42 @@ def build_orchestrator() -> JarvisOrchestrator:
     )
 
 
+def build_startup_notice() -> str | None:
+    """Independently build the Phase 22 CLI startup notice, or None.
+
+    Mirrors dashboard.py/scheduler.py's own composition-root pattern: a
+    second, independent engine/session_factory over the same configured
+    SQLite file, never sharing state with build_orchestrator()'s own
+    engine - so build_orchestrator()'s widely-depended-on return type
+    (reused by 26 existing test files) never needs to change for this
+    narrow, unrelated addition.
+
+    Never raises: any failure while opening this second connection is
+    caught here too, so a problem with this purely-informational check
+    can never prevent the primary orchestrator/database connection
+    (already established by build_orchestrator()) from starting Jarvis.
+
+    Returns:
+        A single, content-free notice line, or None when there is
+        nothing to report or this check could not run.
+    """
+    try:
+        settings = load_settings()
+        engine = create_database_engine(settings)
+        initialize_database(engine)
+        session_factory = create_session_factory(engine)
+        inbox_store = InboxStore(session_factory)
+        notice_store = ScheduledInboxNoticeStore(session_factory)
+        return build_scheduled_inbox_notice(inbox_store, notice_store)
+    except Exception:  # noqa: BLE001 - a failing notice check must never block startup
+        return None
+
+
 def main() -> None:
     """Build the system and start the interactive CLI."""
     orchestrator = build_orchestrator()
-    cli = JarvisCLI(orchestrator)
+    startup_notice = build_startup_notice()
+    cli = JarvisCLI(orchestrator, startup_notice=startup_notice)
     cli.run()
 
 

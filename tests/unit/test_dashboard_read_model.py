@@ -304,6 +304,34 @@ def test_overview_on_empty_database_is_a_valid_empty_view_model(rm) -> None:
     assert overview.recent_workflows == ()
     assert overview.total_inbox_count == 0
     assert overview.recent_inbox_entries == ()
+    assert overview.total_scheduled_inbox_count == 0
+    assert overview.latest_scheduled_inbox_created_at is None
+
+
+def test_overview_scheduled_inbox_count_excludes_interactive_entries(rm) -> None:
+    read_model, _, _, _, inbox, _ = rm
+    inbox.append(source_type="web_search_summary", source_query="interactive", body="b")
+    inbox.append(
+        source_type="scheduled_web_search_summary", source_query="scheduled", body="b"
+    )
+
+    overview = read_model.get_overview()
+    assert overview.total_inbox_count == 2
+    assert overview.total_scheduled_inbox_count == 1
+    assert overview.latest_scheduled_inbox_created_at is not None
+
+
+def test_overview_scheduled_inbox_count_is_independent_of_any_marker(rm) -> None:
+    """The Overview's scheduled-inbox total is a plain, real count - it
+    never reads or depends on notice/scheduled_inbox_notice_store.py's
+    own CLI-owned marker, so it always reflects every scheduled entry
+    ever created, not "since the CLI last checked"."""
+    read_model, _, _, _, inbox, _ = rm
+    inbox.append(source_type="scheduled_web_search_summary", source_query="q1", body="b")
+    inbox.append(source_type="scheduled_web_search_summary", source_query="q2", body="b")
+
+    overview = read_model.get_overview()
+    assert overview.total_scheduled_inbox_count == 2
 
 
 # --- get_recent_inbox_entries --------------------------------------------------
@@ -536,5 +564,9 @@ def test_read_model_module_imports_no_execution_component() -> None:
         "AIReasoningEngine",
         "AIRouter",
         "WebSearchTool",
+        # Phase 22: the Overview's scheduled-inbox total/latest timestamp
+        # comes from InboxStore.count_since() only - this read model must
+        # never import or depend on the CLI's own last-seen marker store.
+        "ScheduledInboxNoticeStore",
     }
     assert imported_names & forbidden == set()

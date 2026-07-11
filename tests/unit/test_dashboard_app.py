@@ -304,6 +304,8 @@ def test_overview_summary_lines_contain_only_real_counts() -> None:
         recent_workflows=(),
         total_inbox_count=3,
         recent_inbox_entries=(),
+        total_scheduled_inbox_count=2,
+        latest_scheduled_inbox_created_at=datetime(2026, 1, 1, 0, 0, 0),
     )
     lines = overview_summary_lines(overview)
     assert lines == [
@@ -311,6 +313,7 @@ def test_overview_summary_lines_contain_only_real_counts() -> None:
         "Recent approval decisions shown below: 0",
         "Recently active workflows shown below: 0",
         "Total inbox entries: 3",
+        "Scheduled inbox entries: 2 (most recent: 2026-01-01 00:00:00 UTC)",
     ]
     joined = " ".join(lines).lower()
     for forbidden in (
@@ -321,6 +324,10 @@ def test_overview_summary_lines_contain_only_real_counts() -> None:
         "efficiency",
         "online",
         "offline",
+        "unread",
+        "dismiss",
+        "since your last",
+        "since you last",
     ):
         assert forbidden not in joined
 

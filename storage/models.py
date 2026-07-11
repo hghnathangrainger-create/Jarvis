@@ -479,3 +479,63 @@ class ScheduleEntry(Base):
             f"<ScheduleEntry id={self.id} time_of_day={self.time_of_day!r} "
             f"enabled={self.enabled!r}>"
         )
+
+
+class ScheduledInboxNoticeState(Base):
+    """A single-row, durable marker tracking the last scheduled Inbox
+    entry the CLI has already reported to Nathan.
+
+    Phase 22. Unlike every other table in this project, exactly one row
+    of this table is ever expected to exist - it is neither append-only
+    (InboxEntry, WorkflowHistoryEntry), write-once-then-decided-once
+    (ApprovalHistoryEntry), nor per-row mutable-by-id (ScheduleEntry).
+    scheduling/scheduled_inbox_notice_store.py's own store enforces this
+    single-row, upsert-style shape; the model itself does not use a
+    fixed/singleton primary key value, since SQLAlchemy's own autoincrement
+    identity is sufficient given the store never creates a second row.
+
+    Deliberately excluded, by design, not oversight: there is no
+    key/name column (this is not a generic settings table - see
+    docs/phase_22_implementation_plan.md section 4 for the considered
+    and rejected alternatives), no per-entry notification record, no
+    read/unread/dismiss column, and no channel/delivery column of any
+    kind. This table tracks exactly one fact: the highest InboxEntry.id
+    already reported in a CLI startup notice - nothing about the notice
+    text itself, nothing about delivery, and nothing about any other
+    Inbox entry's state.
+
+    A timestamp-based marker (last_seen_at) was considered and rejected
+    in favour of an id-based one: InboxEntry.id is a strictly monotonic,
+    never-reused autoincrement primary key on an append-only table,
+    making it immune to the clock-change and exact-timestamp-collision
+    edge cases a timestamp comparison would need to reason about.
+
+    Attributes:
+        id: Auto-incrementing primary key. Exactly one row is ever
+            written by the owning store.
+        last_seen_entry_id: The highest InboxEntry.id already reported
+            in a startup notice, or None if no notice has ever been
+            shown (the store's own first-run state).
+        created_at: Timestamp marking when this marker row was first
+            created (UTC) - informational only, matching every other
+            table's own created_at convention.
+    """
+
+    __tablename__ = "scheduled_inbox_notice_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    last_seen_entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by id and last_seen_entry_id.
+        """
+        return (
+            f"<ScheduledInboxNoticeState id={self.id} "
+            f"last_seen_entry_id={self.last_seen_entry_id!r}>"
+        )

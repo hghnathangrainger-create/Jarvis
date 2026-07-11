@@ -653,7 +653,46 @@ There is no `action_type` column and no dispatch table — every claimed schedul
 
 ### What is deliberately NOT included in Phase 21
 
-Any general-purpose scheduler, task queue, or background-agent framework (no `Celery`, `Redis`, `APScheduler`); any workflow-triggering, YELLOW, or RED scheduled *action* (only the schedule's own creation/enable/disable is YELLOW — what it runs is always the one GREEN action); approval scheduling; any notification delivery of any kind (desktop, email, push, phone, or CLI-on-next-launch); any dashboard write action, including schedule creation, editing, enabling, disabling, or run-now; any Core service, HTTP server, IPC bridge, socket bridge, or client/server refactor; a natural-language schedule parser or cron-expression system; and full webpage fetching (scheduled summaries use the same search-result snippets/metadata Phase 18 already used — never a full page read). This closes one narrow gap (Jarvis can now do one useful thing without being asked in the moment) — it does not, by itself, make Jarvis a general automation platform, notify Nathan through any channel other than the Inbox he already has to open, or add any new execution authority anywhere.
+Any general-purpose scheduler, task queue, or background-agent framework (no `Celery`, `Redis`, `APScheduler`); any workflow-triggering, YELLOW, or RED scheduled *action* (only the schedule's own creation/enable/disable is YELLOW — what it runs is always the one GREEN action); approval scheduling; any notification delivery of any kind (desktop, email, push, phone, or CLI-on-next-launch — see Phase 22 for the first, deliberately minimal step in this direction); any dashboard write action, including schedule creation, editing, enabling, disabling, or run-now; any Core service, HTTP server, IPC bridge, socket bridge, or client/server refactor; a natural-language schedule parser or cron-expression system; and full webpage fetching (scheduled summaries use the same search-result snippets/metadata Phase 18 already used — never a full page read). This closes one narrow gap (Jarvis can now do one useful thing without being asked in the moment) — it does not, by itself, make Jarvis a general automation platform, notify Nathan through any channel other than the Inbox he already has to open, or add any new execution authority anywhere.
+
+---
+
+## Phase 22 — Minimal Honest Notice of New Scheduled Inbox Activity (complete)
+
+The one concrete gap Phase 21 created: a scheduled result can now appear in the Inbox without Nathan doing anything, and until this phase, nothing told him it had happened. Phase 22 closes that gap with the smallest possible mechanism — a single durable marker and one honest line printed at CLI startup — not a notification system. See `docs/phase_22_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Marker, query, notice builder, CLI wiring.** A new, single-row `ScheduledInboxNoticeState` table and `ScheduledInboxNoticeStore` (`notice/scheduled_inbox_notice_store.py`) track only the highest Inbox entry id already reported — never a timestamp, since `InboxEntry.id` is monotonic and immune to clock changes. `InboxStore` gained one read-only method, `count_since(source_type, after_id)`. A small, pure function (`notice/scheduled_inbox_notice.py::build_scheduled_inbox_notice()`) reads the marker, counts new `scheduled_web_search_summary` entries, and builds one content-free notice line, or decides there is nothing to report. `JarvisCLI` gained one optional `startup_notice` parameter, printed once after the banner.
+- **Batch 2 — End-to-end verification, adversarial proof, optional dashboard line, closure.** Real-scheduler-to-real-notice proof using the actual `scheduler.py`/`scheduling/scheduled_summary_runner.py` pipeline; an adversarial sweep proving prompt-injection-shaped, URL-shaped, and control-character query/body content never reaches the printed notice; failure verification proving a broken marker, a broken Inbox read, or a broken second database connection never blocks CLI startup; and one new, optional, real-data-only Overview line on the dashboard.
+
+### The CLI startup notice
+
+```
+Jarvis notice: 3 scheduled inbox entries were added since your last check. Latest: 2026-07-11 08:00. Open the dashboard Inbox to review them.
+```
+
+Printed once, immediately after the startup banner, only when at least one new `scheduled_web_search_summary` Inbox entry exists since the marker's last value. It never says "unread" (no read/unread state exists anywhere), never implies push or real-time delivery (this is a plain check performed once at startup), and never repeats the entry's own query, summary body, URLs, or search snippets — only a count and the latest entry's timestamp, both drawn from `InboxStore.count_since()`'s own narrow return shape, which excludes body/query content entirely. Interactive `web_search_summary` entries (the ones Nathan is already looking at the screen for) are never counted or reported.
+
+**First run is silent.** The very first time this check ever runs, it initializes the marker without printing anything — so upgrading to this phase never dumps a large historical backlog into a noisy first notice; only entries created from that point forward are ever reported. The marker itself is based on `InboxEntry.id`, not a timestamp, specifically to stay correct across clock changes and to make "entries newer than the marker" an exact, unambiguous comparison.
+
+**Failure is always silent and never blocking.** A broken marker read/write, a broken Inbox read, or a failure while opening the small, independent second database connection this check uses (mirroring `dashboard.py`/`scheduler.py`'s own "separate engine over the same SQLite file" pattern) all result in no notice being shown that run — never a crash, never a delay to Jarvis actually starting, and never any content printed that shouldn't be.
+
+### Dashboard Overview addition
+
+The Overview tab gained one new, real-data-only line:
+
+```
+Scheduled inbox entries: 3 (most recent: 2026-07-11 08:00 UTC)
+```
+
+This is a plain total (via the same `InboxStore.count_since()` method, with no marker), deliberately **not** framed as "since you last checked" — the dashboard never reads or writes the CLI's own marker at all, so there is no ambiguity about whose "last check" is meant. No unread badge, no dismiss control, and no mark-seen action exists anywhere on the dashboard.
+
+### Safety note: a notice, not a notification system
+
+There is no desktop, email, or phone notification, no OS dependency, and no new third-party library anywhere in this phase — `pyproject.toml` is unchanged. There is no read/unread state, no per-entry notification record, and no dismiss/acknowledge control anywhere; the entire durable footprint of this phase is one integer in one row. `scheduler.py` is completely untouched and has no awareness this phase exists. The notice text is plain terminal output — nothing reads it back as input, and it is never passed to `CommandRouter`, `ToolExecutor`, or any AI-facing component.
+
+### What is deliberately NOT included in Phase 22
+
+Desktop/OS toast notifications, a system tray icon, email notifications, phone/push notifications, any notification SDK or new runtime dependency; a notification table with per-entry read/unread/dismiss records; any Inbox read/unread mutation or dismiss button anywhere; any dashboard write action or notification control; any Core service, HTTP server, or IPC bridge; any change to `scheduler.py` or to scheduled-execution behaviour itself; any new schedule action type or arbitrary command scheduling; webpage fetching; and Research Agent or voice/phone work. This closes one narrow gap (Nathan now learns about unattended results without having to remember to check) — it is not a notification center, not a push/delivery framework, and not a step toward a Core service.
 
 ---
 

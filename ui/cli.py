@@ -11,6 +11,8 @@ Responsibilities:
     - When a response carries an approval request (a YELLOW action), present
       the approval prompt and record the user's approve/decline decision.
     - Recognise exit commands and end the session cleanly.
+    - Print one optional, pre-built, content-free startup notice line
+      (Phase 22) immediately after the banner, if one was supplied.
 
 Does NOT:
     - Call the Claude API, add voice, or add phone support.
@@ -205,6 +207,7 @@ class JarvisCLI:
         *,
         input_fn: Callable[[str], str] = input,
         output_fn: Callable[[str], None] = print,
+        startup_notice: str | None = None,
     ) -> None:
         """Initialise the CLI.
 
@@ -212,10 +215,16 @@ class JarvisCLI:
             orchestrator: The Core orchestrator to forward requests to.
             input_fn: Function used to read input. Defaults to input.
             output_fn: Function used to write output. Defaults to print.
+            startup_notice: An optional, pre-built, content-free notice
+                line (Phase 22) to print once, immediately after the
+                banner - for example, a count of new scheduled Inbox
+                entries. None (the default) prints nothing extra,
+                exactly matching every prior phase's own startup output.
         """
         self._orchestrator = orchestrator
         self._input = input_fn
         self._output = output_fn
+        self._startup_notice = startup_notice
 
     def run(self) -> None:
         """Run the interactive loop until an exit command or end of input.
@@ -299,10 +308,14 @@ class JarvisCLI:
             self._output(format_response(executed))
 
     def _print_banner(self) -> None:
-        """Print the startup banner and a short usage hint."""
+        """Print the startup banner, a short usage hint, and any
+        pre-built startup notice (Phase 22)."""
         self._output(STARTUP_BANNER)
         self._output(f"{APP_NAME} interactive CLI.")
         self._output("Type only your request after the prompt.")
         self._output("Do not type the 'you>' prompt text itself.")
         self._output("Type 'exit', 'quit', or 'bye' to leave.")
         self._output("")
+        if self._startup_notice is not None:
+            self._output(self._startup_notice)
+            self._output("")

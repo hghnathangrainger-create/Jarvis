@@ -2,12 +2,14 @@
 inbox_store.py
 
 Data-access layer for the durable, append-only Jarvis inbox (Phase 20,
-Batch 1).
+Batch 1; extended Phase 22, Batch 1 with a narrow, read-only count-since
+query).
 
 Responsibilities:
     - Append one new inbox entry (write-once; there is no update method).
-    - Query the inbox: most recent entries, a total count, or a single
-      entry by id.
+    - Query the inbox: most recent entries, a total count, a single
+      entry by id, or a source-type-scoped count/latest-id lookup since
+      a given id (Phase 22).
 
 Does NOT:
     - Decide which command should write an entry, or when - see
@@ -23,7 +25,10 @@ Does NOT:
       append() after a real summary has already been produced.
     - Implement a generic notification/event framework. This store's API
       is exactly as wide as the approved single producer and single
-      dashboard consumer need, no wider.
+      dashboard consumer need, no wider. count_since() (Phase 22) is a
+      pure, read-only count/lookup - it never returns entry bodies or
+      queries, and it requires an explicit source_type so no caller can
+      accidentally count every producer's entries together.
 
 This is the durable half of Phase 20: an AI-generated output that would
 otherwise vanish with CLI scrollback survives a restart, without becoming
@@ -165,6 +170,46 @@ class InboxStore:
         """
         with session_scope(self._session_factory) as db:
             return db.query(InboxEntry).count()
+
+    def count_since(
+        self, *, source_type: str, after_id: int | None
+    ) -> tuple[int, int | None, datetime | None]:
+        """Count entries of one source_type newer than a given id.
+
+        A pure, read-only lookup for the Phase 22 startup notice: never
+        returns an entry's body or query, and requires an explicit
+        source_type so a caller can never accidentally count every
+        producer's entries together.
+
+        Args:
+            source_type: The exact producer value to count (for example,
+                "scheduled_web_search_summary"). Interactive entries
+                (for example, "web_search_summary") are excluded unless
+                this argument names them explicitly.
+            after_id: Only count entries with id strictly greater than
+                this value. When None, every entry of source_type is
+                counted.
+
+        Returns:
+            A tuple of (count, latest_id, latest_created_at) - the
+            number of matching entries, the highest id among them, and
+            that entry's created_at. latest_id/latest_created_at are
+            both None when count is 0.
+        """
+        with session_scope(self._session_factory) as db:
+            query = db.query(InboxEntry).filter(
+                InboxEntry.source_type == source_type
+            )
+            if after_id is not None:
+                query = query.filter(InboxEntry.id > after_id)
+
+            count = query.count()
+            if count == 0:
+                return 0, None, None
+
+            latest = query.order_by(InboxEntry.id.desc()).first()
+            assert latest is not None  # guaranteed by count > 0 above
+            return count, latest.id, latest.created_at
 
     def get(self, entry_id: int) -> InboxRecord | None:
         """Return a single inbox entry by its id, or None if it does not exist.

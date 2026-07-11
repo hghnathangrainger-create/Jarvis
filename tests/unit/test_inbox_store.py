@@ -154,6 +154,106 @@ def test_get_unknown_id_returns_none(store: InboxStore) -> None:
     assert store.get(99999) is None
 
 
+# --- count_since (Phase 22, Batch 1) -----------------------------------------------
+
+
+def test_count_since_counts_only_matching_source_type(store: InboxStore) -> None:
+    store.append(source_type="web_search_summary", source_query="interactive", body="b")
+    store.append(
+        source_type="scheduled_web_search_summary", source_query="scheduled", body="b"
+    )
+
+    count, latest_id, latest_created_at = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=None
+    )
+    assert count == 1
+    assert latest_id is not None
+    assert latest_created_at is not None
+
+
+def test_count_since_excludes_interactive_entries_entirely(store: InboxStore) -> None:
+    store.append(source_type="web_search_summary", source_query="q1", body="b")
+    store.append(source_type="web_search_summary", source_query="q2", body="b")
+
+    count, latest_id, latest_created_at = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=None
+    )
+    assert count == 0
+    assert latest_id is None
+    assert latest_created_at is None
+
+
+def test_count_since_none_after_id_counts_every_matching_entry(store: InboxStore) -> None:
+    for i in range(3):
+        store.append(
+            source_type="scheduled_web_search_summary", source_query=str(i), body="b"
+        )
+    count, _, _ = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=None
+    )
+    assert count == 3
+
+
+def test_count_since_excludes_entries_at_or_below_after_id(store: InboxStore) -> None:
+    first = store.append(
+        source_type="scheduled_web_search_summary", source_query="first", body="b"
+    )
+    store.append(
+        source_type="scheduled_web_search_summary", source_query="second", body="b"
+    )
+    store.append(
+        source_type="scheduled_web_search_summary", source_query="third", body="b"
+    )
+
+    # after_id == first.id: only "second" and "third" should count.
+    count, latest_id, _ = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=first.id
+    )
+    assert count == 2
+    assert latest_id is not None
+
+
+def test_count_since_after_id_equal_to_latest_id_counts_zero(store: InboxStore) -> None:
+    record = store.append(
+        source_type="scheduled_web_search_summary", source_query="q", body="b"
+    )
+    count, latest_id, latest_created_at = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=record.id
+    )
+    assert count == 0
+    assert latest_id is None
+    assert latest_created_at is None
+
+
+def test_count_since_returns_the_highest_id_and_its_created_at(store: InboxStore) -> None:
+    store.append(source_type="scheduled_web_search_summary", source_query="first", body="b")
+    second = store.append(
+        source_type="scheduled_web_search_summary", source_query="second", body="b"
+    )
+
+    count, latest_id, latest_created_at = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=None
+    )
+    assert count == 2
+    assert latest_id == second.id
+    # count_since() re-queries the database fresh, so its timestamp comes
+    # back naive (no tzinfo) exactly as every other reload in this
+    # project does (see docs/phase_19_implementation_plan.md section 8) -
+    # compared here as naive values, not by exact object equality.
+    assert latest_created_at.replace(tzinfo=None) == second.created_at.replace(
+        tzinfo=None
+    )
+
+
+def test_count_since_empty_store_returns_zero_and_none(store: InboxStore) -> None:
+    count, latest_id, latest_created_at = store.count_since(
+        source_type="scheduled_web_search_summary", after_id=None
+    )
+    assert count == 0
+    assert latest_id is None
+    assert latest_created_at is None
+
+
 # --- long content handling --------------------------------------------------------
 
 
@@ -236,13 +336,16 @@ def test_store_exposes_no_update_delete_or_mutation_method() -> None:
             )
 
 
-def test_store_public_api_is_exactly_the_approved_four_methods() -> None:
+def test_store_public_api_is_exactly_the_approved_methods() -> None:
+    """Five methods total: the original four (Phase 20) plus
+    count_since (Phase 22, Batch 1) - a pure, read-only count/lookup,
+    not a new write, update, or read-state method."""
     public_methods = {
         name
         for name in dir(InboxStore)
         if not name.startswith("_") and callable(getattr(InboxStore, name))
     }
-    assert public_methods == {"append", "list_recent", "count", "get"}
+    assert public_methods == {"append", "list_recent", "count", "get", "count_since"}
 
 
 # --- adversarial: stored text remains plain data at the store layer ---------------
