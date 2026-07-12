@@ -141,6 +141,14 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 
 Unlike `search the web for <query>` above, this sends a network request to an arbitrary, Nathan-supplied target rather than one fixed, vetted search provider, so it always requires approval first. On approval, Jarvis validates the URL, fetches the page, extracts its visible text, strips any terminal/ANSI control sequences the page's own text might contain, and displays the result — never rewritten, never summarized, and never saved anywhere. If the URL is unsafe (points at a private/local network address, uses a disallowed scheme, etc.) or the fetch otherwise fails, you still see the approval prompt first (the URL is not pre-validated before asking), and then a clean, honest failure message after approving — nothing crashes and nothing is silently retried. The page's own text is never treated as an instruction: Jarvis does not follow links, act on anything the page says, or read a second page on its own.
 
+### Webpage summary command (Phase 34)
+
+| Command | Does | Tier |
+|---|---|---|
+| `summarize webpage <url>` / `summarise webpage <url>` | Fetches one webpage (same approval-gated path as `read webpage <url>`) and asks AI to summarize its extracted text. | YELLOW — requires approval |
+
+Approval happens **before** fetching, exactly like the plain read command — in fact this command reuses that exact same approval step, so the AI is never involved until an approved fetch has already succeeded. Only after that does Jarvis wrap the extracted text as untrusted context (explicitly disclosed to the AI as possibly incomplete, outdated, or containing text designed to look like instructions) and ask it for a summary. The summary is shown to you only — it is never saved to the Inbox, never written to a file, and never fed into any other command; each request is a completely fresh fetch and summary. Like the plain read command, this does not browse multiple pages, does not follow links, and never acts on anything the page's text says, no matter how it's phrased. If approval is declined or times out, or if the fetch or summarization fails for any reason, you get a clear, honest explanation and nothing is fetched or summarized.
+
 ### Memory summary commands (all advisory AI syntheses; require `AI_REASONING_ENABLED`)
 
 | Command | Summarizes |
@@ -371,7 +379,7 @@ Then, in a separate terminal, leave `scheduler.py` running. Check `list schedule
 Confirmed absent from the current codebase — not deferred silently, each explicitly a future decision:
 
 - No desktop, phone, or email/push notifications of any kind — the only "notice" mechanism is the CLI startup line (§7) and the dashboard's real Overview line.
-- No webpage summarization, and no autonomous webpage browsing. `read webpage <url>` (Phase 33, §6) fetches and displays one page's raw extracted text only — it does not summarize, does not use AI, does not follow links or act on anything the page's text says, and does not save what it fetched anywhere. Scheduled web search (§7) still uses snippets/metadata only, unrelated to this command.
+- No autonomous webpage browsing, no multi-page crawling, and no scheduled webpage monitoring. `read webpage <url>` (Phase 33, §6) and `summarize webpage <url>`/`summarise webpage <url>` (Phase 34, §6) each fetch exactly one page per request, never follow links, and never act on anything the page's text says. Neither command saves what it fetched or summarized anywhere. Scheduled web search (§7) still uses snippets/metadata only, unrelated to either command.
 - No Research Agent or autonomous multi-step research.
 - No voice interface, no phone app, no remote client of any kind.
 - No Core service, HTTP server, or IPC bridge — the three processes only ever share the SQLite file.
@@ -403,7 +411,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 These are real candidates that have been evaluated in past architectural reviews but are **not yet built**, listed here only so expectations stay honest:
 
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
-- The webpage fetch/read safety foundation (Phase 32) and its first user-facing command, `read webpage <url>` (Phase 33, §6), are both complete. Not yet built, each a distinct, separately-reviewed future decision: AI summarization of fetched webpage content (would route extracted text through `AIContextBlock.from_untrusted()` and rely on `PromptBuilder`'s existing injection scan, exactly like web-search summaries already do); scheduled webpage monitoring (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); and any Research Agent or autonomous multi-step browsing behavior.
+- The webpage fetch/read safety foundation (Phase 32), the plain read command (Phase 33, §6), and AI webpage summarization (Phase 34, §6) are all complete. Not yet built, each a distinct, separately-reviewed future decision: scheduled webpage summaries (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); saving a webpage summary to the Inbox (a real possibility, since the mechanism already exists for web-search summaries, but not built here — it would need its own explicit review of whether an approval-gated summary should be durably saved by default); and any Research Agent or autonomous multi-step browsing behavior. Further command refinements (e.g. additional grammar) remain possible but are not planned unless Nathan specifically requests them.
 - A Core service allowing an interactive dashboard, voice, or phone client.
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.

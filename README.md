@@ -887,7 +887,26 @@ Classified **YELLOW** — reading a webpage brings external network content onto
 
 ### What is deliberately NOT included in Phase 33
 
-No summarization of any kind — the text shown is exactly what was extracted, never rewritten or condensed. No AI involvement: no `AIContextBlock` is constructed, no AI provider is called. No autonomous browsing, and no following of links or instructions the fetched page's own text might contain — the page is fetched exactly once, and its content is always treated as data to display, never as a command. No saving of fetched content to a file, the database, or anywhere else — every read is fresh, with nothing persisted. No scheduled webpage monitoring, no workflow template, no dashboard or Inbox integration. No new command aliases beyond the one exact grammar. No Research Agent, Core service, file delete, voice, phone, goals, projects, or tasks.
+No summarization of any kind — the text shown is exactly what was extracted, never rewritten or condensed. **This has since changed**: Phase 34 (below) adds AI summarization as a distinct, separately-approved command; `read webpage <url>` itself is unchanged and still never summarizes. No AI involvement: no `AIContextBlock` is constructed, no AI provider is called. No autonomous browsing, and no following of links or instructions the fetched page's own text might contain — the page is fetched exactly once, and its content is always treated as data to display, never as a command. No saving of fetched content to a file, the database, or anywhere else — every read is fresh, with nothing persisted. No scheduled webpage monitoring, no workflow template, no dashboard or Inbox integration. No new command aliases beyond the one exact grammar. No Research Agent, Core service, file delete, voice, phone, goals, projects, or tasks.
+
+---
+
+## Phase 34 — AI Webpage Summarization (complete)
+
+A second, distinct consumer of Phase 32's safety foundation: one new command that summarizes a webpage with AI, built specifically to avoid a bypass risk found during its own architectural review. See `docs/phase_34_implementation_plan.md` and `docs/phase_34_completion_report.md` for the full write-up.
+
+### Webpage summary command
+
+```
+summarize webpage <url>
+summarise webpage <url>
+```
+
+Both spellings route identically. **The central safety design point**: Phase 18's existing `"summarise web search for <query>"` command is safe to leave un-approval-gated only because it always calls one fixed, vetted search provider — that pattern cannot be safely copied for an arbitrary webpage URL, which is exactly the risk category Phase 33 already classified YELLOW. So this command reuses Phase 33's `WebpageReadTool`/`ToolExecutor`/`SecurityManager` path unchanged for acquisition: a first request always requires the same YELLOW approval `read webpage <url>` already uses, classified via the tool's own fixed `"read webpage"` action string, never the URL. Only after Nathan approves and the fetch actually succeeds does `ai/webpage_ingestion.py` wrap the extracted text as `AIContextBlock.from_untrusted(text, source=f"webpage:{url!r}")` — with a preamble explicitly warning the AI that the content may be incomplete, outdated, malicious, or contain prompt-injection attempts — and `AIReasoningEngine.reason()` produce a display-only summary. The summary is never saved anywhere: no Inbox entry, no file, no database row.
+
+### What is deliberately NOT included in Phase 34
+
+No new command aliases beyond the two spellings. No autonomous browsing, no multi-page crawling — exactly one fetch per request. No acting on instructions inside the webpage's own text — it is always treated as data to summarize, never a command, regardless of what it says. No automated save-to-file or Inbox integration (unlike the web-search-summary command, which does auto-save — a deliberate difference, since this content is approval-gated in a way that one isn't). No workflow, scheduler, or dashboard integration. No `PromptBuilder` changes — the existing, already-proven automatic injection scan covers this new untrusted source unmodified. No Research Agent, Core service, file delete, voice, phone, goals, projects, or tasks.
 
 ---
 
@@ -968,7 +987,9 @@ jarvis/
 │                   typed trusted/untrusted AIContextBlock model,
 │                   file-content and single/multi-memory ingestion for the
 │                   AI reasoning path (ai/file_ingestion.py,
-│                   ai/memory_ingestion.py), and deterministic query-based,
+│                   ai/memory_ingestion.py), web-search and webpage
+│                   ingestion (ai/web_search_ingestion.py,
+│                   ai/webpage_ingestion.py), and deterministic query-based,
 │                   category-based, recency-based, and count-bounded
 │                   recency-based memory selection (ai/memory_selection.py)
 ├── planner/        Turns requests into structured plans
