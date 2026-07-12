@@ -363,7 +363,7 @@ Then, in a separate terminal, leave `scheduler.py` running. Check `list schedule
 Confirmed absent from the current codebase — not deferred silently, each explicitly a future decision:
 
 - No desktop, phone, or email/push notifications of any kind — the only "notice" mechanism is the CLI startup line (§7) and the dashboard's real Overview line.
-- No full webpage fetching or reading — web search (interactive and scheduled) uses snippets/metadata only.
+- No user-facing webpage fetching or reading — web search (interactive and scheduled) still uses snippets/metadata only. An internal, unintegrated safety foundation for fetching and reading a single webpage now exists (Phase 32: URL validation, a safe fetcher, and text extraction), but nothing calls it yet — no command, no AI integration, no summarization.
 - No Research Agent or autonomous multi-step research.
 - No voice interface, no phone app, no remote client of any kind.
 - No Core service, HTTP server, or IPC bridge — the three processes only ever share the SQLite file.
@@ -395,7 +395,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 These are real candidates that have been evaluated in past architectural reviews but are **not yet built**, listed here only so expectations stay honest:
 
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
-- Webpage fetch/read safety foundation, and eventual webpage summarization / Research Agent work built on it.
+- The webpage fetch/read safety foundation itself is complete (Phase 32: `WebFetchPolicy`, `SafeWebFetcher`, and a deterministic HTML text extractor) — but it is internal only. Not yet built, each a distinct future decision: a user-facing command to trigger a fetch, any AI summarization of fetched content, any Research Agent, and any routing of extracted text through `AIContextBlock.from_untrusted()`/`PromptBuilder`'s injection scan for AI use.
 - A Core service allowing an interactive dashboard, voice, or phone client.
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.

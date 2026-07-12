@@ -857,6 +857,22 @@ No subprocess usage of any kind (this remains true of every tool in this codebas
 
 ---
 
+## Phase 32 — Webpage Fetch/Read Safety Foundation (complete)
+
+An internal-only safety foundation for fetching and reading a single webpage, built across a planning pass and three batches. Nothing in the running system calls it yet — no command, no tool, no AI/workflow/scheduler/dashboard integration. See `docs/phase_32_implementation_plan.md` and `docs/phase_32_completion_report.md` for the full write-up.
+
+### What Phase 32 added
+
+- **`web/fetch_policy.py` — `WebFetchPolicy`** (Batch 1). Pure, deterministic URL validation with no network I/O: allow-lists `http`/`https` only; rejects malformed URLs, missing scheme/hostname, embedded credentials, localhost names, and IP literals in private/loopback/link-local/multicast/reserved/metadata ranges (IPv4 and IPv6), all via the standard library's own `ipaddress` predicates.
+- **`web/safe_web_fetcher.py` — `SafeWebFetcher`** (Batch 2). The one module permitted to import `httpx` (promoted from an already-installed transitive dependency to an explicit direct one — zero new packages). Re-validates every target with `WebFetchPolicy`, resolves and validates DNS-resolved IP addresses, then pins the actual connection to the validated IP while preserving the real hostname for the `Host` header and TLS SNI — closing the DNS-rebinding window rather than merely documenting it. GET-only, manual re-validated redirects (capped), streaming size-limit enforcement, content-type allow-list, and structured failures — never a raised exception.
+- **`web/html_text_extractor.py`** (Batch 3). A deterministic, standard-library-only (`html.parser`) HTML-to-text extractor: strips script/style/noscript/template content entirely, ignores comments, decodes entities safely, collapses whitespace, and enforces a hard output character cap with honest truncation reporting. `text/plain` is passed through with only line-ending normalisation. Never raises on malformed HTML.
+
+### What is deliberately NOT included in Phase 32
+
+No CLI command or registered tool of any kind — fetching a webpage is not yet something Nathan can ask Jarvis to do. No `SecurityManager` rule (nothing is classified, since nothing is callable). No AI integration: no `AIContextBlock` is ever constructed by this foundation, and no fetched/extracted content has been shown to an AI. No webpage summarization, no Research Agent, no autonomous browsing. No workflow, scheduler, dashboard, or Inbox integration. No automated save-to-file. No Core service, file delete, voice, phone, goals, projects, or tasks. Every one of `web/`'s three modules is proven, by structural test, to import nothing from `ai/`, `workflow/`, `scheduler.py`, `ui/`/dashboard, `tools/`, `core/`, `security/`, `approval/`, or `storage/` — and nothing outside `web/` imports `web/` back. Future integration must explicitly route any extracted text through `AIContextBlock.from_untrusted()` and rely on `PromptBuilder`'s existing automatic injection scan before any AI use; a future user-facing command is a distinct, separately-reviewed decision.
+
+---
+
 ## Example Session
 
 ```
@@ -952,6 +968,11 @@ jarvis/
 ├── core/           Orchestrator that wires everything together, plus the
 │                   CommandRouter that matches request text to a tool
 ├── ui/             Command-line interface and approval prompts
+├── web/            Webpage fetch/read safety foundation (Phase 32):
+│                   WebFetchPolicy (URL/target validation), SafeWebFetcher
+│                   (the sole module permitted to import httpx), and a
+│                   deterministic HTML text extractor - internal only,
+│                   not yet registered as a tool or wired into anything
 ├── tests/          Unit and integration tests
 ├── docs/           Specifications, implementation plans, and reports
 └── main.py         Entry point — starts Jarvis
