@@ -119,6 +119,7 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `copy file <source> to <destination>` | Copies an existing file to a new path. | YELLOW |
 | `move file <source> to <destination>` / `rename file <source> to <destination>` | Moves or renames an existing file to a new path. | YELLOW |
 | `delete file <path>` | Moves an existing file into a Jarvis-managed quarantine folder — **not a permanent delete**. | YELLOW |
+| `list quarantine` / `show quarantine` | Lists what's currently inside the quarantine folder — name, size, and modified time. | GREEN |
 | `summarise file <path>` / `summarize file <path>` | Reads a file and produces an AI summary of it (advisory only; requires `AI_REASONING_ENABLED`). | GREEN (reading), summary is advisory |
 
 **File search notes (Phase 24):** always searches from the project directory (there is no "in `<directory>`" clause); results are capped at 50 by default (a message tells you if more may exist); noisy directories are always skipped (`.git`, `__pycache__`, `.pytest_cache`, virtual environments, `node_modules`, build/cache folders); binary and unreadable files are silently skipped rather than causing an error; content search never shows more than a short snippet of the matching line — never a full file's contents. File search cannot move, rename, copy, or delete anything — it is exactly as read-only as `list files`/`read file`.
@@ -128,6 +129,8 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 **File move/rename notes (Phase 26):** `move file` and `rename file` are two names for the exact same command — a destination in the same folder is effectively a rename, a destination in a different folder is a move, and both go through the same tool. Moves/renames exactly one file — never a directory, never recursive. **The destination must not already exist**, and approving the command does not change that — the refusal is absolute, exactly like `copy file`. The destination's parent folder must already exist (this tool does not create folders). Unlike copy, **the original path stops existing** after a successful move — that is the whole point of "move," and it is exactly why this command requires approval before it happens.
 
 **File delete notes (Phase 35):** `delete file <path>` does not permanently destroy anything — it moves the file into `.jarvis_trash/`, a hidden, Jarvis-managed quarantine folder created automatically the first time it's needed, right in the same location you're running Jarvis from. The file still exists afterward; it's just no longer at its original path. Each quarantined file gets a unique name (so quarantining two different files that happen to share a name never causes one to overwrite the other), and a file already inside `.jarvis_trash/` cannot be "deleted" again. This command only handles single files — directories and symlinks are both rejected with a clear explanation. Treat this as a safer alternative to permanent deletion, **not** as a full trash-management system: there is no `restore file` command, no `empty trash` command, and no automatic cleanup — once quarantined, a file stays in `.jarvis_trash/` until you manage it yourself outside of Jarvis (e.g. in your regular file manager).
+
+**Quarantine listing notes (Phase 36):** `list quarantine`/`show quarantine` show you what's currently sitting in `.jarvis_trash/` — each file's name, size, and when it was quarantined. This is read-only: it never reads a file's actual content, never creates the quarantine folder if it doesn't exist yet (it just tells you nothing's been quarantined), and never restores, deletes, or cleans anything up. It exists purely so you can check what's in quarantine without leaving Jarvis or opening a file manager — restoring a file from quarantine, or clearing it out, both remain separate, not-yet-built future decisions.
 
 ### Web search commands
 
@@ -390,7 +393,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 - No arbitrary command scheduling — the scheduler runs exactly one hard-coded action type (search + AI summary + save).
 - No workflow-triggering, YELLOW, or RED scheduled actions — only the one GREEN scheduled action exists; scheduling itself (create/enable/disable) is YELLOW, but what runs is always GREEN.
 - No goals/projects/tasks system.
-- No *permanent* file delete — `delete file <path>` (Phase 35, §6) only quarantines a file into `.jarvis_trash/`; there is no restore command, no empty-trash command, and no automatic cleanup/retention policy.
+- No *permanent* file delete — `delete file <path>` (Phase 35, §6) only quarantines a file into `.jarvis_trash/`; `list quarantine`/`show quarantine` (Phase 36, §6) let you see what's in there, but there is still no restore command, no empty-trash command, and no automatic cleanup/retention policy.
 - No AI-reasoning step inside a workflow, and no automatic "save this AI summary to a file/Inbox" action — both are a deliberate safety boundary (§9), not an oversight, and would need their own separate, reviewed design before being built.
 
 ---
@@ -419,7 +422,7 @@ These are real candidates that have been evaluated in past architectural reviews
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
-- A file delete tool exists (Phase 35, §6) as a quarantine-only move into `.jarvis_trash/`. Not yet built, each a distinct future decision: a `restore file` command, an `empty trash` command, an automatic cleanup/retention policy, and any dashboard visibility into quarantine contents.
+- A file delete tool exists (Phase 35, §6) as a quarantine-only move into `.jarvis_trash/`, and you can list what's in quarantine (Phase 36, §6). Not yet built, each a distinct future decision: a `restore file` command (blocked today on a real gap — nothing durably records which original path a quarantined file came from), an `empty trash` command, an automatic cleanup/retention policy, and any dashboard visibility into quarantine contents.
 - More workflow templates beyond the current five — paused, not closed: the next one should come from a specific need, not just because the machinery exists.
 - Automated "save AI summary to file/Inbox" behavior — paused pending a separate design review of how to let you review the exact content before it's written (see §9).
 

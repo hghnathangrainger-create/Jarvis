@@ -124,6 +124,22 @@ _WORKFLOW_DETAIL_PREFIXES: tuple[str, ...] = ("show workflow", "view workflow")
 #: in this module contains "config" or "settings" as a substring.
 _CONFIG_EXACT_COMMANDS: frozenset[str] = frozenset({"show config", "show settings"})
 
+#: Two exact phrases mapping to the same fixed, no-argument request
+#: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
+#: pattern exactly: "list" and "show" are two names for the same
+#: read-only QuarantineListTool operation, never two different ones.
+#: Deliberately narrow - no aliases such as "list trash"/"show trash"/
+#: "open quarantine"/"quarantine list" were added, matching this
+#: project's "no looser synonym set" discipline. Neither phrase
+#: collides with any existing exact/prefix table: no other command
+#: anywhere in this module contains "quarantine" as a substring, and
+#: "list quarantine"/"show quarantine" are not prefixes of, or
+#: prefixed by, "list files"/"show files in"/"delete file" - confirmed
+#: by direct comparison, not assumed.
+_QUARANTINE_LIST_EXACT_COMMANDS: frozenset[str] = frozenset(
+    {"list quarantine", "show quarantine"}
+)
+
 #: The one exact, mandatory prefix for Jarvis's first external-network
 #: command (Phase 16). Routes to the read-only WebSearchTool. Checked
 #: directly against every other exact/prefix table in this module during
@@ -608,6 +624,16 @@ class CommandRouter:
             "config"
         ):
             return "config"
+
+        # Quarantine listing (Phase 36): read-only and GREEN. Exact
+        # phrases only, mirroring the config check immediately above -
+        # never a prefix/substring match, so this can never be confused
+        # with any other command family (in particular, "delete file"
+        # and "list files").
+        if lowered.strip() in _QUARANTINE_LIST_EXACT_COMMANDS and self._registry.has_tool(
+            "quarantine_list"
+        ):
+            return "quarantine_list"
 
         # Web search (Phase 16): Jarvis's first external-network command.
         # Read-only and GREEN - see WebSearchTool.action_for()'s own fixed,

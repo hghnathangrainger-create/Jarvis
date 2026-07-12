@@ -275,6 +275,44 @@ def test_delete_file_rule_does_not_affect_unrelated_existing_classifications(
     assert manager.classify_action("format drive").is_blocked
 
 
+# --- Phase 36: quarantine listing classification -------------------------------
+
+
+def test_list_quarantine_is_green(manager: SecurityManager) -> None:
+    """Confirms the pre-existing generic "list" GREEN rule - already
+    present before Phase 36 - is exactly what QuarantineListTool.
+    action_for() classifies against. No new SecurityManager rule was
+    added or needed."""
+    decision = manager.classify_action("list quarantine")
+    assert decision.is_allowed_automatically
+    assert not decision.requires_confirmation
+    assert not decision.is_blocked
+
+
+def test_show_quarantine_command_text_is_also_green(
+    manager: SecurityManager,
+) -> None:
+    """The "show quarantine" command phrase routes to the same tool with
+    the same fixed action_for() ("list quarantine"), but this proves the
+    generic "show" rule would classify the literal phrase safely too,
+    in case anything ever classifies raw command text directly."""
+    decision = manager.classify_action("show quarantine")
+    assert decision.is_allowed_automatically
+    assert not decision.requires_confirmation
+    assert not decision.is_blocked
+
+
+def test_quarantine_list_rule_does_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does not
+    touch remains exactly as it was."""
+    assert manager.classify_action("delete file notes.txt").requires_confirmation
+    assert manager.classify_action("show config").is_allowed_automatically
+    assert manager.classify_action("list files").is_allowed_automatically
+    assert manager.classify_action("format drive").is_blocked
+
+
 # --- Input validation --------------------------------------------------------
 
 

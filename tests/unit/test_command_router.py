@@ -45,6 +45,7 @@ _ALL_TOOL_NAMES = (
     "echo",
     "info",
     "config",
+    "quarantine_list",
     "memory",
     "memory_update",
     "memory_forget",
@@ -2896,3 +2897,55 @@ def test_match_show_config_does_not_collide_with_file_commands(
 def test_build_input_config_takes_no_input(router: CommandRouter) -> None:
     assert router.build_input("config", "show config") == {}
     assert router.build_input("config", "show settings") == {}
+
+
+# --- match() -> "quarantine_list" (Phase 36) ----------------------------------
+
+
+def test_match_list_quarantine(router: CommandRouter) -> None:
+    assert router.match("list quarantine") == "quarantine_list"
+
+
+def test_match_show_quarantine(router: CommandRouter) -> None:
+    assert router.match("show quarantine") == "quarantine_list"
+
+
+def test_match_list_quarantine_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("LIST QUARANTINE") == "quarantine_list"
+
+
+def test_match_list_quarantine_ignores_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match("  list quarantine  ") == "quarantine_list"
+
+
+def test_match_quarantine_list_not_returned_when_tool_unregistered() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match("list quarantine") is None
+    assert router.match("show quarantine") is None
+
+
+def test_near_misses_do_not_route_as_quarantine_list(router: CommandRouter) -> None:
+    # Close, but not the exact required phrase - must not match.
+    assert router.match("list trash") != "quarantine_list"
+    assert router.match("show trash") != "quarantine_list"
+    assert router.match("open quarantine") != "quarantine_list"
+    assert router.match("restore quarantine") != "quarantine_list"
+    assert router.match("empty quarantine") != "quarantine_list"
+    assert router.match("quarantine list") != "quarantine_list"
+    assert router.match("list quarantined files") != "quarantine_list"
+
+
+def test_match_list_quarantine_does_not_collide_with_list_files_or_delete_file(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list files") == "file_list"
+    assert router.match("delete file a.txt") == "file_delete"
+    assert router.match("list quarantine") == "quarantine_list"
+
+
+def test_build_input_quarantine_list_takes_no_input(router: CommandRouter) -> None:
+    assert router.build_input("quarantine_list", "list quarantine") == {}
+    assert router.build_input("quarantine_list", "show quarantine") == {}

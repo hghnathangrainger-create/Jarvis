@@ -28,6 +28,10 @@ Read-only tools (GREEN) - these never change any state:
       31). Reads only the already-loaded Settings object - never .env
       or os.environ directly, never mutates anything. The API key is
       reported only as "set"/"not set", never its value.
+    - QuarantineListTool: lists what is currently inside Jarvis's
+      quarantine directory (.jarvis_trash/, Phase 36) - name, size, and
+      modified time only. Never reads file content, never creates the
+      quarantine directory, and never implies restore support exists.
 
 Guarded read tools (YELLOW) - read-only from Jarvis's own state's point of
 view, but classified YELLOW because they reach an arbitrary, externally-
@@ -87,6 +91,7 @@ from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
+from tools.builtin.quarantine_list_tool import QuarantineListTool
 from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
 from tools.builtin.schedule_enable_tool import ScheduleEnableTool
@@ -98,6 +103,7 @@ from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 __all__ = [
     "ApprovalHistoryTool",
     "ConfigTool",
+    "QuarantineListTool",
     "EchoTool",
     "InfoTool",
     "MemoryTool",

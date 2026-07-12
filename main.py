@@ -68,6 +68,7 @@ from tools.builtin import (
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
+    QuarantineListTool,
     ScheduleCreateTool,
     ScheduleDisableTool,
     ScheduleEnableTool,
@@ -147,6 +148,10 @@ def build_orchestrator() -> JarvisOrchestrator:
     # object above - it never calls load_settings() again, never reads
     # .env/os.environ directly, and never exposes the API key's value.
     registry.register_tool(ConfigTool(settings))
+    # QuarantineListTool (Phase 36) only lists .jarvis_trash/'s current
+    # contents - it never creates the directory, reads file content, or
+    # modifies/moves/deletes anything.
+    registry.register_tool(QuarantineListTool())
     registry.register_tool(MemoryTool(memory))
     registry.register_tool(MemoryUpdateTool(memory))
     registry.register_tool(MemoryForgetTool(memory))

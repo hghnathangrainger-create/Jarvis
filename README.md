@@ -924,7 +924,26 @@ Classified **YELLOW**, reusing the pre-existing `"delete file"` rule in `Securit
 
 ### What is deliberately NOT included in Phase 35
 
-No permanent/irreversible delete of any kind — no production code path calls `os.remove()`, `Path.unlink()`, `shutil.rmtree()`, or any equivalent. No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No Research Agent or autonomous behavior. No Core service, voice, phone, goals, projects, or tasks. No command aliases beyond the one exact grammar (`remove file`, `trash file`, `quarantine file`, `rm`, etc. were all deliberately not added).
+No permanent/irreversible delete of any kind — no production code path calls `os.remove()`, `Path.unlink()`, `shutil.rmtree()`, or any equivalent. No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No Research Agent or autonomous behavior. No Core service, voice, phone, goals, projects, or tasks. No command aliases beyond the one exact grammar (`remove file`, `trash file`, `quarantine file`, `rm`, etc. were all deliberately not added). **Listing quarantine contents has since been added** — see Phase 36 below — still with no restore/empty-trash/cleanup behavior of any kind.
+
+---
+
+## Phase 36 — List Quarantine Contents (complete)
+
+One small, read-only companion to Phase 35's quarantine command: a way to see what's currently inside `.jarvis_trash/` without leaving Jarvis. See `docs/phase_36_completion_report.md` for the full write-up.
+
+### Quarantine listing commands
+
+```
+list quarantine
+show quarantine
+```
+
+Both phrases route to the same fixed, no-argument request. Classified **GREEN**, via the existing generic `"list"` rule — no new `SecurityManager` rule was needed. Reports each quarantined file's name, size in bytes, and modified time; reports honestly if the quarantine directory doesn't exist yet or is empty; never creates `.jarvis_trash/` just to list it. Purely informational — it does not restore, delete, clean up, move, or modify anything, and does not imply any of those capabilities exist (they don't).
+
+### What is deliberately NOT included in Phase 36
+
+No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No file content is ever read — only filesystem metadata (name, size, modified time). No command aliases beyond the two exact phrases (`list trash`, `show trash`, `open quarantine`, `quarantine list`, etc. were all deliberately not added).
 
 ---
 
