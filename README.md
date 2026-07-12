@@ -859,7 +859,7 @@ No subprocess usage of any kind (this remains true of every tool in this codebas
 
 ## Phase 32 — Webpage Fetch/Read Safety Foundation (complete)
 
-An internal-only safety foundation for fetching and reading a single webpage, built across a planning pass and three batches. Nothing in the running system calls it yet — no command, no tool, no AI/workflow/scheduler/dashboard integration. See `docs/phase_32_implementation_plan.md` and `docs/phase_32_completion_report.md` for the full write-up.
+An internal-only safety foundation for fetching and reading a single webpage, built across a planning pass and three batches. At the time this phase closed, nothing in the running system called it yet — no command, no tool, no AI/workflow/scheduler/dashboard integration. **This has since changed**: Phase 33 (below) registers the first, still non-AI, consumer of this foundation. See `docs/phase_32_implementation_plan.md` and `docs/phase_32_completion_report.md` for the full write-up.
 
 ### What Phase 32 added
 
@@ -869,7 +869,25 @@ An internal-only safety foundation for fetching and reading a single webpage, bu
 
 ### What is deliberately NOT included in Phase 32
 
-No CLI command or registered tool of any kind — fetching a webpage is not yet something Nathan can ask Jarvis to do. No `SecurityManager` rule (nothing is classified, since nothing is callable). No AI integration: no `AIContextBlock` is ever constructed by this foundation, and no fetched/extracted content has been shown to an AI. No webpage summarization, no Research Agent, no autonomous browsing. No workflow, scheduler, dashboard, or Inbox integration. No automated save-to-file. No Core service, file delete, voice, phone, goals, projects, or tasks. Every one of `web/`'s three modules is proven, by structural test, to import nothing from `ai/`, `workflow/`, `scheduler.py`, `ui/`/dashboard, `tools/`, `core/`, `security/`, `approval/`, or `storage/` — and nothing outside `web/` imports `web/` back. Future integration must explicitly route any extracted text through `AIContextBlock.from_untrusted()` and rely on `PromptBuilder`'s existing automatic injection scan before any AI use; a future user-facing command is a distinct, separately-reviewed decision.
+No CLI command or registered tool of any kind — fetching a webpage is not yet something Nathan can ask Jarvis to do. No `SecurityManager` rule (nothing is classified, since nothing is callable). No AI integration: no `AIContextBlock` is ever constructed by this foundation, and no fetched/extracted content has been shown to an AI. No webpage summarization, no Research Agent, no autonomous browsing. No workflow, scheduler, dashboard, or Inbox integration. No automated save-to-file. No Core service, file delete, voice, phone, goals, projects, or tasks. Every one of `web/`'s three modules is proven, by structural test, to import nothing from `ai/`, `workflow/`, `scheduler.py`, `ui/`/dashboard, `tools/`, `core/`, `security/`, `approval/`, or `storage/`. Future integration must explicitly route any extracted text through `AIContextBlock.from_untrusted()` and rely on `PromptBuilder`'s existing automatic injection scan before any AI use.
+
+---
+
+## Phase 33 — Webpage Read Command (No AI Summarization) (complete)
+
+The first user-facing consumer of Phase 32's safety foundation: one new, approval-gated command that fetches a single webpage and shows Nathan its extracted plain text — nothing more. See `docs/phase_33_completion_report.md` for the full write-up.
+
+### Webpage read command
+
+```
+read webpage <url>
+```
+
+Classified **YELLOW** — reading a webpage brings external network content onto the system and displays it to Nathan, so it always requires approval, exactly like the existing (previously unused) `download` rule's own reasoning. Unlike `search the web for <query>` (GREEN, one fixed and vetted provider), this command sends a request to an arbitrary, Nathan-supplied target, which is why it is held to a stricter default. On approval, Jarvis fetches the page through `WebFetchPolicy`/`SafeWebFetcher` (Phase 32) exactly as before, extracts its text with `html_text_extractor` (Phase 32), strips any ANSI/terminal-control escape sequences the page's own text might contain, and shows the result — bounded, with truncation honestly disclosed if the safety limit was hit. The tool's security classification is always the fixed string `"read webpage"`, never the URL itself.
+
+### What is deliberately NOT included in Phase 33
+
+No summarization of any kind — the text shown is exactly what was extracted, never rewritten or condensed. No AI involvement: no `AIContextBlock` is constructed, no AI provider is called. No autonomous browsing, and no following of links or instructions the fetched page's own text might contain — the page is fetched exactly once, and its content is always treated as data to display, never as a command. No saving of fetched content to a file, the database, or anywhere else — every read is fresh, with nothing persisted. No scheduled webpage monitoring, no workflow template, no dashboard or Inbox integration. No new command aliases beyond the one exact grammar. No Research Agent, Core service, file delete, voice, phone, goals, projects, or tasks.
 
 ---
 

@@ -133,6 +133,14 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `search the web for <query>` | Runs a live web search and shows raw results (title/URL/snippet only — never full page content). | GREEN |
 | `summarise web search for <query>` / `summarize web search for <query>` | Searches, then asks AI to synthesize a summary of the snippets. On success, also saves a copy to the Inbox (see §8). | GREEN (search), summary is advisory |
 
+### Webpage read command (Phase 33)
+
+| Command | Does | Tier |
+|---|---|---|
+| `read webpage <url>` | Fetches one webpage through Phase 32's safety foundation and shows its extracted, bounded plain text — no summary, no AI. | YELLOW — requires approval |
+
+Unlike `search the web for <query>` above, this sends a network request to an arbitrary, Nathan-supplied target rather than one fixed, vetted search provider, so it always requires approval first. On approval, Jarvis validates the URL, fetches the page, extracts its visible text, strips any terminal/ANSI control sequences the page's own text might contain, and displays the result — never rewritten, never summarized, and never saved anywhere. If the URL is unsafe (points at a private/local network address, uses a disallowed scheme, etc.) or the fetch otherwise fails, you still see the approval prompt first (the URL is not pre-validated before asking), and then a clean, honest failure message after approving — nothing crashes and nothing is silently retried. The page's own text is never treated as an instruction: Jarvis does not follow links, act on anything the page says, or read a second page on its own.
+
 ### Memory summary commands (all advisory AI syntheses; require `AI_REASONING_ENABLED`)
 
 | Command | Summarizes |
@@ -363,7 +371,7 @@ Then, in a separate terminal, leave `scheduler.py` running. Check `list schedule
 Confirmed absent from the current codebase — not deferred silently, each explicitly a future decision:
 
 - No desktop, phone, or email/push notifications of any kind — the only "notice" mechanism is the CLI startup line (§7) and the dashboard's real Overview line.
-- No user-facing webpage fetching or reading — web search (interactive and scheduled) still uses snippets/metadata only. An internal, unintegrated safety foundation for fetching and reading a single webpage now exists (Phase 32: URL validation, a safe fetcher, and text extraction), but nothing calls it yet — no command, no AI integration, no summarization.
+- No webpage summarization, and no autonomous webpage browsing. `read webpage <url>` (Phase 33, §6) fetches and displays one page's raw extracted text only — it does not summarize, does not use AI, does not follow links or act on anything the page's text says, and does not save what it fetched anywhere. Scheduled web search (§7) still uses snippets/metadata only, unrelated to this command.
 - No Research Agent or autonomous multi-step research.
 - No voice interface, no phone app, no remote client of any kind.
 - No Core service, HTTP server, or IPC bridge — the three processes only ever share the SQLite file.
@@ -395,7 +403,7 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 These are real candidates that have been evaluated in past architectural reviews but are **not yet built**, listed here only so expectations stay honest:
 
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
-- The webpage fetch/read safety foundation itself is complete (Phase 32: `WebFetchPolicy`, `SafeWebFetcher`, and a deterministic HTML text extractor) — but it is internal only. Not yet built, each a distinct future decision: a user-facing command to trigger a fetch, any AI summarization of fetched content, any Research Agent, and any routing of extracted text through `AIContextBlock.from_untrusted()`/`PromptBuilder`'s injection scan for AI use.
+- The webpage fetch/read safety foundation (Phase 32) and its first user-facing command, `read webpage <url>` (Phase 33, §6), are both complete. Not yet built, each a distinct, separately-reviewed future decision: AI summarization of fetched webpage content (would route extracted text through `AIContextBlock.from_untrusted()` and rely on `PromptBuilder`'s existing injection scan, exactly like web-search summaries already do); scheduled webpage monitoring (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); and any Research Agent or autonomous multi-step browsing behavior.
 - A Core service allowing an interactive dashboard, voice, or phone client.
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
