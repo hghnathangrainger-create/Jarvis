@@ -44,6 +44,7 @@ from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
 from notice.scheduled_inbox_notice_store import ScheduledInboxNoticeStore
 from observability.logger import EventLogger
 from planner.planner import Planner
+from quarantine.quarantine_store import QuarantineStore
 from security.audit_log import AuditLog
 from security.security_manager import SecurityManager
 from storage.database import (
@@ -162,7 +163,14 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileAppendTool())
     registry.register_tool(FileCopyTool())
     registry.register_tool(FileMoveTool())
-    registry.register_tool(FileDeleteTool())
+    # QuarantineStore (Phase 37, Batch 1): records durable metadata
+    # (original_path/quarantine_path) for every successful quarantine,
+    # so a future restore command has trustworthy information to work
+    # with. Uses the same session_factory every other durable store in
+    # this composition root already uses - never a second, separate
+    # database connection.
+    quarantine_store = QuarantineStore(session_factory)
+    registry.register_tool(FileDeleteTool(quarantine_store))
     registry.register_tool(ApprovalHistoryTool(approval_history))
 
     # Durable workflow lifecycle history (Durable Workflow Lifecycle

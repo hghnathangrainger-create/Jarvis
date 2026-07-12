@@ -2,12 +2,15 @@
 test_main_file_delete_wiring.py
 
 Composition tests for FileDeleteTool wiring in main.build_orchestrator()
-(Phase 35, Batch 1).
+(Phase 35, Batch 1; extended Phase 37, Batch 1 to confirm QuarantineStore
+wiring).
 
 These tests confirm FileDeleteTool is registered and routed to
-correctly via "delete file <path>" - without ever needing a database,
-AI, or network call, matching the existing
-test_main_file_move_wiring.py pattern exactly.
+correctly via "delete file <path>", and that it is backed by a real
+QuarantineStore using the same session_factory every other durable
+store in the composition root uses - without ever needing a live AI or
+network call, matching the existing test_main_file_move_wiring.py
+pattern exactly.
 
 Run with:
     pytest tests/unit/test_main_file_delete_wiring.py
@@ -20,6 +23,7 @@ from pathlib import Path
 import pytest
 
 import main
+from quarantine.quarantine_store import QuarantineStore
 from tools.builtin.file_delete_tool import FileDeleteTool
 
 
@@ -51,6 +55,12 @@ def test_command_router_routes_delete_file_to_file_delete() -> None:
 def test_exactly_one_file_delete_tool_instance_is_registered() -> None:
     orchestrator = main.build_orchestrator()
     assert orchestrator._registry.list_tool_names().count("file_delete") == 1
+
+
+def test_file_delete_tool_is_backed_by_a_real_quarantine_store() -> None:
+    orchestrator = main.build_orchestrator()
+    tool = orchestrator._registry.get_tool("file_delete")
+    assert isinstance(tool._store, QuarantineStore)
 
 
 def test_build_orchestrator_return_type_and_signature_are_unchanged() -> None:

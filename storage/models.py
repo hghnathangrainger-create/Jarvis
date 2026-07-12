@@ -408,6 +408,75 @@ class InboxEntry(Base):
         return f"<InboxEntry id={self.id} source_type={self.source_type!r}>"
 
 
+class QuarantineRecord(Base):
+    """A durable record of one file successfully moved into quarantine.
+
+    Phase 37, Batch 1. Exists so a future restore command has
+    trustworthy information about where a quarantined file originally
+    came from: FileDeleteTool's own quarantine filename only preserves
+    the original stem/suffix (Phase 35), never the original directory -
+    this table closes that gap by recording both paths at the moment
+    of quarantine.
+
+    Deliberately excluded, by design, not oversight: no restore_status,
+    restored_at, cleanup/retention, or dashboard-facing fields - none
+    of that is needed until a future, separately-scoped restore phase
+    actually exists. There is no update or delete method on
+    QuarantineStore (see quarantine/quarantine_store.py) - once
+    recorded, a row is never mutated or removed.
+
+    Not every file inside .jarvis_trash/ has a corresponding row here:
+    files quarantined by Phase 35/36, before this table existed, have
+    none. Any future consumer of this table must treat a missing
+    record as the ordinary, expected case for such files, never an
+    error - this table does not attempt to retroactively backfill or
+    migrate anything quarantined before it existed.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        original_path: The absolute, resolved path the file was
+            quarantined from. Stored resolved (not relative to whatever
+            the working directory happened to be at quarantine time),
+            so a future restore command is never ambiguous about what
+            "the original location" means even if Jarvis is later run
+            from a different directory.
+        quarantine_path: The absolute, resolved path the file was moved
+            to inside the quarantine directory. Unique: FileDeleteTool's
+            own collision-safe naming scheme never reuses a quarantine
+            path, and this column enforces that as a durable guarantee
+            too, not just an in-process one.
+        quarantined_at: Timestamp marking when the file was quarantined
+            (UTC).
+        session_id: The session the quarantine happened under; may be
+            None. Plain Integer, not a ForeignKey, matching
+            ApprovalHistoryEntry/WorkflowHistoryEntry/InboxEntry's own
+            established convention.
+    """
+
+    __tablename__ = "quarantine_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    original_path: Mapped[str] = mapped_column(Text, nullable=False)
+    quarantine_path: Mapped[str] = mapped_column(
+        Text, nullable=False, unique=True, index=True
+    )
+    quarantined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the record by id and quarantine_path.
+        """
+        return (
+            f"<QuarantineRecord id={self.id} "
+            f"quarantine_path={self.quarantine_path!r}>"
+        )
+
+
 class ScheduleEntry(Base):
     """A durable, user-configured daily web-search-summary schedule.
 

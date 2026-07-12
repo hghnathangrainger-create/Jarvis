@@ -2,7 +2,8 @@
 file_delete_tool.py
 
 A guarded write tool that quarantines an existing file instead of
-permanently deleting it (Phase 35).
+permanently deleting it (Phase 35; extended Phase 37, Batch 1 with
+durable quarantine metadata).
 
 FileDeleteTool is a YELLOW tool: removing a file from its original
 location changes state, so its action is classified YELLOW and it
@@ -47,6 +48,17 @@ deliberately NOT a real delete:
       Path.rename() relocates the file directly, so binary files are
       quarantined correctly with no special handling required.
 
+Phase 37, Batch 1 addition: when constructed with a QuarantineStore,
+every successful quarantine also records a durable QuarantineRecord
+(original_path, quarantine_path) - the information a future restore
+command will need, since the quarantine filename itself only preserves
+the original stem/suffix, never the original directory. The store is
+optional (defaults to None) so every pre-existing caller/test that
+constructs this tool with no arguments continues to behave exactly as
+Phase 35/36 already did - quarantine succeeds, simply with no metadata
+recorded. This tool still does not restore, list, empty, or clean up
+the quarantine directory in any way.
+
 Supported input (via input_data):
     path: the existing file to quarantine (required, must exist, must
           be a file, must not be a symlink, must not already be inside
@@ -65,6 +77,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from quarantine.quarantine_store import QuarantineStore
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 
 #: The Jarvis-managed quarantine directory, resolved relative to the
@@ -90,7 +103,26 @@ class FileDeleteTool(BaseTool):
     Sensitive (YELLOW); never permanently deletes anything, never
     overwrites a file already in quarantine, and never touches a
     symlink or a file already inside the quarantine directory.
+
+    Attributes:
+        _store: Optional QuarantineStore used to record durable
+            metadata for a future restore command. When None (the
+            default), quarantining still works exactly as it did
+            before Phase 37 - simply with no metadata recorded.
     """
+
+    def __init__(self, store: QuarantineStore | None = None) -> None:
+        """Initialise the tool, optionally with a QuarantineStore.
+
+        Args:
+            store: Optional store used to record durable quarantine
+                metadata (original_path/quarantine_path) after a
+                successful quarantine. Injected, never constructed
+                here - mirrors WebpageReadTool's own fetcher-injection
+                pattern. Defaults to None, preserving every pre-Phase-37
+                caller's behaviour unchanged.
+        """
+        self._store = store
 
     @property
     def name(self) -> str:
@@ -149,7 +181,12 @@ class FileDeleteTool(BaseTool):
             does not exist, is a directory, is a symlink, is already
             inside the quarantine directory, or a permission/OS error
             occurs. Never raises, and never permanently deletes
-            anything.
+            anything. If a QuarantineStore was supplied and the move
+            succeeds but recording its metadata fails, the result is
+            still success=True (the file really was quarantined - that
+            must never be hidden or contradicted), but the message
+            clearly discloses the metadata failure rather than looking
+            like an ordinary, fully-successful quarantine.
         """
         raw_path = request.input_data.get("path")
         if not isinstance(raw_path, str) or not raw_path.strip():
@@ -210,19 +247,51 @@ class FileDeleteTool(BaseTool):
         except OSError as exc:
             return self.fail(f"Could not quarantine file: {exc}")
 
+        resolved_destination = destination.resolve()
+        output = (
+            f"Moved '{source}' to quarantine at '{destination}'. The "
+            "file was not permanently deleted - it can still be found "
+            "at that location."
+        )
+        metadata = {
+            "original_path": str(source),
+            "quarantine_path": str(destination),
+            "operation": "quarantine",
+        }
+
+        if self._store is not None:
+            try:
+                self._store.record_quarantine(
+                    original_path=str(resolved_source),
+                    quarantine_path=str(resolved_destination),
+                    session_id=request.session_id,
+                )
+                metadata["metadata_recorded"] = "True"
+            except Exception as exc:  # noqa: BLE001 - see module docstring
+                # The file has already been safely moved - that must
+                # never be hidden or contradicted. But this must also
+                # never look like an ordinary, fully-successful
+                # quarantine: a future restore command would have
+                # nothing to work with for this file, and Nathan should
+                # know that now, not discover it silently later. This
+                # mirrors ToolExecutor's own established pattern
+                # (_emit_audit_event) of isolating a secondary
+                # side-effect's failure from an already-decided primary
+                # outcome, without ever suppressing the disclosure of
+                # that failure to the caller.
+                output += (
+                    f"\n\nWARNING: the file was quarantined successfully, but "
+                    f"its quarantine metadata could not be recorded: {exc}. "
+                    "A future restore command will not know this file's "
+                    "original location."
+                )
+                metadata["metadata_recorded"] = "False"
+
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=(
-                f"Moved '{source}' to quarantine at '{destination}'. The "
-                "file was not permanently deleted - it can still be found "
-                "at that location."
-            ),
-            metadata={
-                "original_path": str(source),
-                "quarantine_path": str(destination),
-                "operation": "quarantine",
-            },
+            output=output,
+            metadata=metadata,
         )
 
     @staticmethod

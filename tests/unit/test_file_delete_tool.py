@@ -3,7 +3,8 @@ test_file_delete_tool.py
 
 Unit tests for the Jarvis FileDeleteTool
 (tools/builtin/file_delete_tool.py), Phase 35, Batch 1; extended
-Batch 2 with adversarial quarantine safety tests.
+Batch 2 with adversarial quarantine safety tests; extended Phase 37,
+Batch 1 with durable quarantine-metadata recording tests.
 
 The tool is write-capable but deliberately not a real delete: it moves
 one existing file into a Jarvis-managed quarantine directory
@@ -431,3 +432,211 @@ def test_module_imports_no_forbidden_packages() -> None:
         "shutil",
     }
     assert not (imported_names & forbidden), imported_names
+
+
+# ---------------------------------------------------------------------------
+# Quarantine metadata recording (Phase 37, Batch 1)
+# ---------------------------------------------------------------------------
+
+
+class _FakeQuarantineStore:
+    """A minimal stand-in for QuarantineStore, recording every call it
+    receives and optionally raising to simulate a recording failure."""
+
+    def __init__(self, *, raise_on_record: Exception | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._raise_on_record = raise_on_record
+
+    def record_quarantine(
+        self,
+        *,
+        original_path: str,
+        quarantine_path: str,
+        session_id: int | None = None,
+    ) -> None:
+        self.calls.append(
+            {
+                "original_path": original_path,
+                "quarantine_path": quarantine_path,
+                "session_id": session_id,
+            }
+        )
+        if self._raise_on_record is not None:
+            raise self._raise_on_record
+
+
+def test_successful_quarantine_writes_exactly_one_metadata_record(
+    workspace: Path, source_file: Path
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    result = _run(tool, path=str(source_file))
+
+    assert result.success is True
+    assert len(store.calls) == 1
+
+
+def test_metadata_original_path_matches_resolved_source(
+    workspace: Path, source_file: Path
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    _run(tool, path=str(source_file))
+
+    assert store.calls[0]["original_path"] == str(source_file.resolve())
+
+
+def test_metadata_quarantine_path_matches_the_actual_quarantined_path(
+    workspace: Path, source_file: Path
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    result = _run(tool, path=str(source_file))
+
+    expected = str(Path(result.metadata["quarantine_path"]).resolve())
+    assert store.calls[0]["quarantine_path"] == expected
+
+
+def test_metadata_records_session_id_from_the_request(
+    workspace: Path, source_file: Path
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    tool.run(
+        ToolRequest(
+            tool_name="file_delete",
+            input_data={"path": str(source_file)},
+            session_id=42,
+        )
+    )
+
+    assert store.calls[0]["session_id"] == 42
+
+
+def test_missing_path_input_writes_no_metadata(workspace: Path) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    _run(tool)
+
+    assert store.calls == []
+
+
+def test_nonexistent_source_writes_no_metadata(workspace: Path) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    _run(tool, path=str(workspace / "does_not_exist.txt"))
+
+    assert store.calls == []
+
+
+def test_directory_source_writes_no_metadata(workspace: Path) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+    a_directory = workspace / "a_folder"
+    a_directory.mkdir()
+
+    _run(tool, path=str(a_directory))
+
+    assert store.calls == []
+
+
+def test_symlink_source_writes_no_metadata(workspace: Path) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+    target = workspace / "real_target.txt"
+    target.write_text("real content", encoding="utf-8")
+    link = workspace / "link_to_target.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip(
+            "Symlink creation is not permitted in this environment "
+            "(requires elevated privileges/developer mode on Windows)."
+        )
+
+    _run(tool, path=str(link))
+
+    assert store.calls == []
+
+
+def test_already_quarantined_source_writes_no_metadata(workspace: Path) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    already_quarantined = quarantine_dir / "already_here.txt"
+    already_quarantined.write_text("already quarantined", encoding="utf-8")
+
+    _run(tool, path=str(already_quarantined))
+
+    assert store.calls == []
+
+
+def test_move_failure_writes_no_metadata(
+    workspace: Path, source_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    def _raise_permission_error(self: Path, target: object) -> None:
+        raise PermissionError("simulated permission error")
+
+    monkeypatch.setattr(Path, "rename", _raise_permission_error)
+
+    result = _run(tool, path=str(source_file))
+
+    assert result.success is False
+    assert store.calls == []
+
+
+def test_metadata_write_failure_is_disclosed_honestly_not_hidden(
+    workspace: Path, source_file: Path
+) -> None:
+    """The file is genuinely quarantined even when metadata recording
+    fails - that must never be hidden or contradicted - but the result
+    must not look like an ordinary, fully-successful quarantine either."""
+    store = _FakeQuarantineStore(raise_on_record=RuntimeError("simulated DB failure"))
+    tool = FileDeleteTool(store)
+
+    result = _run(tool, path=str(source_file))
+
+    assert result.success is True  # the move really did happen
+    assert not source_file.exists()  # confirmed: it moved
+    assert "WARNING" in result.output
+    assert "simulated DB failure" in result.output
+    assert result.metadata["metadata_recorded"] == "False"
+    quarantine_path = Path(result.metadata["quarantine_path"])
+    assert quarantine_path.exists()  # the file is safe, just unrecorded
+
+
+def test_successful_metadata_recording_sets_recorded_flag_true(
+    workspace: Path, source_file: Path
+) -> None:
+    store = _FakeQuarantineStore()
+    tool = FileDeleteTool(store)
+
+    result = _run(tool, path=str(source_file))
+
+    assert result.metadata["metadata_recorded"] == "True"
+    assert "WARNING" not in result.output
+
+
+def test_no_store_preserves_original_behavior_with_no_metadata_key(
+    workspace: Path, source_file: Path
+) -> None:
+    """Backward compatibility: a tool constructed with no store (every
+    pre-Phase-37 caller) behaves exactly as before - no
+    "metadata_recorded" key at all, no warning text."""
+    tool = FileDeleteTool()
+
+    result = _run(tool, path=str(source_file))
+
+    assert result.success is True
+    assert "metadata_recorded" not in result.metadata
+    assert "WARNING" not in result.output
