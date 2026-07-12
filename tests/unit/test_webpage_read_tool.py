@@ -121,6 +121,22 @@ def test_successful_webpage_read_returns_extracted_text() -> None:
     assert result.metadata["truncated"] == "False"
 
 
+def test_metadata_extracted_text_is_clean_without_display_formatting() -> None:
+    """Phase 34, Batch 2: metadata['extracted_text'] carries the sanitized
+    text alone, without the 'Webpage content from <url>:' header that
+    `output` adds - so a caller doesn't need to parse display output."""
+    fetcher = _FakeFetcher(_success_page(b"<html><body><p>Hello</p></body></html>"))
+    tool = WebpageReadTool(fetcher)
+    result = tool.run(
+        ToolRequest(
+            tool_name="webpage_read", input_data={"url": "https://example.com/"}
+        )
+    )
+
+    assert result.metadata["extracted_text"] == "Hello"
+    assert "Webpage content from" not in result.metadata["extracted_text"]
+
+
 def test_plain_text_page_is_read_successfully() -> None:
     fetcher = _FakeFetcher(
         _success_page(b"Line one\nLine two", content_type="text/plain")

@@ -249,6 +249,33 @@ _WEB_SEARCH_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarize web search for",
 )
 
+#: Leading phrases for an explicit AI webpage-summary request (Phase 34,
+#: Batch 2). The text after the phrase is the raw, unparsed URL.
+#: Deliberately a separate, narrow match from match()/build_input() and
+#: from _WEBPAGE_READ_PREFIXES (the raw, non-AI "read webpage <url>"
+#: command, Phase 33): summarising a webpage is a two-phase
+#: (approve-then-summarize) AI-reasoning workflow, not a single tool
+#: execution, so it is never returned by match()/build_input(). Unlike
+#: _WEB_SEARCH_SUMMARY_PREFIXES above (which bypasses ToolExecutor/
+#: WebSearchTool entirely, since the search provider is fixed and
+#: vetted), this command always executes the real, approval-gated
+#: WebpageReadTool for acquisition - see match_webpage_summary()'s own
+#: docstring and the Phase 34 implementation plan's central finding.
+#: Each prefix deliberately includes a trailing space, mirroring
+#: _WEBPAGE_READ_PREFIXES's own reasoning: _file_prefix() matches via
+#: plain str.startswith(), so a prefix without a trailing space would
+#: also match "summarize webpageabout <url>" (no word boundary), and a
+#: bare "summarize webpage" with no URL would incorrectly match too.
+#: Checked directly against every existing exact/prefix table in this
+#: module: shares no second word with _WEBPAGE_READ_PREFIXES ("read" vs
+#: "summarize"/"summarise") and diverges from _WEB_SEARCH_SUMMARY_PREFIXES
+#: at the third word ("webpage" vs "web") - confirmed by direct
+#: comparison, not assumed.
+_WEBPAGE_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "summarize webpage ",
+    "summarise webpage ",
+)
+
 #: Leading phrases that indicate an explicit memory-summary request (Phase 9,
 #: Batch 2). The text after the phrase is treated as the raw, unparsed
 #: trailing id text. Deliberately a separate, narrow match from
@@ -755,6 +782,48 @@ class CommandRouter:
         """
         lowered = text.casefold()
         prefix = self._file_prefix(lowered, _WEB_SEARCH_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        return text[len(prefix) :].strip()
+
+    def match_webpage_summary(self, text: str) -> str | None:
+        """Match an explicit AI webpage-summary request and extract its URL.
+
+        Recognises "summarize webpage <url>" and "summarise webpage
+        <url>" (Phase 34, Batch 2). Like match_web_search_summary, this
+        is a distinct, narrow operation from match()/build_input(): it
+        never names a single registered tool for the orchestrator to
+        execute directly, because summarising a webpage is a two-phase
+        (approve-then-summarize) AI-reasoning workflow, not a single
+        tool execution.
+
+        Unlike match_web_search_summary, this method DOES gate on
+        "webpage_read" being registered - mirroring match_file_summary's
+        own precedent instead. This command always executes the real,
+        approval-gated WebpageReadTool for acquisition (never bypassing
+        ToolExecutor/SecurityManager the way web-search-summary safely
+        does for its own fixed, vetted provider - see the Phase 34
+        implementation plan's central finding for why that boundary
+        must never be bypassed here), so gating on the tool's own
+        registration honestly reflects whether the workflow can
+        actually run.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing URL text if the text matches
+            this command's grammar - possibly empty, if the phrase was
+            used with no URL - or None if the text does not match this
+            command's grammar at all, or if "webpage_read" is not
+            registered.
+        """
+        if not self._registry.has_tool("webpage_read"):
+            return None
+
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _WEBPAGE_SUMMARY_PREFIXES)
         if prefix is None:
             return None
 

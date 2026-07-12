@@ -210,5 +210,14 @@ class WebpageReadTool(BaseTool):
                 "content_type": page.content_type,
                 "byte_count": str(page.byte_count),
                 "truncated": str(extracted.truncated),
+                # Phase 34, Batch 2: the clean, sanitized text (without the
+                # "Webpage content from <url>:" display header or the
+                # truncation-notice line appended to `output` above), so a
+                # caller that needs the raw text for a further purpose
+                # (AI summarization ingestion) never has to parse this
+                # tool's own display-formatted output string - mirroring
+                # ai/web_search_ingestion.py's own explicit precedent
+                # against coupling AI ingestion to presentation formatting.
+                "extracted_text": sanitized,
             },
         )

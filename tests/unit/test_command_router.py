@@ -1147,6 +1147,117 @@ def test_match_web_search_summary_does_not_change_normal_match_behaviour(
     )
 
 
+# --- match_webpage_summary(): AI webpage-summary command (Phase 34, Batch 2) --
+
+
+def test_match_webpage_summary_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary("summarize webpage https://example.com")
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary("summarise webpage https://example.com")
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_is_case_insensitive(router: CommandRouter) -> None:
+    assert (
+        router.match_webpage_summary("SUMMARIZE WEBPAGE https://example.com")
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary("summarize webpage   https://example.com   ")
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_with_no_url_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    """Recognised as a webpage-summary command, but with no URL - the
+    caller (JarvisOrchestrator) is responsible for rejecting the empty
+    URL honestly, exactly like an empty web-search-summary query."""
+    assert router.match_webpage_summary("summarize webpage ") == ""
+
+
+def test_match_webpage_summary_does_gate_on_tool_registration(
+    router: CommandRouter,
+) -> None:
+    """Unlike match_web_search_summary, this command always goes
+    through the real, registered WebpageReadTool for acquisition, so it
+    correctly does NOT recognise the grammar when "webpage_read" is not
+    registered - honestly reflecting that the workflow cannot run."""
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "webpage_read":
+            registry.register_tool(_StubTool(name))
+    unregistered_router = CommandRouter(registry)
+    assert (
+        unregistered_router.match_webpage_summary("summarize webpage https://x.com")
+        is None
+    )
+
+
+def test_match_webpage_summary_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    # Close, but not the exact required grammar - must not match.
+    assert router.match_webpage_summary("read webpage https://example.com") is None
+    assert (
+        router.match_webpage_summary("summarize web page https://example.com")
+        is None
+    )
+    assert (
+        router.match_webpage_summary("summarise web page https://example.com")
+        is None
+    )
+    assert (
+        router.match_webpage_summary("summarize website https://example.com")
+        is None
+    )
+    assert router.match_webpage_summary("summarize webpage") is None
+    assert (
+        router.match_webpage_summary("summarize webpageabout https://example.com")
+        is None
+    )
+    assert (
+        router.match_webpage_summary("summarise web search for jarvis ai") is None
+    )
+    assert router.match_webpage_summary("search the web for jarvis ai") is None
+    assert router.match_webpage_summary("") is None
+
+
+def test_match_webpage_summary_does_not_change_normal_match_behaviour(
+    router: CommandRouter,
+) -> None:
+    """Adding match_webpage_summary must not change match()'s own
+    routing - "read webpage <url>" still routes to the webpage_read
+    tool via the ordinary path, never mistaken for a summary request."""
+    assert router.match("read webpage https://example.com") == "webpage_read"
+    assert router.match("search the web for jarvis ai") == "web_search"
+    assert (
+        router.match_web_search_summary("summarise web search for jarvis ai")
+        == "jarvis ai"
+    )
+    assert (
+        router.match_webpage_summary("summarize webpage https://example.com")
+        == "https://example.com"
+    )
+
+
 # --- match_memory_query_summary(): query-based memory-summary command (Phase 11, Batch 2)
 
 

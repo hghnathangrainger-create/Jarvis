@@ -56,6 +56,7 @@ from ai.memory_selection import (
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from ai.web_search_ingestion import ingest_web_search_for_ai
+from ai.webpage_ingestion import ingest_webpage_for_ai
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
@@ -149,6 +150,27 @@ _WEB_SEARCH_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE = (
 )
 _WEB_SEARCH_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE = (
     "AI reasoning could not produce a summary for these web search results right now."
+)
+
+#: Advisory label for a webpage-summary response's message (Phase 34,
+#: Batch 2). Mirrors _WEB_SEARCH_SUMMARY_LABEL's own code-enforced
+#: honesty guarantee: applied to every successful response regardless
+#: of the AI's own wording, so it is always clear this is a synthesis
+#: of one page's extracted text, not the raw page itself.
+_WEBPAGE_SUMMARY_LABEL = "[AI webpage summary - based on extracted page text]"
+#: A seventh, independently-declared message pair, matching the
+#: already-established, already-reviewed per-summary-family convention
+#: noted above rather than reusing another family's wording, which
+#: would be factually wrong for a webpage request. Centralising all
+#: seven copies remains the same disclosed, deferred maintenance-turn
+#: candidate already identified in docs/phase_14_completion_report.md -
+#: not fixed here, per Phase 34 Batch 2's explicit instruction not to
+#: perform a broad orchestrator refactor.
+_WEBPAGE_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't summarise this webpage."
+)
+_WEBPAGE_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce a summary for this webpage right now."
 )
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
@@ -559,6 +581,9 @@ class JarvisOrchestrator:
             )
             return self._workflow_result_to_response(result)
 
+        if self._is_pending_webpage_summary(response):
+            return self._execute_approved_webpage_summary(response, decision)
+
         if not decision.is_approved:
             return JarvisResponse(
                 success=False,
@@ -655,6 +680,90 @@ class JarvisOrchestrator:
         if not self._workflow_engine.has_paused(workflow_id):
             return None
         return workflow_id
+
+    @staticmethod
+    def _is_pending_webpage_summary(response: JarvisResponse) -> bool:
+        """Return whether response is a pending "summarize webpage" approval.
+
+        Uses only the existing ApprovalRequest.metadata mechanism (Phase
+        34, Batch 2), mirroring _paused_workflow_id_for's own narrow,
+        defensive discriminator pattern exactly: a missing or unrelated
+        metadata entry is never treated as a webpage-summary approval,
+        which is what prevents an unrelated approval that happens to
+        carry a same-shaped metadata key from being misrouted into the
+        AI-summarization continuation below.
+
+        Args:
+            response: The response being resumed via execute_approved().
+
+        Returns:
+            True only if response.approval_request is present and its
+            metadata's "webpage_summary" entry is exactly "true". False
+            otherwise.
+        """
+        if response.approval_request is None:
+            return False
+        return response.approval_request.metadata.get("webpage_summary") == "true"
+
+    def _execute_approved_webpage_summary(
+        self, response: JarvisResponse, decision: ApprovalDecision
+    ) -> JarvisResponse:
+        """Run the approved webpage fetch, then summarize it with AI.
+
+        Reached only via execute_approved(), only when
+        _is_pending_webpage_summary(response) is True (Phase 34, Batch
+        2). This re-runs the exact "webpage_read" tool and input carried
+        on response - identical to how execute_approved()'s own generic
+        path re-runs any other approved tool - so the fetch is always
+        gated by the same YELLOW approval and the same
+        WebpageReadTool/ToolExecutor/SecurityManager path a plain "read
+        webpage <url>" request already uses. AI summarization is only
+        ever attempted after that fetch has already succeeded.
+
+        Args:
+            response: The original response that carried the pending
+                webpage-summary approval request.
+            decision: The approval decision authorising the run.
+
+        Returns:
+            A JarvisResponse. If declined, an honest "declined" response
+            with no fetch and no AI call. Otherwise, the result of
+            running the approved fetch and, only on its success,
+            attempting AI summarization - see
+            _continue_webpage_summary_after_fetch for the rest of that
+            behaviour.
+        """
+        if not decision.is_approved:
+            return JarvisResponse(
+                success=False,
+                message="The action was declined and was not run.",
+                plan=response.plan,
+            )
+
+        session_id = (
+            response.approval_request.session_id
+            if response.approval_request is not None
+            else None
+        )
+        fetch_result = self._executor.execute(
+            response.tool_name,
+            response.tool_input,
+            session_id=session_id,
+            approval_decision=decision,
+        )
+
+        if fetch_result.blocked or not fetch_result.success:
+            return self._tool_result_to_response(response.plan, fetch_result)
+
+        url = str(response.tool_input.get("url", ""))
+        original_user_input = (
+            response.approval_request.action
+            if response.approval_request is not None
+            else f"summarize webpage {url}"
+        )
+        return self._continue_webpage_summary_after_fetch(
+            response.plan, fetch_result, url, original_user_input, session_id
+        )
 
     def _handle_remember_and_show_back_workflow_request(
         self, content: str, session_id: int | None
@@ -1064,6 +1173,14 @@ class JarvisOrchestrator:
                 web_search_summary_query, user_request, session_id
             )
 
+        webpage_summary_url = self._command_router.match_webpage_summary(
+            user_request.strip()
+        )
+        if webpage_summary_url is not None:
+            return self._handle_webpage_summary_request(
+                webpage_summary_url, user_request, session_id
+            )
+
         memory_query_summary_raw_text = (
             self._command_router.match_memory_query_summary(user_request.strip())
         )
@@ -1437,6 +1554,229 @@ class JarvisOrchestrator:
         )
 
         return response
+
+    def _handle_webpage_summary_request(
+        self, raw_url: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle an explicit "summarize/summarise webpage <url>" request
+        (Phase 34, Batch 2).
+
+        Unlike _handle_web_search_summary_request above, this is a
+        two-phase workflow: acquisition is never performed here directly.
+        Instead, this method executes the real, registered
+        WebpageReadTool through the real ToolExecutor - exactly the way
+        a plain "read webpage <url>" request already does - so a first
+        (unapproved) call always comes back requiring the same YELLOW
+        confirmation, classified via the tool's own fixed "read webpage"
+        action string. Only once Nathan approves that pending request
+        (via execute_approved(), which detects this specific pending
+        approval through _is_pending_webpage_summary() and delegates to
+        _execute_approved_webpage_summary() below) does the actual fetch
+        happen, and only after that fetch succeeds does AI summarization
+        ever occur. This is the central safety property the Phase 34
+        implementation plan exists to guarantee: an AI-summarization
+        command must never itself acquire arbitrary webpage content
+        without going through the exact same approval gate a plain
+        webpage read already requires - see
+        docs/phase_34_implementation_plan.md, Section 2, for the finding
+        that made this necessary (the web-search-summary handler above
+        is safe to leave un-approval-gated only because it always calls
+        one fixed, vetted provider - a webpage URL is not that).
+
+        Args:
+            raw_url: The raw trailing URL text extracted by
+                CommandRouter.match_webpage_summary - possibly empty.
+            user_request: The original, full request text.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. requires_confirmation=True on a first,
+            unapproved call (identical in shape to a plain "read
+            webpage <url>" response); success=True only once a real AI
+            summary was produced after an approved fetch; otherwise
+            success=False with an honest explanation of which stage did
+            not complete. Never raises.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+        url = raw_url.strip()
+
+        if not url:
+            return JarvisResponse(
+                success=False,
+                message="Summarising a webpage requires a non-empty URL.",
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_WEBPAGE_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if not self._registry.has_tool("webpage_read"):
+            return JarvisResponse(
+                success=False,
+                message="Reading webpages is not available.",
+                plan=plan,
+            )
+
+        result = self._executor.execute(
+            "webpage_read", {"url": url}, session_id=session_id
+        )
+
+        if result.blocked:
+            return JarvisResponse(
+                success=False,
+                message=result.error or "The action was blocked for safety.",
+                plan=plan,
+                tool_result=result,
+                blocked=True,
+            )
+
+        if result.requires_confirmation:
+            approval = self._approvals.create_request(
+                action=user_request.strip(),
+                reason=(
+                    (result.error or "This action requires your confirmation.")
+                    + " Jarvis will summarize the page with AI after it is"
+                    " fetched."
+                ),
+                security_tier=SecurityTier.YELLOW,
+                session_id=session_id,
+                tool_name="webpage_read",
+                tool_input={"url": url},
+                metadata={"webpage_summary": "true"},
+            )
+            return JarvisResponse(
+                success=False,
+                message=result.error or "This action requires your confirmation.",
+                plan=plan,
+                tool_result=result,
+                requires_confirmation=True,
+                approval_request=approval,
+                tool_name="webpage_read",
+                tool_input={"url": url},
+            )
+
+        # Not reached today - "read webpage" is always classified YELLOW
+        # (security/security_manager.py) - but handled honestly rather
+        # than assumed structurally impossible: if the fetch somehow
+        # already ran without needing approval, proceed directly to
+        # summarization using its result, exactly like the post-approval
+        # path below would.
+        return self._continue_webpage_summary_after_fetch(
+            plan, result, url, user_request.strip(), session_id
+        )
+
+    def _continue_webpage_summary_after_fetch(
+        self,
+        plan: Plan | None,
+        fetch_result: ToolResult,
+        url: str,
+        original_user_input: str,
+        session_id: int | None,
+    ) -> JarvisResponse:
+        """Ingest an already-fetched webpage and ask AI to summarize it.
+
+        Called only after WebpageReadTool has already run successfully
+        (either the not-reached-today immediate-GREEN path in
+        _handle_webpage_summary_request, or the approved path in
+        _execute_approved_webpage_summary below) - never before, and
+        never with unfetched content.
+
+        Args:
+            plan: The plan from the original request, carried through.
+            fetch_result: The successful ToolResult from running
+                "webpage_read" - fetch_result.success must be True.
+            url: The webpage URL that was fetched, for display/source
+                labelling only.
+            original_user_input: The original request text, passed to
+                AIReasoningEngine.reason() as user_input, exactly like
+                every other summary handler passes its own original
+                request text through unchanged.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI summary
+            was produced; otherwise success=False with an honest
+            explanation of which stage (ingestion or AI reasoning) did
+            not complete. The AI summary, when produced, is
+            display-only: it is attached to JarvisResponse.message and
+            nowhere else - never written to a file, the database, or
+            any write-tool's input.
+        """
+        ingestion = ingest_webpage_for_ai(
+            url,
+            fetch_result.metadata.get("extracted_text", ""),
+            content_type=fetch_result.metadata.get("content_type"),
+            status_code=self._metadata_int(fetch_result.metadata, "status_code"),
+            byte_count=self._metadata_int(fetch_result.metadata, "byte_count"),
+            extraction_truncated=fetch_result.metadata.get("truncated") == "True",
+        )
+        if not ingestion.success:
+            return JarvisResponse(
+                success=False,
+                message=(
+                    ingestion.error
+                    or "Could not prepare the webpage for summarization."
+                ),
+                plan=plan,
+                tool_result=fetch_result,
+            )
+
+        reasoning_request = AIReasoningRequest(
+            user_input=original_user_input,
+            context_block=ingestion.context,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_WEBPAGE_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+                tool_result=fetch_result,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_WEBPAGE_SUMMARY_LABEL} {summary}",
+            plan=plan,
+            tool_result=fetch_result,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit
+        # method every other request's advisory suggestion already goes
+        # through.
+        self._evaluate_unexpected_actions(response, result, session_id)
+
+        return response
+
+    @staticmethod
+    def _metadata_int(metadata: dict[str, str], key: str) -> int | None:
+        """Parse an optional integer out of a ToolResult's string metadata.
+
+        Args:
+            metadata: The ToolResult metadata mapping (string values only).
+            key: The metadata key to parse.
+
+        Returns:
+            The parsed integer, or None if the key is absent or not a
+            valid integer.
+        """
+        raw = metadata.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
     def _save_web_search_summary_to_inbox(
         self,
