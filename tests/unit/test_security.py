@@ -233,6 +233,48 @@ def test_webpage_read_rule_does_not_affect_unrelated_existing_classifications(
     assert manager.classify_action("format drive").is_blocked
 
 
+# --- Phase 35: file quarantine/delete classification --------------------------
+
+
+def test_delete_file_requires_confirmation(manager: SecurityManager) -> None:
+    """Confirms the pre-existing "delete file" YELLOW rule - already
+    present before Phase 35 (added for the raw "delete file <path>"
+    phrasing) - is exactly what FileDeleteTool.action_for() classifies
+    against. No new SecurityManager rule was added or needed."""
+    decision = manager.classify_action("delete file")
+    assert decision.requires_confirmation
+    assert not decision.is_allowed_automatically
+    assert not decision.is_blocked
+    reason = decision.reason.lower()
+    assert "state" in reason or "delet" in reason or "confirm" in reason
+    assert decision.matched_keyword == "delete file"
+
+
+def test_delete_file_classification_is_input_independent(
+    manager: SecurityManager,
+) -> None:
+    """The fixed action string is classified the same way regardless of
+    what path a caller might have appended (FileDeleteTool.action_for()
+    never does this, but the rule itself must not depend on it
+    either)."""
+    decision = manager.classify_action("delete file ../../../etc/passwd")
+    assert decision.requires_confirmation
+    assert decision.matched_keyword == "delete file"
+
+
+def test_delete_file_rule_does_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does not
+    touch remains exactly as it was."""
+    assert manager.classify_action("search the web for jarvis").is_allowed_automatically
+    assert manager.classify_action("read webpage").requires_confirmation
+    assert manager.classify_action("move file a.txt to b.txt").requires_confirmation
+    assert manager.classify_action("copy file a.txt to b.txt").requires_confirmation
+    assert manager.classify_action("delete all files").is_blocked
+    assert manager.classify_action("format drive").is_blocked
+
+
 # --- Input validation --------------------------------------------------------
 
 

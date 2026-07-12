@@ -198,6 +198,28 @@ _FILE_COPY_PREFIXES: tuple[str, ...] = ("copy file",)
 #: word) - confirmed by direct string comparison, not assumed.
 _FILE_MOVE_PREFIXES: tuple[str, ...] = ("move file", "rename file")
 
+#: The one exact, mandatory prefix for the file-quarantine request
+#: (Phase 35). Deliberately includes a trailing space, unlike
+#: _FILE_MOVE_PREFIXES/_FILE_READ_PREFIXES (which allow a bare command
+#: with no path to route through to the tool, empty-path rejection
+#: left to the tool itself): a quarantine/delete-shaped command is
+#: held to a stricter, more conservative grammar on purpose, mirroring
+#: _WEBPAGE_READ_PREFIXES's own reasoning - a bare "delete file" with
+#: no path at all must not match, and _file_prefix() matches via plain
+#: str.startswith(), so the trailing space is what enforces that word
+#: boundary. This also still correctly excludes "deletefile <path>"
+#: (no space at all - fails at the 7th character, ' ' vs 'f') and
+#: "delete folder <path>" (a different second word entirely - diverges
+#: at the 8th character, 'i' vs 'o') - confirmed by direct comparison,
+#: not assumed. Checked directly against every existing exact/prefix
+#: table in this module: shares no second word with _FILE_COPY_PREFIXES
+#: ("copy" vs "delete") or _FILE_MOVE_PREFIXES ("move"/"rename" vs
+#: "delete"). Deliberately a single, exact phrase - no aliases such as
+#: "remove file", "trash file", or "quarantine file" - matching this
+#: project's own "no looser synonym set" discipline (see
+#: _WEB_SEARCH_PREFIXES's own docstring precedent).
+_FILE_DELETE_PREFIXES: tuple[str, ...] = ("delete file ",)
+
 #: Leading phrases for a filename search (Phase 24). Two aliases are
 #: recognised for the same operation, mirroring the project's existing
 #: "summarise"/"summarize" alias convention. Checked directly against
@@ -676,6 +698,18 @@ class CommandRouter:
             self._registry.has_tool("file_move")
         ):
             return "file_move"
+
+        # File quarantine/delete (Phase 35): YELLOW, requires approval.
+        # Checked here, before the generic memory-keyword fallback
+        # below, so a path that happens to contain a substring like
+        # "memory" is never misrouted to the memory tool. "delete file"
+        # already matches an existing, pre-established YELLOW rule
+        # (confirmed directly in security/security_manager.py before
+        # this tool was written).
+        if self._file_prefix(lowered, _FILE_DELETE_PREFIXES) is not None and (
+            self._registry.has_tool("file_delete")
+        ):
+            return "file_delete"
 
         # File search (Phase 24): read-only, GREEN. Checked here, before
         # the generic memory-keyword fallback below, so a query that
@@ -1370,6 +1404,10 @@ class CommandRouter:
         if tool_name == "file_move":
             source, destination = self._extract_move_input(text)
             return {"source": source, "destination": destination}
+
+        if tool_name == "file_delete":
+            path = self._extract_path(text, _FILE_DELETE_PREFIXES)
+            return {"path": path}
 
         if tool_name == "schedule_create":
             query, time_of_day = self._extract_schedule_create_input(text)

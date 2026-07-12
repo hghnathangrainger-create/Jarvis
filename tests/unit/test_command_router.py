@@ -55,6 +55,7 @@ _ALL_TOOL_NAMES = (
     "file_append",
     "file_copy",
     "file_move",
+    "file_delete",
     "approval_history",
     "workflow_history",
     "web_search",
@@ -298,6 +299,88 @@ def test_build_input_file_move_with_nested_paths(router: CommandRouter) -> None:
     assert router.build_input(
         "file_move", "move file docs/notes.txt to backup/notes.txt"
     ) == {"source": "docs/notes.txt", "destination": "backup/notes.txt"}
+
+
+# --- match(): file delete/quarantine (Phase 35) --------------------------------
+
+
+def test_match_file_delete(router: CommandRouter) -> None:
+    assert router.match("delete file a.txt") == "file_delete"
+
+
+def test_match_file_delete_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("DELETE FILE a.txt") == "file_delete"
+
+
+def test_match_file_delete_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "file_delete":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("delete file a.txt") is None
+
+
+def test_match_file_delete_does_not_collide_with_copy_or_move(
+    router: CommandRouter,
+) -> None:
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+    assert router.match("move file a.txt to b.txt") == "file_move"
+    assert router.match("delete file a.txt") == "file_delete"
+
+
+def test_match_file_delete_does_not_collide_with_create_or_append(
+    router: CommandRouter,
+) -> None:
+    assert router.match("create file a.txt with x") == "file_create"
+    assert router.match("append to file a.txt hello") == "file_append"
+    assert router.match("delete file a.txt") == "file_delete"
+
+
+def test_match_file_delete_does_not_collide_with_search(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search files for a.txt") == "file_search"
+    assert router.match("delete file a.txt") == "file_delete"
+
+
+def test_near_misses_do_not_route_as_file_delete(router: CommandRouter) -> None:
+    # Close, but not the exact required prefix - must not match.
+    assert router.match("deletefile a.txt") != "file_delete"
+    assert router.match("delete folder a.txt") != "file_delete"
+    assert router.match("delete directory a.txt") != "file_delete"
+    assert router.match("remove file a.txt") != "file_delete"
+    assert router.match("trash file a.txt") != "file_delete"
+    assert router.match("quarantine file a.txt") != "file_delete"
+    assert router.match("rm a.txt") != "file_delete"
+    # A bare command with no path at all must not match either - this
+    # is exactly why _FILE_DELETE_PREFIXES includes a trailing space,
+    # a deliberately stricter grammar than file_move/file_read allow.
+    assert router.match("delete file") != "file_delete"
+
+
+def test_build_input_file_delete_extracts_path(router: CommandRouter) -> None:
+    assert router.build_input("file_delete", "delete file a.txt") == {"path": "a.txt"}
+
+
+def test_build_input_file_delete_with_nested_path(router: CommandRouter) -> None:
+    assert router.build_input("file_delete", "delete file docs/notes.txt") == {
+        "path": "docs/notes.txt"
+    }
+
+
+def test_build_input_file_delete_strips_surrounding_quotes(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("file_delete", 'delete file "a.txt"') == {
+        "path": "a.txt"
+    }
+
+
+def test_build_input_file_delete_empty_path_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("file_delete", "delete file ") == {"path": ""}
 
 
 # --- match(): file search (Phase 24) -------------------------------------------

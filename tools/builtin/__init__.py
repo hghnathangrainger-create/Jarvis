@@ -48,6 +48,11 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
       creates parent folders, and never deletes, copies, or executes
       anything - a same-directory destination is a rename and a
       cross-directory destination is a move, both via one tool.
+    - FileDeleteTool: quarantines an EXISTING file by moving it into a
+      Jarvis-managed .jarvis_trash/ directory (Phase 35) - it is never
+      permanently destroyed. Never overwrites a file already in
+      quarantine, never touches symlinks or directories, and has no
+      companion restore/empty-trash command in this phase.
     - MemoryUpdateTool: updates a memory's content or category by id.
     - MemoryForgetTool: forgets one specific memory by id; no bulk delete.
     - ScheduleCreateTool: creates a new daily web-search-summary schedule
@@ -57,10 +62,12 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - ScheduleDisableTool: disables a schedule by id (Phase 21) - the
       only way to stop a schedule from running; there is no delete tool.
 
-No built-in tool deletes, edits in place, installs software, runs commands,
-or controls the computer. FileMoveTool is the sole exception to "no move" -
-it moves/renames a single file, with approval, and never overwrites, never
-deletes, and never touches directories.
+No built-in tool edits in place, installs software, runs commands, or
+controls the computer. FileMoveTool and FileDeleteTool are the sole
+exceptions to "no move" - one relocates a file to a Nathan-chosen
+destination, the other relocates it into Jarvis's own quarantine
+directory - and neither ever overwrites an existing destination or
+permanently destroys anything.
 """
 
 from __future__ import annotations
@@ -71,6 +78,7 @@ from tools.builtin.echo_tool import EchoTool
 from tools.builtin.file_append_tool import FileAppendTool
 from tools.builtin.file_copy_tool import FileCopyTool
 from tools.builtin.file_create_tool import FileCreateTool
+from tools.builtin.file_delete_tool import FileDeleteTool
 from tools.builtin.file_list_tool import FileListTool
 from tools.builtin.file_move_tool import FileMoveTool
 from tools.builtin.file_read_tool import FileReadTool
@@ -100,6 +108,7 @@ __all__ = [
     "FileAppendTool",
     "FileCopyTool",
     "FileMoveTool",
+    "FileDeleteTool",
     "MemoryUpdateTool",
     "MemoryForgetTool",
     "WorkflowHistoryTool",
