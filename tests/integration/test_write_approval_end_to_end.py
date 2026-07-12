@@ -3,7 +3,7 @@ test_write_approval_end_to_end.py
 
 End-to-end integration tests for the guarded write approval flow
 (Phase 4, Batch 2; extended Phase 25 with FileCopyTool; extended
-Phase 26 with FileMoveTool).
+Phase 26 with FileMoveTool; extended Phase 35 with FileDeleteTool).
 
 These wire the real Security Manager, Tool Registry, Tool Executor, Approval
 Manager, and the write tools together, and trace a write action through its
@@ -18,11 +18,13 @@ Run with:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from approval.approval_manager import ApprovalManager
+from approval.approval_models import ApprovalError
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from planner.planner import Planner
@@ -33,12 +35,25 @@ from tools.builtin import (
     FileAppendTool,
     FileCopyTool,
     FileCreateTool,
+    FileDeleteTool,
     FileListTool,
     FileMoveTool,
     FileReadTool,
 )
+from tools.builtin.file_delete_tool import _QUARANTINE_DIR_NAME
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
+from ui.approval_prompt import format_approval_request
+
+_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _FakeClock:
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
 
 
 class _SpyLogger:
@@ -78,7 +93,12 @@ class _RedWriteTool(BaseTool):
 class _System:
     """The real components wired together, plus a RED tool for safety tests."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int | None = None,
+        clock: object | None = None,
+    ) -> None:
         self.logger = _SpyLogger()
         self.security = SecurityManager()
         self.registry = ToolRegistry()
@@ -90,13 +110,18 @@ class _System:
         self.registry.register_tool(FileAppendTool())
         self.registry.register_tool(FileCopyTool())
         self.registry.register_tool(FileMoveTool())
+        self.registry.register_tool(FileDeleteTool())
         self.registry.register_tool(self.red)
         self.executor = ToolExecutor(
             registry=self.registry,
             security_manager=self.security,
             logger=self.logger,  # type: ignore[arg-type]
         )
-        self.approvals = ApprovalManager(audit_logger=self.logger)  # type: ignore[arg-type]
+        self.approvals = ApprovalManager(
+            audit_logger=self.logger,  # type: ignore[arg-type]
+            timeout_seconds=timeout_seconds,
+            clock=clock,  # type: ignore[arg-type]
+        )
         self.orchestrator = JarvisOrchestrator(
             planner=Planner(self.security),
             executor=self.executor,
@@ -360,6 +385,179 @@ def test_move_requires_no_direct_bypass_around_approval_manager(
     assert response.success is False  # nothing has run yet
     assert source.exists()
     assert not destination.exists()
+
+
+# --- Delete/Quarantine: approved moves to trash, declined/timed-out does not ---
+# (Phase 35) ----------------------------------------------------------------
+
+
+def test_delete_file_requires_yellow_approval_before_execution(
+    system: _System, workspace: Path
+) -> None:
+    target = workspace / "notes.txt"
+    target.write_text("content")
+
+    response = system.orchestrator.handle_request("delete file notes.txt")
+
+    assert response.requires_confirmation is True
+    assert response.success is False
+    assert target.exists()  # not yet moved
+
+
+def test_delete_file_classification_is_fixed_and_not_path_dependent(
+    system: _System, workspace: Path
+) -> None:
+    (workspace / "a.txt").write_text("a")
+    (workspace / "b.txt").write_text("b")
+
+    response_one = system.orchestrator.handle_request("delete file a.txt")
+    response_two = system.orchestrator.handle_request(
+        "delete file ../../../etc/passwd"
+    )
+
+    assert response_one.requires_confirmation is True
+    assert response_two.requires_confirmation is True
+    assert response_one.approval_request.security_tier == (
+        response_two.approval_request.security_tier
+    )
+    assert response_one.tool_name == "file_delete"
+    assert response_two.tool_name == "file_delete"
+
+
+def test_approval_prompt_clearly_indicates_deletion_risk(
+    system: _System, workspace: Path
+) -> None:
+    (workspace / "notes.txt").write_text("content")
+    response = system.orchestrator.handle_request("delete file notes.txt")
+
+    formatted = format_approval_request(response.approval_request)
+    lowered = formatted.lower()
+    assert "delete file" in lowered
+    assert "delet" in lowered or "confirm" in lowered
+
+
+def test_approved_delete_moves_the_file_into_quarantine(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("important content")
+
+    response = system.orchestrator.handle_request("delete file notes.txt")
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert not source.exists()  # removed from its original path only
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantined_files = list(quarantine_dir.iterdir())
+    assert len(quarantined_files) == 1
+    assert quarantined_files[0].read_text() == "important content"
+
+
+def test_declined_delete_leaves_the_file_untouched(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    response = system.orchestrator.handle_request("delete file notes.txt")
+    decision = system.approvals.decline(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert source.exists()
+    assert source.read_text() == "content"
+    assert not (workspace / _QUARANTINE_DIR_NAME).exists()
+
+
+def test_timed_out_approval_leaves_the_file_untouched(workspace: Path) -> None:
+    clock = _FakeClock(_START)
+    system = _System(timeout_seconds=60, clock=clock)
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    response = system.orchestrator.handle_request("delete file notes.txt")
+    clock.now = _START + timedelta(seconds=60)
+
+    with pytest.raises(ApprovalError):
+        system.approvals.approve(response.approval_request.request_id)
+
+    assert source.exists()
+    assert source.read_text() == "content"
+    assert not (workspace / _QUARANTINE_DIR_NAME).exists()
+
+
+def test_delete_requires_no_direct_bypass_around_approval_manager(
+    system: _System, workspace: Path
+) -> None:
+    """A delete request that is never approved or declined at all must
+    never quarantine anything - there is no path from handle_request()
+    to a moved file that skips ApprovalManager entirely."""
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    response = system.orchestrator.handle_request("delete file notes.txt")
+
+    assert response.requires_confirmation is True
+    assert response.success is False
+    assert source.exists()
+    assert not (workspace / _QUARANTINE_DIR_NAME).exists()
+
+
+def test_missing_file_delete_input_fails_cleanly(
+    system: _System, workspace: Path
+) -> None:
+    response = system.orchestrator.handle_request(
+        "delete file does_not_exist.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert not (workspace / _QUARANTINE_DIR_NAME).exists()
+
+
+def test_directory_delete_source_fails_cleanly(
+    system: _System, workspace: Path
+) -> None:
+    a_directory = workspace / "a_folder"
+    a_directory.mkdir()
+
+    response = system.orchestrator.handle_request("delete file a_folder")
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert a_directory.exists()
+
+
+def test_already_quarantined_source_fails_cleanly(
+    system: _System, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    already_quarantined = quarantine_dir / "already_here.txt"
+    already_quarantined.write_text("already quarantined")
+
+    response = system.orchestrator.handle_request(
+        f"delete file {_QUARANTINE_DIR_NAME}/already_here.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert already_quarantined.exists()
+
+
+def test_delete_decisions_are_audited(system: _System, workspace: Path) -> None:
+    (workspace / "notes.txt").write_text("content")
+    response = system.orchestrator.handle_request("delete file notes.txt")
+    decision = system.approvals.approve(response.approval_request.request_id)
+    system.orchestrator.execute_approved(response, decision)
+
+    approval_events = system.logger.approval_events()
+    assert len(approval_events) == 1
+    assert "outcome=approved" in str(approval_events[0]["detail"])
 
 
 # --- RED stays blocked, writes are audited -----------------------------------

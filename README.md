@@ -906,7 +906,25 @@ Both spellings route identically. **The central safety design point**: Phase 18'
 
 ### What is deliberately NOT included in Phase 34
 
-No new command aliases beyond the two spellings. No autonomous browsing, no multi-page crawling — exactly one fetch per request. No acting on instructions inside the webpage's own text — it is always treated as data to summarize, never a command, regardless of what it says. No automated save-to-file or Inbox integration (unlike the web-search-summary command, which does auto-save — a deliberate difference, since this content is approval-gated in a way that one isn't). No workflow, scheduler, or dashboard integration. No `PromptBuilder` changes — the existing, already-proven automatic injection scan covers this new untrusted source unmodified. No Research Agent, Core service, file delete, voice, phone, goals, projects, or tasks.
+No new command aliases beyond the two spellings. No autonomous browsing, no multi-page crawling — exactly one fetch per request. No acting on instructions inside the webpage's own text — it is always treated as data to summarize, never a command, regardless of what it says. No automated save-to-file or Inbox integration (unlike the web-search-summary command, which does auto-save — a deliberate difference, since this content is approval-gated in a way that one isn't). No workflow, scheduler, or dashboard integration. No `PromptBuilder` changes — the existing, already-proven automatic injection scan covers this new untrusted source unmodified. No Research Agent, Core service, voice, phone, goals, projects, or tasks. **File delete has since been added** — see Phase 35 below — as a distinct, separately-reviewed capability unrelated to webpage work.
+
+---
+
+## Phase 35 — File Delete with Trash/Quarantine (complete)
+
+Jarvis's first file-delete capability — not a permanent, irreversible delete, but a safe quarantine move. See `docs/phase_35_completion_report.md` for the full write-up.
+
+### File delete command
+
+```
+delete file <path>
+```
+
+Classified **YELLOW**, reusing the pre-existing `"delete file"` rule in `SecurityManager` (no new rule was needed). On approval, the file is moved into `.jarvis_trash/` — a Jarvis-managed quarantine directory, created on demand, relative to the current working directory. The file is **not destroyed**: it still exists on disk afterward, just no longer at its original path. Quarantined files are named with a unique random suffix so two files with the same original name never collide or overwrite each other. Directories, symlinks, and files already inside the quarantine directory are all rejected with a clear explanation. There is deliberately no restore command, no "empty trash" command, and no automatic cleanup or retention policy in this phase — once quarantined, a file stays there until Nathan manages it himself outside of Jarvis.
+
+### What is deliberately NOT included in Phase 35
+
+No permanent/irreversible delete of any kind — no production code path calls `os.remove()`, `Path.unlink()`, `shutil.rmtree()`, or any equivalent. No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No Research Agent or autonomous behavior. No Core service, voice, phone, goals, projects, or tasks. No command aliases beyond the one exact grammar (`remove file`, `trash file`, `quarantine file`, `rm`, etc. were all deliberately not added).
 
 ---
 
@@ -998,7 +1016,8 @@ jarvis/
 │                   DuckDuckGoSearchProvider adapter (Phase 16)
 │   └── builtin/    echo, info, memory (list/search/save/get), file_list,
 │                   file_read, web_search (GREEN); file_create,
-│                   file_append, memory_update, memory_forget
+│                   file_append, file_delete (quarantine-only, Phase 35),
+│                   memory_update, memory_forget
 │                   (YELLOW, approval-gated)
 ├── approval/       Approval models and the Approval Manager
 ├── workflow/       Sequential Workflow Engine, the deterministic

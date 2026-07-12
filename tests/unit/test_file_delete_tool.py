@@ -2,7 +2,8 @@
 test_file_delete_tool.py
 
 Unit tests for the Jarvis FileDeleteTool
-(tools/builtin/file_delete_tool.py), Phase 35, Batch 1.
+(tools/builtin/file_delete_tool.py), Phase 35, Batch 1; extended
+Batch 2 with adversarial quarantine safety tests.
 
 The tool is write-capable but deliberately not a real delete: it moves
 one existing file into a Jarvis-managed quarantine directory
@@ -244,6 +245,107 @@ def test_destination_collision_is_avoided_via_retry(
     assert Path(result.metadata["quarantine_path"]) != occupied_path
     # The pre-existing occupied file must never have been touched.
     assert occupied_path.read_text(encoding="utf-8") == "occupying this exact name"
+
+
+# ---------------------------------------------------------------------------
+# Adversarial quarantine safety (Batch 2)
+# ---------------------------------------------------------------------------
+
+
+def test_path_traversal_source_cannot_escape_the_quarantine_directory(
+    tool: FileDeleteTool, workspace: Path
+) -> None:
+    """The quarantine destination is always built from source.stem/
+    source.suffix (Path's own last-component name parsing), never from
+    the full source path string - so a source path containing ".."
+    components has no way to influence where inside .jarvis_trash/ the
+    quarantined copy ends up. Proven here with a source path that
+    itself contains ".." segments (still resolving to a real file)."""
+    nested = workspace / "a" / "b"
+    nested.mkdir(parents=True)
+    real_file = nested / "secret.txt"
+    real_file.write_text("sensitive content", encoding="utf-8")
+
+    traversal_path = workspace / "a" / ".." / "a" / "b" / "secret.txt"
+    assert traversal_path.resolve() == real_file.resolve()
+
+    result = _run(tool, path=str(traversal_path))
+
+    assert result.success is True
+    quarantine_path = Path(result.metadata["quarantine_path"])
+    quarantine_dir = (workspace / _QUARANTINE_DIR_NAME).resolve()
+    # The quarantined file lands directly inside the quarantine
+    # directory, one level deep - never nested further, and never
+    # outside it - regardless of the ".." segments in the source path.
+    assert quarantine_path.resolve().parent == quarantine_dir
+    assert ".." not in quarantine_path.parts
+    assert quarantine_path.read_text(encoding="utf-8") == "sensitive content"
+
+
+def test_original_parent_directory_is_not_removed_after_quarantine(
+    tool: FileDeleteTool, workspace: Path
+) -> None:
+    nested = workspace / "keep_this_folder"
+    nested.mkdir()
+    nested_file = nested / "notes.txt"
+    nested_file.write_text("content", encoding="utf-8")
+
+    result = _run(tool, path=str(nested_file))
+
+    assert result.success is True
+    assert nested.exists()  # the now-empty parent folder is untouched
+    assert nested.is_dir()
+
+
+def test_quarantine_directory_itself_is_rejected_as_a_source(
+    tool: FileDeleteTool, workspace: Path
+) -> None:
+    """The quarantine directory is a directory, not a file - rejected by
+    the same is_dir() check every other directory source hits, proven
+    explicitly for this specific, security-relevant directory."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+
+    result = _run(tool, path=str(quarantine_dir))
+
+    assert result.success is False
+    assert "directory" in result.error.lower()
+    assert quarantine_dir.exists()
+
+
+def test_absolute_and_relative_paths_behave_consistently(
+    tool: FileDeleteTool, workspace: Path
+) -> None:
+    relative_file = workspace / "relative.txt"
+    relative_file.write_text("via relative path", encoding="utf-8")
+    absolute_file = workspace / "absolute.txt"
+    absolute_file.write_text("via absolute path", encoding="utf-8")
+
+    relative_result = _run(tool, path="relative.txt")
+    absolute_result = _run(tool, path=str(absolute_file.resolve()))
+
+    assert relative_result.success is True
+    assert absolute_result.success is True
+    assert Path(relative_result.metadata["quarantine_path"]).read_text(
+        encoding="utf-8"
+    ) == "via relative path"
+    assert Path(absolute_result.metadata["quarantine_path"]).read_text(
+        encoding="utf-8"
+    ) == "via absolute path"
+
+
+def test_binary_and_special_character_content_is_preserved_byte_for_byte(
+    tool: FileDeleteTool, workspace: Path
+) -> None:
+    source = workspace / "binary.dat"
+    payload = bytes(range(256)) + "special: café \n\t\r".encode("utf-8")
+    source.write_bytes(payload)
+
+    result = _run(tool, path=str(source))
+
+    assert result.success is True
+    quarantine_path = Path(result.metadata["quarantine_path"])
+    assert quarantine_path.read_bytes() == payload
 
 
 # ---------------------------------------------------------------------------
