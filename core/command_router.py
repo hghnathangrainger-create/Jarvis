@@ -135,6 +135,22 @@ _CONFIG_EXACT_COMMANDS: frozenset[str] = frozenset({"show config", "show setting
 #: Phase 15's own exact-command-grammar discipline.
 _WEB_SEARCH_PREFIXES: tuple[str, ...] = ("search the web for",)
 
+#: The one exact, mandatory prefix for the webpage-read command (Phase
+#: 33). Routes to the approval-gated WebpageReadTool. Deliberately
+#: includes a trailing space, unlike most other _FILE_*_PREFIXES
+#: entries (e.g. "read file" has none): _file_prefix() below matches
+#: via plain str.startswith(), so a prefix without a trailing space
+#: would also match "read webpageabout <url>" (no word boundary). The
+#: trailing space enforces that boundary, and also means a bare "read
+#: webpage" with no URL at all does not match (there is nothing after
+#: it to satisfy the required space), which is the intended behaviour -
+#: an empty/missing URL is not a valid command. Checked directly
+#: against every existing exact/prefix table in this module: shares no
+#: second word with _FILE_READ_PREFIXES ("file"/"the file" vs
+#: "webpage"), _WEB_SEARCH_PREFIXES ("the" vs "webpage"), or any other
+#: table - confirmed by direct comparison, not assumed.
+_WEBPAGE_READ_PREFIXES: tuple[str, ...] = ("read webpage ",)
+
 #: Leading phrases that indicate a create-file request. The text after the
 #: phrase is the path, optionally followed by " with <content>". Creating a
 #: file is a WRITE action (YELLOW) and always requires approval.
@@ -552,6 +568,16 @@ class CommandRouter:
             self._registry.has_tool("web_search")
         ):
             return "web_search"
+
+        # Webpage read (Phase 33): approval-gated (YELLOW) - unlike
+        # web_search above, this sends a network request to an
+        # arbitrary, Nathan-supplied target rather than one fixed,
+        # vetted provider. See WebpageReadTool.action_for()'s own
+        # fixed, URL-independent action string.
+        if self._file_prefix(lowered, _WEBPAGE_READ_PREFIXES) is not None and (
+            self._registry.has_tool("webpage_read")
+        ):
+            return "webpage_read"
 
         # Schedule management (Phase 21): ordinary tool-backed commands,
         # checked before the file commands below so "schedule web search
@@ -1228,6 +1254,9 @@ class CommandRouter:
         if tool_name == "web_search":
             return self._build_web_search_input(text)
 
+        if tool_name == "webpage_read":
+            return self._build_webpage_read_input(text)
+
         if tool_name == "memory_forget":
             if text.strip().casefold().startswith("forget all"):
                 # Bulk forget: no id. The tool's action classifies RED and the
@@ -1847,6 +1876,33 @@ class CommandRouter:
 
         query = stripped[len(prefix):].strip().strip("'\"").strip()
         return {"query": query}
+
+    @classmethod
+    def _build_webpage_read_input(cls, text: str) -> dict[str, object]:
+        """Parse a webpage-read command into a tool input dictionary.
+
+        One shape is recognised (case-insensitively):
+            read webpage <url>
+
+        The <url> is the raw trailing text, surrounding quotes and
+        whitespace stripped. No further parsing, validation, or
+        rewriting is applied - WebFetchPolicy (via SafeWebFetcher,
+        inside WebpageReadTool) is responsible for rejecting a missing
+        or unsafe URL.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dictionary for the webpage_read tool.
+        """
+        stripped = text.strip()
+        prefix = cls._file_prefix(stripped.casefold(), _WEBPAGE_READ_PREFIXES)
+        if prefix is None:
+            return {"url": ""}
+
+        url = stripped[len(prefix):].strip().strip("'\"").strip()
+        return {"url": url}
 
     @staticmethod
     def _extract_memory_id(text: str, prefix: str) -> int | None:

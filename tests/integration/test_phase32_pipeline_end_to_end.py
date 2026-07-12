@@ -364,14 +364,24 @@ def test_no_phase32_module_imports_command_router_or_security_manager() -> None:
         assert "security_manager" not in source
 
 
-def test_no_production_module_outside_web_imports_the_web_package() -> None:
-    """Confirms Phase 32 is one-directional and not yet wired in anywhere.
+def test_only_the_webpage_read_tool_and_main_import_the_web_package() -> None:
+    """Confirms Phase 32's foundation is consumed in exactly one place.
 
-    Nothing outside the web/ package itself references it - no tool,
-    no command router entry, no main.py registration, matching the
-    "safety layer nothing calls yet" scope for all three batches.
+    Updated for Phase 33 (Batch 1): the foundation was deliberately
+    "one-directional and unused" through the end of Phase 32, but
+    Phase 33 exists specifically to consume it - via
+    tools/builtin/webpage_read_tool.py and its registration in
+    main.py, and nowhere else. This test now proves the narrower, still
+    meaningful invariant: no AI, workflow, scheduler, dashboard/ui,
+    approval, storage, or *other* tool module imports web/ - only the
+    one tool built for this exact purpose, and the composition root
+    that wires it in.
     """
     repo_root = Path(".")
+    allowed_importers = {
+        (repo_root / "tools" / "builtin" / "webpage_read_tool.py").resolve(),
+        (repo_root / "main.py").resolve(),
+    }
     production_dirs = ["tools", "core", "ai", "workflow", "ui", "approval", "storage"]
     offending: list[str] = []
     for directory in production_dirs:
@@ -381,11 +391,13 @@ def test_no_production_module_outside_web_imports_the_web_package() -> None:
         for py_file in dir_path.rglob("*.py"):
             source = py_file.read_text(encoding="utf-8")
             imported = _collect_top_level_imports(source)
-            if "web" in imported:
+            if "web" in imported and py_file.resolve() not in allowed_importers:
                 offending.append(str(py_file))
 
     main_source = Path("main.py").read_text(encoding="utf-8")
-    if "web" in _collect_top_level_imports(main_source):
-        offending.append("main.py")
+    assert "web" in _collect_top_level_imports(main_source)
+
+    tool_source = Path("tools/builtin/webpage_read_tool.py").read_text(encoding="utf-8")
+    assert "web" in _collect_top_level_imports(tool_source)
 
     assert offending == []

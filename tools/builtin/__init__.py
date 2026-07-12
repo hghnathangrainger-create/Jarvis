@@ -29,6 +29,13 @@ Read-only tools (GREEN) - these never change any state:
       or os.environ directly, never mutates anything. The API key is
       reported only as "set"/"not set", never its value.
 
+Guarded read tools (YELLOW) - read-only from Jarvis's own state's point of
+view, but classified YELLOW because they reach an arbitrary, externally-
+controlled network target rather than a fixed, vetted endpoint:
+    - WebpageReadTool: fetches one webpage (via Phase 32's WebFetchPolicy/
+      SafeWebFetcher) and returns its extracted, sanitized plain text -
+      never a summary, never AI-reasoned about, never persisted (Phase 33).
+
 Guarded write tools (YELLOW) - these change state and require approval before
 they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - FileCreateTool: creates a NEW text file; never overwrites.
@@ -77,6 +84,7 @@ from tools.builtin.schedule_disable_tool import ScheduleDisableTool
 from tools.builtin.schedule_enable_tool import ScheduleEnableTool
 from tools.builtin.schedule_list_tool import ScheduleListTool
 from tools.builtin.web_search_tool import WebSearchTool
+from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 
 __all__ = [
@@ -96,6 +104,7 @@ __all__ = [
     "MemoryForgetTool",
     "WorkflowHistoryTool",
     "WebSearchTool",
+    "WebpageReadTool",
     "ScheduleCreateTool",
     "ScheduleListTool",
     "ScheduleEnableTool",

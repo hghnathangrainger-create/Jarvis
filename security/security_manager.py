@@ -185,6 +185,15 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("move file", SecurityTier.YELLOW, "Moving a file changes its location and should be confirmed."),
     _Rule("rename", SecurityTier.YELLOW, "Renaming changes state and should be confirmed."),
     _Rule("download", SecurityTier.YELLOW, "Downloading brings external content onto the system."),
+    # Phase 33: without this explicit rule, "read webpage" would fall
+    # through to the generic GREEN "read" rule below (it contains "read"
+    # as a substring) and be misclassified as safe automatic read-only
+    # access - but unlike "read file" (local, no external target),
+    # reading a webpage sends a network request to an arbitrary,
+    # Nathan-supplied target and displays external content, which is
+    # exactly the "download" rule's own reasoning above. Listed here,
+    # before any GREEN rule, so it is always matched first.
+    _Rule("read webpage", SecurityTier.YELLOW, "Reading a webpage brings external network content onto the system and displays it to you, so approval is required."),
     _Rule("run command", SecurityTier.YELLOW, "Running a command can change the system."),
     _Rule("execute", SecurityTier.YELLOW, "Executing code can change the system."),
     _Rule("purchase", SecurityTier.YELLOW, "Spending money should always be confirmed."),

@@ -58,6 +58,7 @@ _ALL_TOOL_NAMES = (
     "approval_history",
     "workflow_history",
     "web_search",
+    "webpage_read",
     "schedule_create",
     "schedule_list",
     "schedule_enable",
@@ -534,6 +535,54 @@ def test_nearby_non_matching_phrases_do_not_route_as_web_search(
     assert router.match("please search the web for cats") is None
 
 
+# --- match(): webpage read command (Phase 33) ---------------------------------
+
+
+def test_match_webpage_read_exact_prefix(router: CommandRouter) -> None:
+    assert router.match("read webpage https://example.com") == "webpage_read"
+
+
+def test_match_webpage_read_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("READ WEBPAGE https://example.com") == "webpage_read"
+
+
+def test_match_webpage_read_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "webpage_read":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("read webpage https://example.com") is None
+
+
+def test_match_webpage_read_does_not_collide_with_web_search_or_file_read(
+    router: CommandRouter,
+) -> None:
+    assert router.match("search the web for jarvis ai") == "web_search"
+    assert router.match("read file notes.txt") == "file_read"
+    assert router.match("read webpage https://example.com") == "webpage_read"
+
+
+def test_nearby_non_matching_phrases_do_not_route_as_webpage_read(
+    router: CommandRouter,
+) -> None:
+    # Close, but not the exact required prefix - must not match.
+    assert router.match("read webpage") is None
+    assert router.match("read web page https://example.com") is None
+    assert router.match("read website https://example.com") is None
+    assert router.match("fetch webpage https://example.com") is None
+    assert router.match("summarize webpage https://example.com") is None
+    assert router.match("summarise webpage https://example.com") is None
+    assert router.match("open webpage https://example.com") is None
+    assert router.match("browse webpage https://example.com") is None
+    # A merged word with no space after "webpage" must not match the
+    # webpage_read prefix - this is exactly why _WEBPAGE_READ_PREFIXES
+    # includes a trailing space. (This phrase happens to contain "about",
+    # a pre-existing, unrelated _INFO_KEYWORDS substring match, so it
+    # still routes somewhere - just never to webpage_read.)
+    assert router.match("read webpageabout https://example.com") != "webpage_read"
+
+
 # --- match(): memory change commands ------------------------------------------
 
 
@@ -755,6 +804,36 @@ def test_build_input_web_search_empty_query_returns_empty_string(
     router: CommandRouter,
 ) -> None:
     assert router.build_input("web_search", "search the web for") == {"query": ""}
+
+
+def test_build_input_webpage_read_extracts_url(router: CommandRouter) -> None:
+    assert router.build_input(
+        "webpage_read", "read webpage https://example.com/article"
+    ) == {"url": "https://example.com/article"}
+
+
+def test_build_input_webpage_read_strips_surrounding_quotes(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input(
+        "webpage_read", 'read webpage "https://example.com/article"'
+    ) == {"url": "https://example.com/article"}
+
+
+def test_build_input_webpage_read_preserves_url_verbatim(
+    router: CommandRouter,
+) -> None:
+    # The URL is never rewritten or normalised here - WebFetchPolicy
+    # (inside WebpageReadTool) is solely responsible for validating it.
+    assert router.build_input(
+        "webpage_read", "read webpage http://169.254.169.254/latest/meta-data/"
+    ) == {"url": "http://169.254.169.254/latest/meta-data/"}
+
+
+def test_build_input_webpage_read_empty_url_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("webpage_read", "read webpage ") == {"url": ""}
 
 
 def test_build_input_unknown_tool_returns_empty_dict(router: CommandRouter) -> None:

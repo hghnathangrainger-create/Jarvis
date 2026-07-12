@@ -72,12 +72,14 @@ from tools.builtin import (
     ScheduleEnableTool,
     ScheduleListTool,
     WebSearchTool,
+    WebpageReadTool,
     WorkflowHistoryTool,
 )
 from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
+from web.safe_web_fetcher import SafeWebFetcher
 from workflow.engine import WorkflowEngine
 from workflow.paused_workflow_store import PausedWorkflowStore
 from workflow.workflow_history_store import WorkflowHistoryStore
@@ -199,6 +201,16 @@ def build_orchestrator() -> JarvisOrchestrator:
     # provider.
     web_search_provider = DuckDuckGoSearchProvider()
     registry.register_tool(WebSearchTool(web_search_provider))
+
+    # Webpage read (Phase 33, Batch 1): the first tool built on Phase
+    # 32's fetch/read safety foundation. YELLOW - unlike WebSearchTool
+    # above, this sends a network request to an arbitrary, Nathan-
+    # supplied target rather than one fixed, vetted provider. Depends
+    # only on SafeWebFetcher/extract_text_from_fetched_page; no AI,
+    # workflow, scheduler, dashboard, or Inbox integration exists here
+    # or anywhere else in this phase.
+    web_fetcher = SafeWebFetcher()
+    registry.register_tool(WebpageReadTool(web_fetcher))
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,

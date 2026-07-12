@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from config.constants import SecurityTier
-from security.security_manager import SecurityDecision, SecurityManager
+from security.security_manager import SecurityManager
 
 
 @pytest.fixture()
@@ -165,6 +165,70 @@ def test_schedule_rules_do_not_affect_unrelated_existing_classifications(
     """Regression: every pre-existing classification this phase does not
     touch remains exactly as it was."""
     assert manager.classify_action("search the web for jarvis").is_allowed_automatically
+    assert manager.classify_action("delete file notes.txt").requires_confirmation
+    assert manager.classify_action("format drive").is_blocked
+
+
+# --- Phase 33: webpage read classification ------------------------------------
+
+
+def test_read_webpage_requires_confirmation(manager: SecurityManager) -> None:
+    """Unlike "read file" (GREEN, local only), reading a webpage reaches
+    an arbitrary external network target and displays that content, so
+    it is YELLOW with its own specific, honest reason - never the
+    generic GREEN "read" rule, and never the default-fallback message."""
+    decision = manager.classify_action("read webpage")
+    assert decision.requires_confirmation
+    assert not decision.is_allowed_automatically
+    assert not decision.is_blocked
+    reason = decision.reason.lower()
+    assert "external" in reason or "web" in reason or "network" in reason
+    assert decision.matched_keyword == "read webpage"
+
+
+def test_read_webpage_is_not_classified_by_the_generic_read_rule(
+    manager: SecurityManager,
+) -> None:
+    """Without the explicit "read webpage" rule, this action would fall
+    through to the generic GREEN "read" rule (it contains "read" as a
+    substring) and be misclassified as automatically-safe - this proves
+    that does not happen."""
+    decision = manager.classify_action("read webpage")
+    assert decision.matched_keyword != "read"
+
+
+def test_read_webpage_classification_is_input_independent(
+    manager: SecurityManager,
+) -> None:
+    """The fixed action string is always classified the same way,
+    regardless of what URL a caller might have appended before
+    classification (WebpageReadTool.action_for() never does this, but
+    the rule itself must not depend on it either)."""
+    decision = manager.classify_action(
+        "read webpage http://169.254.169.254/latest/meta-data/"
+    )
+    assert decision.requires_confirmation
+    assert decision.matched_keyword == "read webpage"
+
+
+def test_read_file_remains_green_after_adding_read_webpage_rule(
+    manager: SecurityManager,
+) -> None:
+    """Regression: the pre-existing "read file" GREEN rule (and the
+    generic GREEN "read" rule) are unaffected by the new "read webpage"
+    rule - they are checked in a different tier, and "read webpage"
+    itself never matches "read file"."""
+    assert manager.classify_action("read file").is_allowed_automatically
+    assert manager.classify_action("read the file notes.txt").is_allowed_automatically
+
+
+def test_webpage_read_rule_does_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does not
+    touch remains exactly as it was."""
+    assert manager.classify_action("search the web for jarvis").is_allowed_automatically
+    assert manager.classify_action("download").requires_confirmation
     assert manager.classify_action("delete file notes.txt").requires_confirmation
     assert manager.classify_action("format drive").is_blocked
 
