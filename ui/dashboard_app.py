@@ -3,13 +3,15 @@ dashboard_app.py
 
 tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
 (Phase 19; extended Phase 20, Batch 2 with the Inbox tab; extended Phase
-21, Batch 3 with the Schedules tab).
+21, Batch 3 with the Schedules tab; extended Phase 39, Batch 2 with the
+Quarantine tab).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
       WorkflowRow, WorkflowTransitionRow, InboxRow, ScheduleRow,
-      DashboardOverview) into a six-tab ttk.Notebook window: Overview,
-      Memories, Approval History, Workflow History, Inbox, Schedules.
+      QuarantineRow, DashboardOverview) into a seven-tab ttk.Notebook
+      window: Overview, Memories, Approval History, Workflow History,
+      Inbox, Schedules, Quarantine.
     - Refresh displayed state manually (a button) and periodically (a
       fixed-interval Tk `.after()` tick calling the same refresh code) -
       never claimed as "live" or "real-time".
@@ -18,18 +20,28 @@ Responsibilities:
 
 Does NOT:
     - Import or call CommandRouter, ToolExecutor, the live ApprovalManager,
-      WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
+      WorkflowEngine, AIReasoningEngine, AIRouter, WebSearchTool,
+      FileRestoreTool, FileDeleteTool, QuarantineListTool, or
+      QuarantineStore directly - the Quarantine tab displays only what
+      DashboardReadModel.get_quarantine_entries() already returns.
     - Wire any widget to approve, deny, edit, delete, save, run, retry,
       resume, cancel, open-URL, browse-web, or ask-AI behaviour. No
       command input box exists. No double-click is executable. In
       particular, the Schedules tab has no create/edit/delete/enable/
-      disable/run-now/retry control of any kind.
+      disable/run-now/retry control of any kind, and the Quarantine tab
+      has no restore/delete/empty-trash/cleanup control of any kind.
     - Open a socket, HTTP listener, or any network connection of any
       kind.
     - Treat a durable "pending" approval-history row as a live,
       currently-actionable approval, a workflow history row as
-      resumable/executable state, or a schedule row as a live "next run"
-      countdown - see the wording used on each tab.
+      resumable/executable state, a schedule row as a live "next run"
+      countdown, or a quarantine row as proof the file still physically
+      exists in .jarvis_trash/ (it may have already been restored) -
+      see the wording used on each tab.
+    - Inspect .jarvis_trash/'s actual filesystem contents. The
+      Quarantine tab reads only DashboardReadModel's own durable
+      database records - it never duplicates QuarantineListTool's own
+      filesystem-listing logic.
 
 The pure formatting/mapping functions in this module (format_timestamp,
 *_to_tree_values, empty/error-state text) do not touch Tk at all, so they
@@ -49,6 +61,7 @@ from dashboard.read_model import (
     DashboardReadModel,
     InboxRow,
     MemoryRow,
+    QuarantineRow,
     ScheduleRow,
     WorkflowRow,
     WorkflowTransitionRow,
@@ -69,6 +82,7 @@ _WORKFLOW_EMPTY_STATE = "No workflow activity recorded yet."
 _TRANSITIONS_EMPTY_STATE = "Select a workflow above to see its recorded history."
 _INBOX_EMPTY_STATE = "No inbox entries yet."
 _SCHEDULES_EMPTY_STATE = "No schedules configured yet."
+_QUARANTINE_EMPTY_STATE = "No files currently in quarantine."
 
 #: Careful, durable-history-only wording (authorizing instructions, items
 #: 15-16): never implies a durable "pending" row is a live, currently
@@ -105,6 +119,18 @@ SCHEDULES_CAPTION = (
     "CLI commands to manage schedules. This list does not show whether a "
     "schedule is currently due - only scheduler.py's own poll cycle "
     "decides that."
+)
+
+#: Read-only wording for the Quarantine tab (Phase 39): durable metadata
+#: display only - no restore/delete/empty-trash/cleanup control exists
+#: here, and a row is never proof the file still physically exists in
+#: .jarvis_trash/ (it may have already been restored via the CLI).
+QUARANTINE_CAPTION = (
+    "Files recorded in Jarvis's quarantine directory (.jarvis_trash/) - "
+    "read-only. Nothing here can be restored, deleted, or cleaned up; "
+    "use the CLI 'restore file'/'delete file' commands, both of which "
+    "still require approval. A row here does not guarantee the file is "
+    "still physically in quarantine - it may have already been restored."
 )
 
 
@@ -219,6 +245,20 @@ def schedule_row_to_tree_values(
     )
 
 
+def quarantine_row_to_tree_values(
+    row: QuarantineRow,
+) -> tuple[str, str, str, str, str]:
+    """Map a QuarantineRow to the exact tuple shown in the Quarantine Treeview."""
+    session_id = str(row.session_id) if row.session_id is not None else "—"
+    return (
+        row.quarantine_name,
+        row.original_path,
+        row.quarantine_path,
+        format_timestamp(row.quarantined_at),
+        session_id,
+    )
+
+
 def overview_summary_lines(overview: DashboardOverview) -> list[str]:
     """Build the small set of real-data-only summary lines for the Overview tab.
 
@@ -297,6 +337,7 @@ class DashboardApp:
         self._build_workflow_history_tab()
         self._build_inbox_tab()
         self._build_schedules_tab()
+        self._build_quarantine_tab()
 
         refresh_bar = ttk.Frame(root, padding=(6, 4))
         refresh_bar.pack(fill="x")
@@ -493,10 +534,40 @@ class DashboardApp:
         tree.pack(fill="both", expand=True, pady=(4, 4))
         self._schedules_tree = tree
 
+    def _build_quarantine_tab(self) -> None:
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
+        self._notebook.add(frame, text="Quarantine")
+
+        ttk.Label(frame, text=QUARANTINE_CAPTION, wraplength=480).pack(anchor="w")
+        self._quarantine_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._quarantine_error_var, foreground="red"
+        ).pack(anchor="w")
+
+        columns = (
+            "name",
+            "original_path",
+            "quarantine_path",
+            "quarantined_at",
+            "session_id",
+        )
+        headings = (
+            "Name",
+            "Original Path",
+            "Quarantine Path",
+            "Quarantined At",
+            "Session",
+        )
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        for column, heading in zip(columns, headings):
+            tree.heading(column, text=heading)
+        tree.pack(fill="both", expand=True, pady=(4, 4))
+        self._quarantine_tree = tree
+
     # --- refresh ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
-        """Requery all five panels and update their displayed state.
+        """Requery all panels and update their displayed state.
 
         Each panel's query is isolated: a failure in one (a transient
         SQLite lock, a malformed row) renders that panel's own error
@@ -510,6 +581,7 @@ class DashboardApp:
         self._refresh_workflow_history()
         self._refresh_inbox()
         self._refresh_schedules()
+        self._refresh_quarantine()
         self._last_refreshed_var.set(
             f"Last refreshed: {format_timestamp(datetime.now(timezone.utc))}"
         )
@@ -636,6 +708,21 @@ class DashboardApp:
             return
         for row in rows:
             tree.insert("", "end", iid=str(row.id), values=schedule_row_to_tree_values(row))
+
+    def _refresh_quarantine(self) -> None:
+        try:
+            rows = self._read_model.get_quarantine_entries()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._quarantine_error_var.set(format_error_state("quarantine", exc))
+            return
+        self._quarantine_error_var.set("")
+        tree = self._quarantine_tree
+        tree.delete(*tree.get_children())
+        if not rows:
+            tree.insert("", "end", values=(_QUARANTINE_EMPTY_STATE,) + ("",) * 4)
+            return
+        for row in rows:
+            tree.insert("", "end", values=quarantine_row_to_tree_values(row))
 
     def _schedule_next_refresh(self) -> None:
         """Schedule the next periodic requery via Tk's own `.after()`.

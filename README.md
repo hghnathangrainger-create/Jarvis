@@ -977,7 +977,21 @@ A file with no metadata record (quarantined before Phase 37, or otherwise unreco
 
 ### What is deliberately NOT included in Phase 38
 
-No empty-trash command. No permanent delete. No automatic cleanup or retention policy. No bulk/"restore all" command — exactly one file per request. No overwrite behavior, ever. No destination-choice — the restored path is always exactly the recorded `original_path`, never something Nathan types. No dashboard, scheduler, Inbox, workflow, or AI integration. No command aliases beyond the one exact grammar (`undo delete`, `restore quarantine`, `restore trash`, `recover file`, `untrash file`, `move back file`, etc. were all deliberately not added). `FileDeleteTool`, `QuarantineStore`, and `QuarantineListTool` were not changed in this phase beyond sharing the existing `QuarantineStore` instance with the new tool.
+No empty-trash command. No permanent delete. No automatic cleanup or retention policy. No bulk/"restore all" command — exactly one file per request. No overwrite behavior, ever. No destination-choice — the restored path is always exactly the recorded `original_path`, never something Nathan types. No dashboard, scheduler, Inbox, workflow, or AI integration. No command aliases beyond the one exact grammar (`undo delete`, `restore quarantine`, `restore trash`, `recover file`, `untrash file`, `move back file`, etc. were all deliberately not added). `FileDeleteTool`, `QuarantineStore`, and `QuarantineListTool` were not changed in this phase beyond sharing the existing `QuarantineStore` instance with the new tool. **Read-only dashboard visibility for quarantine contents has since been added** — see Phase 39 below.
+
+---
+
+## Phase 39 — Dashboard Quarantine Visibility (complete)
+
+Gives the dashboard a seventh tab showing what's recorded in quarantine — the one subsystem in the file/quarantine family that previously had no dashboard presence, now that delete/list/restore all exist. See `docs/phase_39_completion_report.md` for the full write-up.
+
+### Dashboard Quarantine tab
+
+Read-only, exactly like every other dashboard tab: shows each quarantined file's name, original path, quarantine path, quarantined-at time, and session id (when known), sourced from `DashboardReadModel.get_quarantine_entries()`, which itself reads only `QuarantineStore.list_recent()` — the same durable metadata records `list quarantine`/`show quarantine` and `restore file` already use. A missing/empty state is shown honestly ("No files currently in quarantine.") rather than an error. A row here does not guarantee the file still physically exists in `.jarvis_trash/` — it may have already been restored via the CLI, since a restore never deletes or updates the underlying `QuarantineRecord`.
+
+### What is deliberately NOT included in Phase 39
+
+No restore button, delete button, empty-trash button, or cleanup button anywhere — the Quarantine tab, like every other dashboard tab, has no write, execute, approve, decline, run, retry, resume, or cancel control of any kind. No filesystem inspection from the dashboard — it never reads `.jarvis_trash/` directly and never duplicates `QuarantineListTool`'s own filesystem-listing logic; it only reads durable database records. No empty-trash command, permanent delete, or cleanup/retention policy. No AI, workflow, scheduler, or Inbox integration. `FileDeleteTool`, `FileRestoreTool`, `QuarantineListTool`, and `QuarantineStore`'s own write behavior were not changed in this phase — `QuarantineStore` gained one new read-only method (`list_recent()`) and nothing else.
 
 ---
 

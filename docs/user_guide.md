@@ -238,7 +238,7 @@ This notice shows **only a count and a timestamp** — never the search query, t
 
 ## 8. Dashboard Guide
 
-Six tabs, all read-only:
+Seven tabs, all read-only:
 
 | Tab | Shows |
 |---|---|
@@ -248,8 +248,9 @@ Six tabs, all read-only:
 | **Workflow History** | Recently active workflows and their full recorded transition history on selection — durable history, not resumable state. |
 | **Inbox** | Saved summaries (interactive and scheduled), newest first, full text on selection. |
 | **Schedules** | Every configured schedule: id, name, query, time, enabled state, last run, created date. |
+| **Quarantine** | Recorded quarantined files: name, original path (when known), quarantine path, quarantined-at time, and session id. Durable metadata only — read-only, and a row does not guarantee the file is still physically in `.jarvis_trash/` (it may have already been restored). |
 
-The dashboard **cannot**: run any command, approve or decline anything, create/edit/enable/disable a schedule, delete or change a memory, or write anything to the database at all. It refreshes on a timer (every 5 seconds) plus a manual "Refresh now" button — this is polling, not live/real-time updating, and the title bar itself says "(read-only)".
+The dashboard **cannot**: run any command, approve or decline anything, create/edit/enable/disable a schedule, delete or change a memory, restore or delete a quarantined file, empty the trash, clean up old quarantined files, or write anything to the database at all — all restore/delete actions remain CLI-only, and both still require YELLOW approval there. It refreshes on a timer (every 5 seconds) plus a manual "Refresh now" button — this is polling, not live/real-time updating, and the title bar itself says "(read-only)".
 
 ---
 
@@ -425,7 +426,7 @@ These are real candidates that have been evaluated in past architectural reviews
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
-- A file delete tool exists (Phase 35, §6) as a quarantine-only move into `.jarvis_trash/`, you can list what's in quarantine including original path when known (Phase 36/37, §6), and a `restore file <path>` command (Phase 38, §6) can move a file with known metadata back to its original location. Not yet built, each a distinct future decision: an `empty trash` command, an automatic cleanup/retention policy, a bulk/"restore all" command, and any dashboard visibility into quarantine contents.
+- A file delete tool exists (Phase 35, §6) as a quarantine-only move into `.jarvis_trash/`, you can list what's in quarantine including original path when known (Phase 36/37, §6), a `restore file <path>` command (Phase 38, §6) can move a file with known metadata back to its original location, and the dashboard's Quarantine tab (Phase 39, §8) shows recorded quarantine metadata read-only. Not yet built, each a distinct future decision: an `empty trash` command, an automatic cleanup/retention policy, and a bulk/"restore all" command.
 - More workflow templates beyond the current five — paused, not closed: the next one should come from a specific need, not just because the machinery exists.
 - Automated "save AI summary to file/Inbox" behavior — paused pending a separate design review of how to let you review the exact content before it's written (see §9).
 
