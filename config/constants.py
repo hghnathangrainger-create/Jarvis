@@ -101,8 +101,13 @@ class ContentTrust(Enum):
 class IntentType(Enum):
     """Classification of an incoming user request.
 
-    The Intent Classifier assigns one of these types to every request. The
-    type determines which subsystems the Jarvis Core activates to handle it.
+    Defined but not currently consumed by any production code (Phase 50):
+    no "Intent Classifier" component exists in this codebase today, and
+    nothing imports IntentType anywhere. This enum may represent
+    architectural vocabulary from an earlier design sketch, kept here as
+    a candidate for a future phase, not a description of current
+    behaviour. Request routing today is instead handled directly by
+    core.command_router.CommandRouter's own keyword/prefix matching.
 
     Attributes:
         CONVERSATIONAL: A question or statement requiring a direct response.
@@ -129,8 +134,13 @@ class IntentType(Enum):
 class ActionType(Enum):
     """The kind of action a single plan step performs.
 
-    Assigned by the Planner to each step and read by the Workflow Engine to
-    decide how the step is executed.
+    Defined but not currently consumed by any production code (Phase 50):
+    neither planner.planner.Planner nor workflow.engine.WorkflowEngine
+    imports or assigns ActionType today. This enum may represent
+    architectural vocabulary from an earlier design sketch, kept here as
+    a candidate for a future phase, not a description of current
+    behaviour. The current Planner classifies each step's security tier
+    directly, without an intermediate ActionType.
 
     Attributes:
         AI_CALL: The step requests an AI response via the Jarvis Core.
@@ -175,8 +185,15 @@ class StepStatus(Enum):
 class OnFailure(Enum):
     """The action taken when a plan step fails after exhausting its retries.
 
-    Assigned by the Planner to each step and read by the Workflow Engine when
-    a step's retry attempts are exhausted.
+    Defined but not currently consumed by any production code (Phase 50):
+    neither planner.planner.Planner nor workflow.engine.WorkflowEngine
+    imports or assigns OnFailure today, and this project has repeatedly
+    and explicitly kept retry/on-failure policy out of scope beyond a
+    plain STOP-on-failure behaviour (see, for example,
+    docs/phase_15_completion_report.md's own non-goals). This enum may
+    represent architectural vocabulary from an earlier design sketch,
+    kept here as a candidate for a future phase, not a description of
+    current behaviour.
 
     Attributes:
         RETRY_WITH_ALTERNATIVE_PROVIDER: Retry the step using a different AI
@@ -255,8 +272,16 @@ class EventOutcome(Enum):
 class MemoryType(Enum):
     """The category of a stored memory entry.
 
-    Used by the Memory Manager to route storage and retrieval to the correct
-    backend and to scope queries.
+    Defined but not currently consumed by any production code (Phase 50):
+    memory.memory_manager.MemoryManager and memory.episodic_memory do not
+    import or assign MemoryType today. This enum may represent
+    architectural vocabulary from an earlier design sketch - a
+    multi-backend, semantic/vector-capable memory architecture - kept
+    here as a candidate for a future phase, not a description of current
+    behaviour. The actual memory system uses simple string categories
+    instead: memory.memory_models.KNOWN_CATEGORIES ("general", "personal",
+    "project", "preference", "note"), validated by
+    memory.memory_models.normalize_category().
 
     Attributes:
         WORKING: Short-lived context for the current session only.
