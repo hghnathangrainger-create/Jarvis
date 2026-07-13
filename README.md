@@ -1199,7 +1199,7 @@ As with every prior phase boundary, the next *numbered* architectural direction 
 - A Research Agent or autonomous browsing foundation — a standing non-goal unless explicitly selected through its own dedicated review.
 - A Project/Repo Health Check Tool — evaluated and found speculative; no expressed need exists yet.
 
-None of the above is authorized by any closed phase to date; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
+None of the above is authorized by any closed phase to date; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control. See `docs/deferred_decisions.md` for the current, consolidated list of these and other deferred decisions, kept up to date independently of this section.
 
 ---
 
