@@ -37,11 +37,13 @@ Does NOT:
     - Mutate a file, a memory, a schedule, an Inbox entry, a quarantine
       record, a workflow, or anything shown on the dashboard - it has
       no dependency on any of those modules at all.
-    - Change Jarvis's default runtime behaviour. Nothing in main.py or
-      ui/cli.py constructs or calls this service yet - it exists only
-      to be tested directly, exactly mirroring how voice/output.py's
-      VoiceOutputService began in Batch 1 before being wired into the
-      CLI in Batch 2.
+    - Change Jarvis's default runtime behaviour. main.py and ui/cli.py
+      do construct and call this service (Phase 41, Batch 4), but only
+      through an opt-in, disabled-by-default path with the fake
+      provider - never enabled, never reachable from the interactive
+      typed-input loop, and never a default behaviour change, exactly
+      mirroring how voice/output.py's VoiceOutputService was wired into
+      the CLI in Batch 2.
 
 Trust/origin design (read before ever wiring this service into
 anything that can execute a command):

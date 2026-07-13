@@ -2,7 +2,9 @@
 test_voice_input.py
 
 Unit tests for VoiceInputService (voice/input.py), Phase 41, Batch 3;
-extended Batch 4 to reflect main.py/ui/cli.py now wiring it in.
+extended Batch 4 to reflect main.py/ui/cli.py now wiring it in; extended
+Batch 5 with a dependency-boundary canary (see
+test_pyproject_declares_no_real_audio_or_hotkey_dependency below).
 
 These use only the fake provider (voice.stt.FakeSpeechToTextProvider) -
 no real audio, no microphone, no network. Structural (AST-based) tests
@@ -225,6 +227,33 @@ def test_main_imports_voice_input_but_no_real_audio_dependency() -> None:
     forbidden = {"pyaudio", "sounddevice", "whisper", "speech_recognition", "pyttsx3", "win32com"}
     top_level_modules = {name.split(".")[0] for name in imported_names}
     assert not (top_level_modules & forbidden), imported_names
+
+
+def test_pyproject_declares_no_real_audio_or_hotkey_dependency() -> None:
+    """Phase 41, Batch 5 (push-to-talk trigger design review): a
+    dependency-boundary canary, independent of the import-based checks
+    above. Those tests confirm no forbidden module is *imported* today;
+    this one confirms none is even *declared* as a project dependency,
+    so a future accidental `pyproject.toml` edit adding one (e.g. while
+    exploring Batch 6's real push-to-talk options) fails this test
+    immediately, before any capture code is ever written."""
+    source = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    forbidden = (
+        "pyaudio",
+        "sounddevice",
+        "whisper",
+        "speechrecognition",
+        "speech_recognition",
+        "pyttsx3",
+        "pynput",
+        "keyboard",
+        "win32com",
+        "pywin32",
+    )
+    lowered = source.lower()
+    for name in forbidden:
+        assert name not in lowered, f"{name!r} unexpectedly declared in pyproject.toml"
 
 
 def test_ui_cli_imports_voice_input_but_no_real_audio_dependency() -> None:
