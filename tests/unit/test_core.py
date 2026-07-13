@@ -166,6 +166,56 @@ def test_safe_but_unsupported_request_is_explained(
     assert response.plan is not None
 
 
+def test_safe_but_unsupported_request_points_toward_help(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Phase 45: the unmatched-GREEN fallback message must point the user
+    toward the Phase 43 help command, so an unsupported request doesn't
+    leave them guessing at another unsupported phrasing."""
+    response = orchestrator.handle_request("calculate the meaning of life")
+    assert "help" in response.message
+    assert "list commands" in response.message
+    assert "show commands" in response.message
+    # The original meaning is preserved, not replaced.
+    assert "does not yet have a tool to carry it out" in response.message
+    assert "More capability will be added in a later phase" in response.message
+
+
+def test_help_mention_does_not_leak_into_tool_backed_green_responses(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Phase 45 regression: only the unmatched-GREEN fallback message
+    changed - a request that a real tool actually handles must be
+    completely unaffected."""
+    response = orchestrator.handle_request("echo hello world")
+    assert response.success is True
+    assert "help" not in response.message
+    assert response.message == "echo hello world"
+
+
+def test_help_mention_does_not_leak_into_yellow_confirmation_response(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Phase 45 regression: YELLOW confirmation-required behavior and
+    message are completely unaffected by the unmatched-GREEN wording
+    change."""
+    response = orchestrator.handle_request("send email to Alex")
+    assert response.requires_confirmation is True
+    assert response.blocked is False
+    assert "help" not in response.message
+
+
+def test_help_mention_does_not_leak_into_red_blocked_response(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Phase 45 regression: RED blocked behavior and message are
+    completely unaffected by the unmatched-GREEN wording change."""
+    response = orchestrator.handle_request("format drive C")
+    assert response.blocked is True
+    assert response.requires_confirmation is False
+    assert "help" not in response.message
+
+
 # --- Empty input -------------------------------------------------------------
 
 

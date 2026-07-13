@@ -3935,7 +3935,9 @@ class JarvisOrchestrator:
 
         The request was classified safe, but Jarvis has no Phase 1 capability
         to fulfil it. The plan is returned so the user can see what Jarvis
-        understood.
+        understood. The message points toward the "help" command (Phase 43)
+        so the user can discover what Jarvis currently supports, rather than
+        guessing at another unsupported phrasing.
 
         Args:
             plan: The (safe) plan that has no matching tool.
@@ -3947,7 +3949,9 @@ class JarvisOrchestrator:
             success=False,
             message=(
                 "Jarvis can plan this request, but does not yet have a tool to "
-                "carry it out. More capability will be added in a later phase."
+                "carry it out. More capability will be added in a later phase. "
+                "Try 'help', 'list commands', or 'show commands' to see what "
+                "Jarvis currently supports."
             ),
             plan=plan,
         )
