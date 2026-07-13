@@ -2,7 +2,8 @@
 test_main_quarantine_list_wiring.py
 
 Composition tests for QuarantineListTool wiring in
-main.build_orchestrator() (Phase 36).
+main.build_orchestrator() (Phase 36; extended Phase 37, Batch 2 to
+confirm it shares the same QuarantineStore instance as FileDeleteTool).
 
 These tests confirm QuarantineListTool is registered and routed to
 correctly via both "list quarantine" and "show quarantine" - without
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import main
+from quarantine.quarantine_store import QuarantineStore
 from tools.builtin import QuarantineListTool
 
 
@@ -56,6 +58,24 @@ def test_command_router_routes_show_quarantine() -> None:
 def test_exactly_one_quarantine_list_tool_instance_is_registered() -> None:
     orchestrator = main.build_orchestrator()
     assert orchestrator._registry.list_tool_names().count("quarantine_list") == 1
+
+
+def test_quarantine_list_tool_is_backed_by_a_real_quarantine_store() -> None:
+    orchestrator = main.build_orchestrator()
+    tool = orchestrator._registry.get_tool("quarantine_list")
+    assert isinstance(tool._store, QuarantineStore)
+
+
+def test_quarantine_list_tool_and_file_delete_tool_share_one_quarantine_store() -> (
+    None
+):
+    """main.py must construct QuarantineStore exactly once and inject
+    the same instance into both tools - never a second, redundant
+    store/database connection."""
+    orchestrator = main.build_orchestrator()
+    list_tool = orchestrator._registry.get_tool("quarantine_list")
+    delete_tool = orchestrator._registry.get_tool("file_delete")
+    assert list_tool._store is delete_tool._store
 
 
 def test_build_orchestrator_return_type_and_signature_are_unchanged() -> None:

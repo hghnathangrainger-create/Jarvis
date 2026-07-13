@@ -2,14 +2,19 @@
 test_quarantine_list_tool.py
 
 Unit tests for the Jarvis QuarantineListTool
-(tools/builtin/quarantine_list_tool.py), Phase 36.
+(tools/builtin/quarantine_list_tool.py), Phase 36; extended Phase 37,
+Batch 2 with original-path metadata display tests.
 
 The tool is read-only: it lists whatever currently exists inside
-.jarvis_trash/ (name, size, modified time), never reads file content,
-never creates the quarantine directory, and never modifies, moves, or
-deletes anything. These tests use real temporary directories (via
-tmp_path and monkeypatch.chdir), so no database, AI, or network is
-needed.
+.jarvis_trash/ (name, size, modified time, and - when a QuarantineStore
+is supplied - the recorded original path), never reads file content,
+never creates the quarantine directory, never writes quarantine
+metadata, and never modifies, moves, or deletes anything. These tests
+use real temporary directories (via tmp_path and monkeypatch.chdir), so
+no database, AI, or network is needed for the Phase 36 behavior; the
+Phase 37 metadata-display tests use a minimal fake store (matching
+test_file_delete_tool.py's own _FakeQuarantineStore pattern), plus one
+end-to-end test using a real QuarantineStore.
 
 Run with:
     pytest tests/unit/test_quarantine_list_tool.py
@@ -21,6 +26,7 @@ import ast
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -225,6 +231,231 @@ def test_quarantine_containing_only_an_unexpected_subdirectory(
     assert result.success is True
     assert "unexpected_folder" in result.output
     assert result.metadata["file_count"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# Original-path metadata display (Phase 37, Batch 2)
+# ---------------------------------------------------------------------------
+
+
+class _FakeQuarantineStore:
+    """A minimal stand-in for QuarantineStore: returns a pre-seeded
+    original_path for an exact quarantine_path match, or None otherwise.
+    Records every lookup it receives so tests can confirm read-only use
+    (get_by_quarantine_path only - never a write method)."""
+
+    def __init__(self, records: dict[str, str] | None = None) -> None:
+        self._records = dict(records or {})
+        self.lookups: list[str] = []
+
+    def get_by_quarantine_path(self, quarantine_path: str):
+        self.lookups.append(quarantine_path)
+        original_path = self._records.get(quarantine_path)
+        if original_path is None:
+            return None
+        return SimpleNamespace(original_path=original_path)
+
+
+def test_shows_original_path_when_metadata_exists(workspace: Path) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    quarantined = quarantine_dir / "notes__a1b2c3d4.txt"
+    quarantined.write_text("content", encoding="utf-8")
+
+    store = _FakeQuarantineStore(
+        {str(quarantined.resolve()): str(workspace / "notes.txt")}
+    )
+    result = _run(QuarantineListTool(store))
+
+    assert result.success is True
+    assert f"original path: {workspace / 'notes.txt'}" in result.output
+
+
+def test_shows_unknown_fallback_when_metadata_missing_but_store_present(
+    workspace: Path,
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "orphan__eeeeeeee.txt").write_text(
+        "content", encoding="utf-8"
+    )
+
+    store = _FakeQuarantineStore()
+    result = _run(QuarantineListTool(store))
+
+    assert result.success is True
+    assert "original path: unknown" in result.output.lower()
+
+
+def test_shows_unknown_fallback_when_no_store_supplied(workspace: Path) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "orphan__ffffffff.txt").write_text(
+        "content", encoding="utf-8"
+    )
+
+    result = _run(QuarantineListTool())
+
+    assert result.success is True
+    assert "original path: unknown" in result.output.lower()
+
+
+def test_does_not_infer_original_path_from_filename(workspace: Path) -> None:
+    """The filename only ever preserves the stem/suffix (Phase 35) -
+    never the original directory. With no metadata record, the tool
+    must show an honest "unknown", never a guess derived from the
+    filename itself."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "budget__12345678.txt").write_text(
+        "content", encoding="utf-8"
+    )
+
+    result = _run(QuarantineListTool(_FakeQuarantineStore()))
+
+    assert "original path: budget" not in result.output
+    assert "original path: unknown" in result.output.lower()
+
+
+def test_missing_metadata_does_not_crash(workspace: Path) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "solo__99999999.txt").write_text(
+        "content", encoding="utf-8"
+    )
+
+    result = _run(QuarantineListTool(_FakeQuarantineStore()))
+
+    assert result.success is True
+
+
+def test_pre_existing_metadata_less_quarantined_file_is_listed(
+    workspace: Path,
+) -> None:
+    """A file quarantined before Phase 37's metadata table existed
+    (Phase 35/36) has no database row at all - simulated here by a
+    store with no matching record. Listing must still succeed."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    old_file = quarantine_dir / "legacy__abcdef01.txt"
+    old_file.write_text("content", encoding="utf-8")
+
+    result = _run(QuarantineListTool(_FakeQuarantineStore()))
+
+    assert result.success is True
+    assert "legacy__abcdef01.txt" in result.output
+    assert "original path: unknown" in result.output.lower()
+
+
+def test_newly_quarantined_file_with_metadata_is_listed_with_original_path(
+    workspace: Path,
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    quarantined = quarantine_dir / "fresh__abcdabcd.txt"
+    quarantined.write_text("content", encoding="utf-8")
+
+    store = _FakeQuarantineStore(
+        {str(quarantined.resolve()): str(workspace / "fresh.txt")}
+    )
+    result = _run(QuarantineListTool(store))
+
+    assert f"original path: {workspace / 'fresh.txt'}" in result.output
+
+
+def test_known_and_unknown_entries_can_appear_together(workspace: Path) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    known = quarantine_dir / "known__11111111.txt"
+    known.write_text("content", encoding="utf-8")
+    unknown = quarantine_dir / "unknown__22222222.txt"
+    unknown.write_text("content", encoding="utf-8")
+
+    store = _FakeQuarantineStore({str(known.resolve()): str(workspace / "known.txt")})
+    result = _run(QuarantineListTool(store))
+
+    assert f"original path: {workspace / 'known.txt'}" in result.output
+    assert "unknown__22222222.txt" in result.output
+    lines = result.output.splitlines()
+    unknown_line = next(line for line in lines if "unknown__22222222.txt" in line)
+    assert "original path: unknown" in unknown_line.lower()
+
+
+def test_lookup_uses_resolved_absolute_quarantine_path(
+    workspace: Path,
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    quarantined = quarantine_dir / "check__33333333.txt"
+    quarantined.write_text("content", encoding="utf-8")
+
+    store = _FakeQuarantineStore()
+    _run(QuarantineListTool(store))
+
+    assert store.lookups == [str(quarantined.resolve())]
+
+
+def test_no_metadata_written_during_listing(workspace: Path) -> None:
+    """Confirms the store is only ever read, never written, during a
+    listing - QuarantineListTool must not (and, since _FakeQuarantineStore
+    exposes no write method at all, structurally cannot) call anything
+    resembling record_quarantine()."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "readonly__44444444.txt").write_text(
+        "content", encoding="utf-8"
+    )
+
+    store = _FakeQuarantineStore()
+    assert not hasattr(store, "record_quarantine")
+
+    result = _run(QuarantineListTool(store))
+
+    assert result.success is True
+    assert len(store.lookups) == 1
+
+
+def test_end_to_end_with_real_quarantine_store(workspace: Path) -> None:
+    """An end-to-end check using a real QuarantineStore (not a fake):
+    quarantining a file via FileDeleteTool records metadata, and
+    QuarantineListTool then displays that recorded original path -
+    without QuarantineListTool ever adding a row itself."""
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import create_engine, func
+    from sqlalchemy.orm import Session as OrmSession
+
+    from quarantine.quarantine_store import QuarantineStore
+    from storage.database import create_session_factory, initialize_database
+    from storage.models import QuarantineRecord
+    from tools.builtin.file_delete_tool import FileDeleteTool
+
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    store = QuarantineStore(create_session_factory(engine))
+
+    source = workspace / "important.txt"
+    source.write_text("content", encoding="utf-8")
+
+    delete_result = FileDeleteTool(store).run(
+        ToolRequest(tool_name="file_delete", input_data={"path": str(source)})
+    )
+    assert delete_result.success is True
+
+    with OrmSession(engine) as session:
+        row_count_before = session.query(func.count()).select_from(
+            QuarantineRecord
+        ).scalar()
+
+    list_result = _run(QuarantineListTool(store))
+
+    with OrmSession(engine) as session:
+        row_count_after = session.query(func.count()).select_from(
+            QuarantineRecord
+        ).scalar()
+
+    assert list_result.success is True
+    assert f"original path: {source.resolve()}" in list_result.output
+    assert row_count_after == row_count_before  # listing wrote nothing
 
 
 # ---------------------------------------------------------------------------

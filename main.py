@@ -149,10 +149,18 @@ def build_orchestrator() -> JarvisOrchestrator:
     # object above - it never calls load_settings() again, never reads
     # .env/os.environ directly, and never exposes the API key's value.
     registry.register_tool(ConfigTool(settings))
-    # QuarantineListTool (Phase 36) only lists .jarvis_trash/'s current
-    # contents - it never creates the directory, reads file content, or
-    # modifies/moves/deletes anything.
-    registry.register_tool(QuarantineListTool())
+    # QuarantineStore (Phase 37, Batch 1): records durable metadata
+    # (original_path/quarantine_path) for every successful quarantine,
+    # so a future restore command has trustworthy information to work
+    # with, and lets QuarantineListTool display it (Phase 37, Batch 2).
+    # Constructed once here and shared by both tools below - never a
+    # second, separate database connection.
+    quarantine_store = QuarantineStore(session_factory)
+    # QuarantineListTool (Phase 36; extended Phase 37, Batch 2) only
+    # lists .jarvis_trash/'s current contents plus a read-only original-
+    # path lookup - it never creates the directory, reads file content,
+    # writes quarantine metadata, or modifies/moves/deletes anything.
+    registry.register_tool(QuarantineListTool(quarantine_store))
     registry.register_tool(MemoryTool(memory))
     registry.register_tool(MemoryUpdateTool(memory))
     registry.register_tool(MemoryForgetTool(memory))
@@ -163,13 +171,6 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileAppendTool())
     registry.register_tool(FileCopyTool())
     registry.register_tool(FileMoveTool())
-    # QuarantineStore (Phase 37, Batch 1): records durable metadata
-    # (original_path/quarantine_path) for every successful quarantine,
-    # so a future restore command has trustworthy information to work
-    # with. Uses the same session_factory every other durable store in
-    # this composition root already uses - never a second, separate
-    # database connection.
-    quarantine_store = QuarantineStore(session_factory)
     registry.register_tool(FileDeleteTool(quarantine_store))
     registry.register_tool(ApprovalHistoryTool(approval_history))
 
