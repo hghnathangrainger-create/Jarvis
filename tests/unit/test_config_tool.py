@@ -43,6 +43,24 @@ def _settings(*, api_key: str = _REAL_API_KEY) -> Settings:
     )
 
 
+def _settings_with_voice(
+    *, voice_enabled: bool = False, voice_speak_mode: str = "off", voice_provider: str = "none"
+) -> Settings:
+    return Settings(
+        anthropic_api_key=_REAL_API_KEY,
+        ai_model="claude-sonnet-4-6",
+        ai_max_tokens=4096,
+        database_path=Path("data/jarvis.db"),
+        log_level="INFO",
+        approval_timeout_seconds=60,
+        debug=False,
+        ai_reasoning_enabled=False,
+        voice_enabled=voice_enabled,
+        voice_speak_mode=voice_speak_mode,
+        voice_provider=voice_provider,
+    )
+
+
 def _run(tool: ConfigTool):
     return tool.run(ToolRequest(tool_name="config", input_data={}))
 
@@ -62,6 +80,9 @@ def test_reports_every_non_secret_field() -> None:
     assert "INFO" in result.output
     assert "60" in result.output
     assert "False" in result.output  # debug
+    assert "Voice enabled: False" in result.output
+    assert "Voice speak mode: off" in result.output
+    assert "Voice provider: none" in result.output
 
 
 def test_reports_debug_true_when_set() -> None:
@@ -78,6 +99,50 @@ def test_reports_debug_true_when_set() -> None:
     result = _run(ConfigTool(settings))
     assert "Debug mode: True" in result.output
     assert "AI reasoning enabled: False" in result.output
+
+
+# --- voice fields (Phase 41, Batch 2): safe, non-secret, shown in full --------
+
+
+def test_reports_voice_enabled_true_when_set() -> None:
+    result = _run(ConfigTool(_settings_with_voice(voice_enabled=True)))
+    assert "Voice enabled: True" in result.output
+
+
+def test_reports_voice_speak_mode_all_when_set() -> None:
+    result = _run(ConfigTool(_settings_with_voice(voice_speak_mode="all")))
+    assert "Voice speak mode: all" in result.output
+
+
+def test_reports_voice_provider_fake_when_set() -> None:
+    result = _run(ConfigTool(_settings_with_voice(voice_provider="fake")))
+    assert "Voice provider: fake" in result.output
+
+
+def test_voice_fields_default_to_safe_disabled_values() -> None:
+    result = _run(ConfigTool(_settings_with_voice()))
+    assert "Voice enabled: False" in result.output
+    assert "Voice speak mode: off" in result.output
+    assert "Voice provider: none" in result.output
+
+
+def test_no_voice_field_is_or_resembles_a_secret() -> None:
+    """None of the three voice fields is a credential/API key, so
+    (unlike anthropic_api_key) they are always shown in full - this
+    confirms no secret-shaped value ever needs redacting here."""
+    result = _run(
+        ConfigTool(
+            _settings_with_voice(
+                voice_enabled=True, voice_speak_mode="all", voice_provider="fake"
+            )
+        )
+    )
+    lowered = result.output.lower()
+    # "api key: " (with trailing colon+space) appears exactly once, for
+    # the real Anthropic key line - never duplicated for a voice field.
+    assert lowered.count("api key: ") == 1
+    for forbidden in ("secret", "credential"):
+        assert forbidden not in lowered
 
 
 # --- API key handling: set/not-set only, never the value ---------------------

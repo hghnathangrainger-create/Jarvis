@@ -13,12 +13,26 @@ Responsibilities:
     - Recognise exit commands and end the session cleanly.
     - Print one optional, pre-built, content-free startup notice line
       (Phase 22) immediately after the banner, if one was supplied.
+    - Optionally speak a response's message through an injected
+      VoiceOutputService (Phase 41, Batch 2), best-effort, if both a
+      service was supplied and speak_responses is True. Off by default.
 
 Does NOT:
-    - Call the Claude API, add voice, or add phone support.
+    - Call the Claude API, add phone support, add a microphone, or add
+      speech-to-text of any kind.
     - Execute approved actions itself (that is handled in a later step) or
       bypass the Core or ToolExecutor.
     - Implement orchestration, planning, or security logic.
+    - Let a voice-output failure change the printed text response or
+      crash the loop - speak() is always best-effort and its result is
+      never surfaced as an error to keep this first integration minimal
+      (see voice/output.py; a provider failure already returns a safe,
+      non-raising SpeechResult).
+    - Treat spoken text as anything other than the exact response
+      message already decided and printed - it is never re-interpreted,
+      routed to CommandRouter, or passed to ToolExecutor/ApprovalManager/
+      any AI component. Speaking happens strictly after the response is
+      already fully decided.
 
 The CLI is a thin presentation layer. All decisions about risk are made by the
 Core and Security Manager; the CLI only reads input, forwards it, prints what
@@ -36,6 +50,7 @@ from config.constants import APP_NAME, STARTUP_BANNER
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from ui.approval_prompt import prompt_for_approval
+from voice.output import VoiceOutputService
 
 #: Commands that end the session, matched case-insensitively.
 _EXIT_COMMANDS: frozenset[str] = frozenset({"exit", "quit", "bye"})
@@ -199,6 +214,17 @@ class JarvisCLI:
         _orchestrator: The Core orchestrator that handles each request.
         _input: Callable used to read a line of input given a prompt.
         _output: Callable used to write a line of output.
+        _voice_output: Optional VoiceOutputService to speak a response's
+            message through (Phase 41, Batch 2). None by default - no
+            voice output occurs unless one is explicitly supplied.
+        _speak_responses: Whether to actually attempt speaking each
+            response through _voice_output. False by default (opt-in,
+            matching Nathan's own "not every response by default"
+            decision) - even when a service is supplied, nothing is
+            spoken unless this is also True. VoiceOutputService's own
+            `enabled` flag is a second, independent gate on top of this
+            one; both must allow it for a provider to actually be
+            called.
     """
 
     def __init__(
@@ -208,6 +234,8 @@ class JarvisCLI:
         input_fn: Callable[[str], str] = input,
         output_fn: Callable[[str], None] = print,
         startup_notice: str | None = None,
+        voice_output: VoiceOutputService | None = None,
+        speak_responses: bool = False,
     ) -> None:
         """Initialise the CLI.
 
@@ -220,11 +248,21 @@ class JarvisCLI:
                 banner - for example, a count of new scheduled Inbox
                 entries. None (the default) prints nothing extra,
                 exactly matching every prior phase's own startup output.
+            voice_output: Optional VoiceOutputService to speak a
+                response's message through. Defaults to None, in which
+                case nothing is ever spoken, matching every prior
+                phase's own text-only behaviour exactly.
+            speak_responses: Whether to actually attempt speaking each
+                response. Defaults to False (opt-in) - even with a
+                voice_output supplied, nothing is spoken unless this is
+                also explicitly True.
         """
         self._orchestrator = orchestrator
         self._input = input_fn
         self._output = output_fn
         self._startup_notice = startup_notice
+        self._voice_output = voice_output
+        self._speak_responses = speak_responses
 
     def run(self) -> None:
         """Run the interactive loop until an exit command or end of input.
@@ -253,9 +291,35 @@ class JarvisCLI:
 
             response = self._orchestrator.handle_request(text)
             self._output(format_response(response))
+            self._speak_if_enabled(response.message)
 
             if response.approval_request is not None:
                 self._handle_approval(response)
+
+    def _speak_if_enabled(self, text: str) -> None:
+        """Best-effort speak the given text, if voice output is opted in.
+
+        This is the only place voice output is ever attempted, and it
+        always runs strictly after the text response has already been
+        decided and printed - text is treated purely as data to
+        vocalise, never re-interpreted, routed to CommandRouter, or
+        passed to ToolExecutor/ApprovalManager/any AI component.
+
+        Two independent gates must both allow it: this CLI's own
+        speak_responses flag (opt-in, off by default) and
+        VoiceOutputService's own `enabled` flag plus a supplied
+        provider (also off/absent by default) - either one being off is
+        enough to keep this a safe no-op. A voice failure of any kind
+        never raises, never changes the already-printed text response,
+        and is not itself surfaced - speaking is strictly best-effort.
+
+        Args:
+            text: The response message to speak, exactly as already
+                shown in the printed text response.
+        """
+        if not self._speak_responses or self._voice_output is None:
+            return
+        self._voice_output.speak(text)
 
     def _handle_approval(self, response: JarvisResponse) -> None:
         """Present the approval prompt for a YELLOW action and act on the answer.

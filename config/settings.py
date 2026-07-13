@@ -61,6 +61,27 @@ class Settings:
         approval_timeout_seconds: Seconds to wait for a YELLOW-tier approval
             before the action is aborted.
         debug: Whether the application is running in debug mode.
+        voice_enabled: Whether the voice output subsystem is switched on
+            at all (Phase 41, Batch 2). When False (the default), no
+            TTS provider is ever constructed and the CLI never attempts
+            to speak a response - Jarvis behaves exactly as it always
+            has. There is no real TTS provider yet regardless of this
+            flag; see voice_provider.
+        voice_speak_mode: Whether the CLI should actually attempt to
+            speak a response once voice is enabled. One of "off" (never
+            attempt to speak, even if voice_enabled is True - the
+            default, matching Nathan's own "opt-in, not every response
+            by default" decision) or "all" (attempt to speak every
+            response). A separate flag from voice_enabled so that
+            turning voice "on" and choosing to actually hear every
+            response are two independent, both-required decisions.
+        voice_provider: Which TextToSpeechProvider to construct, if any.
+            One of "none" (no provider is constructed; voice is
+            inactive regardless of voice_enabled/voice_speak_mode - the
+            default) or "fake" (constructs FakeTextToSpeechProvider,
+            voice/tts.py's own silent, audio-free test/wiring provider -
+            never real audio). No real TTS engine value exists yet;
+            Nathan has not chosen one (docs/phase_41_implementation_plan.md).
     """
 
     anthropic_api_key: str
@@ -71,6 +92,9 @@ class Settings:
     approval_timeout_seconds: int
     debug: bool
     ai_reasoning_enabled: bool = False
+    voice_enabled: bool = False
+    voice_speak_mode: str = "off"
+    voice_provider: str = "none"
 
 
 def _get_required(name: str) -> str:
@@ -186,6 +210,35 @@ def _get_bool(name: str, default: bool) -> bool:
     )
 
 
+def _get_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    """Read an optional environment variable, restricted to a fixed set
+    of accepted values.
+
+    Args:
+        name: The name of the environment variable to read.
+        default: The value to use when the variable is missing or empty.
+        choices: The exact, case-sensitive set of accepted values.
+
+    Returns:
+        The variable's stripped value, or the default if unset or empty.
+
+    Raises:
+        ConfigError: If the variable is set to a value not in choices.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+
+    value = raw.strip()
+    if value not in choices:
+        raise ConfigError(
+            f"Environment variable '{name}' must be one of "
+            f"{choices}, got '{value}'."
+        )
+
+    return value
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     """Load, validate, and return application configuration.
 
@@ -224,4 +277,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         log_level=_get_optional("LOG_LEVEL", "INFO").upper(),
         approval_timeout_seconds=_get_int("APPROVAL_TIMEOUT_SECONDS", 60),
         debug=_get_bool("DEBUG", False),
+        voice_enabled=_get_bool("VOICE_ENABLED", False),
+        voice_speak_mode=_get_choice("VOICE_SPEAK_MODE", "off", ("off", "all")),
+        voice_provider=_get_choice("VOICE_PROVIDER", "none", ("none", "fake")),
     )

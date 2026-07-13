@@ -12,11 +12,20 @@ Responsibilities:
     - Independently build the Phase 22 CLI startup notice (see
       build_startup_notice()) - a small, separate composition step, not
       part of build_orchestrator()'s own wiring.
+    - Independently build the Phase 41 voice output service (see
+      build_voice_output_service()) - another small, separate,
+      best-effort composition step. With VOICE_ENABLED unset/false (the
+      default), this always yields a disabled, provider-less service and
+      changes nothing about how Jarvis runs.
     - Start the terminal CLI.
 
 Does NOT:
-    - Call the Claude API unless AI_REASONING_ENABLED=true (Phase 7, Batch 2);
-      add voice or phone support.
+    - Call the Claude API unless AI_REASONING_ENABLED=true (Phase 7, Batch 2).
+    - Add phone support, a microphone, or speech-to-text of any kind.
+    - Construct a real text-to-speech engine. VOICE_PROVIDER="fake" (the
+      only non-default value accepted today) only ever constructs
+      voice/tts.py's own silent, audio-free FakeTextToSpeechProvider -
+      never real audio - and no such value is set by default.
     - Contain any business logic; it only assembles the system and starts it.
 
 This module is the single composition root for Phase 1. It is the one place
@@ -83,6 +92,8 @@ from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
+from voice.output import VoiceOutputService
+from voice.tts import FakeTextToSpeechProvider, TextToSpeechProvider
 from web.safe_web_fetcher import SafeWebFetcher
 from workflow.engine import WorkflowEngine
 from workflow.paused_workflow_store import PausedWorkflowStore
@@ -374,11 +385,54 @@ def build_startup_notice() -> str | None:
         return None
 
 
+def build_voice_output_service() -> tuple[VoiceOutputService, bool]:
+    """Independently build the Phase 41 voice output service.
+
+    Mirrors build_startup_notice()'s own pattern: loads Settings a
+    second, independent time rather than changing build_orchestrator()'s
+    widely-depended-on return type for this narrow, unrelated addition.
+
+    With VOICE_ENABLED unset/false and VOICE_PROVIDER unset/"none" (both
+    defaults), this always returns a disabled, provider-less service and
+    speak_responses=False - Jarvis's runtime behaviour is unchanged.
+    VOICE_PROVIDER="fake" only ever constructs voice/tts.py's own
+    silent, audio-free FakeTextToSpeechProvider - no real TTS engine
+    exists yet (docs/phase_41_implementation_plan.md).
+
+    Never raises: any failure while loading settings falls back to a
+    disabled, provider-less service, so a problem here can never
+    prevent Jarvis from starting.
+
+    Returns:
+        A tuple of (the VoiceOutputService to hand to JarvisCLI, whether
+        the CLI should actually attempt to speak each response - True
+        only when VOICE_SPEAK_MODE="all").
+    """
+    try:
+        settings = load_settings()
+    except Exception:  # noqa: BLE001 - a failing settings load must never block startup
+        return VoiceOutputService(), False
+
+    provider: TextToSpeechProvider | None = None
+    if settings.voice_provider == "fake":
+        provider = FakeTextToSpeechProvider()
+
+    service = VoiceOutputService(provider=provider, enabled=settings.voice_enabled)
+    speak_responses = settings.voice_speak_mode == "all"
+    return service, speak_responses
+
+
 def main() -> None:
     """Build the system and start the interactive CLI."""
     orchestrator = build_orchestrator()
     startup_notice = build_startup_notice()
-    cli = JarvisCLI(orchestrator, startup_notice=startup_notice)
+    voice_output, speak_responses = build_voice_output_service()
+    cli = JarvisCLI(
+        orchestrator,
+        startup_notice=startup_notice,
+        voice_output=voice_output,
+        speak_responses=speak_responses,
+    )
     cli.run()
 
 

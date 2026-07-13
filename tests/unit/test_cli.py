@@ -35,6 +35,8 @@ from ui.cli import (
     status_for,
     strip_prompt_prefix,
 )
+from voice.output import VoiceOutputService
+from voice.tts import FakeTextToSpeechProvider
 
 
 # --- Test doubles ------------------------------------------------------------
@@ -384,6 +386,259 @@ def test_startup_notice_none_prints_no_extra_line(
     )
     cli.run()
     assert not any("Jarvis notice:" in line for line in outputs)
+
+
+# --- Voice output (Phase 41, Batch 2) -----------------------------------------
+
+
+def test_voice_output_omitted_by_default_is_backward_compatible(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Every existing JarvisCLI(orchestrator, ...) construction - with no
+    voice_output/speak_responses argument - must behave exactly as it
+    did before this batch: no provider is ever constructed or called."""
+    scripted = iter(["echo hello", "exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    assert "[OK] echo hello" in "\n".join(outputs)
+
+
+def test_disabled_voice_service_never_speaks(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """speak_responses defaults to False even when a voice_output is
+    supplied - nothing is spoken unless both are explicitly enabled."""
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+    scripted = iter(["echo hello", "exit"])
+    outputs: list[str] = []
+
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        # speak_responses defaults to False
+    )
+    cli.run()
+
+    assert provider.spoken_texts == []
+
+
+def test_voice_service_disabled_flag_prevents_speaking_even_if_cli_tries(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """VoiceOutputService.enabled=False is a second, independent gate:
+    even with speak_responses=True, a disabled service never reaches
+    the provider."""
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=False)
+    scripted = iter(["echo hello", "exit"])
+    outputs: list[str] = []
+
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        speak_responses=True,
+    )
+    cli.run()
+
+    assert provider.spoken_texts == []
+
+
+def test_enabled_voice_service_receives_response_text_exactly_once(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """EchoTool echoes the entire raw request text verbatim (confirmed
+    directly against core/command_router.py's own echo build_input()),
+    so the spoken text is the full "echo ..." line, not just its
+    argument."""
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+    scripted = iter(["echo hello there", "exit"])
+    outputs: list[str] = []
+
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        speak_responses=True,
+    )
+    cli.run()
+
+    assert len(provider.spoken_texts) == 1
+    assert provider.spoken_texts[0] == "echo hello there"
+
+
+def test_cli_text_output_is_unchanged_when_voice_succeeds(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+
+    def _run(with_voice: VoiceOutputService | None, speak: bool) -> list[str]:
+        scripted = iter(["echo hello", "exit"])
+        outputs: list[str] = []
+        cli = JarvisCLI(
+            orchestrator,
+            input_fn=lambda _prompt: next(scripted),
+            output_fn=outputs.append,
+            voice_output=with_voice,
+            speak_responses=speak,
+        )
+        cli.run()
+        return outputs
+
+    without_voice = _run(None, False)
+    with_voice = _run(voice, True)
+    assert without_voice == with_voice
+
+
+def test_cli_text_output_is_unchanged_when_voice_fails(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    provider = FakeTextToSpeechProvider(fail_with="simulated engine failure")
+    voice = VoiceOutputService(provider=provider, enabled=True)
+
+    def _run(with_voice: VoiceOutputService | None, speak: bool) -> list[str]:
+        scripted = iter(["echo hello", "exit"])
+        outputs: list[str] = []
+        cli = JarvisCLI(
+            orchestrator,
+            input_fn=lambda _prompt: next(scripted),
+            output_fn=outputs.append,
+            voice_output=with_voice,
+            speak_responses=speak,
+        )
+        cli.run()
+        return outputs
+
+    without_voice = _run(None, False)
+    with_voice = _run(voice, True)
+    assert without_voice == with_voice
+
+
+def test_voice_failure_does_not_crash_the_cli(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    class _RaisingProvider(FakeTextToSpeechProvider):
+        def speak(self, text: str):
+            raise RuntimeError("simulated hard provider crash")
+
+    voice = VoiceOutputService(provider=_RaisingProvider(), enabled=True)
+    scripted = iter(["echo hello", "exit"])
+    outputs: list[str] = []
+
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        speak_responses=True,
+    )
+    cli.run()  # must not raise
+
+    assert "[OK] echo hello" in "\n".join(outputs)
+    assert any("Goodbye" in line for line in outputs)
+
+
+def test_empty_response_message_is_handled_safely(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """An empty or whitespace-only response message must never raise or
+    misbehave when handed to the voice-speak step. VoiceOutputService
+    itself already guards this (test_voice_output.py); this confirms
+    the CLI's own call site tolerates it too."""
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+    cli = JarvisCLI(
+        orchestrator,
+        voice_output=voice,
+        speak_responses=True,
+    )
+
+    cli._speak_if_enabled("")  # must not raise
+    cli._speak_if_enabled("   \n\t  ")  # must not raise
+
+    assert provider.spoken_texts == []
+
+
+def test_command_shaped_response_is_spoken_as_data_never_executed(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """A response message that happens to look like a command must only
+    ever be recorded/spoken verbatim by the fake provider - it is never
+    re-routed to CommandRouter or executed a second time."""
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+    scripted = iter(['echo delete file notes.txt', "exit"])
+    outputs: list[str] = []
+
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        speak_responses=True,
+    )
+    cli.run()
+
+    assert provider.spoken_texts == ["echo delete file notes.txt"]
+
+
+def test_voice_output_does_not_bypass_approval_flow() -> None:
+    """Even with voice output enabled and set to speak every response, a
+    YELLOW action must still require an explicit approve/decline
+    decision - voice never bypasses, skips, or auto-answers approval."""
+    from tools.builtin import MemoryUpdateTool
+
+    memory = _FakeMemory()
+    memory.add("original content")
+    security = SecurityManager()
+    planner = Planner(security)
+    registry = ToolRegistry()
+    registry.register_tool(MemoryUpdateTool(memory))  # type: ignore[arg-type]
+    executor = ToolExecutor(
+        registry=registry,
+        security_manager=security,
+        logger=_SpyLogger(),  # type: ignore[arg-type]
+    )
+    orch = JarvisOrchestrator(
+        planner=planner,
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+    )
+
+    provider = FakeTextToSpeechProvider()
+    voice = VoiceOutputService(provider=provider, enabled=True)
+
+    scripted = iter(["update memory 1: new content", "n", "exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orch,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+        voice_output=voice,
+        speak_responses=True,
+    )
+    cli.run()
+
+    joined = "\n".join(outputs)
+    assert "NEEDS APPROVAL" in joined
+    assert "[DECLINED]" in joined
+    # Voice was still asked to speak the initial "needs approval"
+    # message, but that alone never approved or executed anything - an
+    # explicit decline was still required and still recorded.
+    assert len(provider.spoken_texts) >= 1
 
 
 # --- Entry point -------------------------------------------------------------

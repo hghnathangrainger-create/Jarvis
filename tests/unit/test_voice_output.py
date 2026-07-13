@@ -1,13 +1,15 @@
 """
 test_voice_output.py
 
-Unit tests for VoiceOutputService (voice/output.py), Phase 41, Batch 1.
+Unit tests for VoiceOutputService (voice/output.py), Phase 41, Batch 1;
+extended Batch 2 to reflect main.py/ui/cli.py now wiring it in.
 
 These use only the fake provider (voice.tts.FakeTextToSpeechProvider) -
 no real audio, no microphone, no network. Structural (AST-based) tests
 confirm this module never imports anything from the execution/mutation
-side of Jarvis, and that no default runtime path (main.py, ui/cli.py)
-wires it in yet - Batch 1 changes no default behaviour.
+side of Jarvis, and that main.py/ui/cli.py's own voice wiring (proven in
+detail in test_main_voice_wiring.py and test_cli.py) never pulls in a
+real audio/microphone/network library either.
 
 Run with:
     pytest tests/unit/test_voice_output.py
@@ -225,12 +227,39 @@ def test_voice_output_module_imports_no_forbidden_components() -> None:
     assert not (imported_names & forbidden), imported_names
 
 
-def test_main_does_not_import_voice_package_yet() -> None:
-    """Batch 1 must not change default runtime behaviour - main.py's
-    composition root does not construct or import anything from the
-    voice package yet."""
-    assert "voice" not in _imported_top_level_modules("main.py")
+def test_main_imports_voice_package_but_no_real_audio_dependency() -> None:
+    """Phase 41, Batch 2: main.py now wires VoiceOutputService in (see
+    tests/unit/test_main_voice_wiring.py for the full wiring proof), but
+    it must still never import a real audio/microphone/network library -
+    only the fake, silent provider exists."""
+    imported_names = _imported_top_level_modules("main.py")
+    assert "voice" in imported_names
+
+    forbidden = {
+        "pyaudio",
+        "sounddevice",
+        "whisper",
+        "speech_recognition",
+        "pyttsx3",
+        "win32com",
+    }
+    assert not (imported_names & forbidden), imported_names
 
 
-def test_ui_cli_does_not_import_voice_package_yet() -> None:
-    assert "voice" not in _imported_top_level_modules("ui/cli.py")
+def test_ui_cli_imports_voice_package_but_no_real_audio_dependency() -> None:
+    """Phase 41, Batch 2: ui/cli.py now accepts an optional
+    VoiceOutputService (see tests/unit/test_cli.py for the full
+    behavioural proof), but must still never import a real audio
+    library itself."""
+    imported_names = _imported_top_level_modules("ui/cli.py")
+    assert "voice" in imported_names
+
+    forbidden = {
+        "pyaudio",
+        "sounddevice",
+        "whisper",
+        "speech_recognition",
+        "pyttsx3",
+        "win32com",
+    }
+    assert not (imported_names & forbidden), imported_names

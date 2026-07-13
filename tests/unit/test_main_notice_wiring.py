@@ -125,7 +125,14 @@ def test_main_passes_startup_notice_into_jarvis_cli(
     captured: dict[str, object] = {}
 
     class _FakeCLI:
-        def __init__(self, orchestrator, *, startup_notice=None) -> None:
+        def __init__(
+            self,
+            orchestrator,
+            *,
+            startup_notice=None,
+            voice_output=None,
+            speak_responses=False,
+        ) -> None:
             captured["orchestrator"] = orchestrator
             captured["startup_notice"] = startup_notice
 
