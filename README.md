@@ -1061,7 +1061,9 @@ poetry run pytest tests/integration/test_memory_change_approval_end_to_end.py -v
 ```
 jarvis/
 ├── config/         Configuration and shared constants (security tiers, AI flag)
-├── storage/        SQLite database and ORM models (memory category column)
+├── storage/        SQLite database and ORM models: memory, approval/workflow
+│                   history, inbox entries, schedules, quarantine records,
+│                   and durable pending-approval/paused-workflow state
 ├── observability/  Structured event logging
 ├── security/       Security Manager: action classification, append-only audit
 │                   log, prompt-injection pattern detection, and the
@@ -1081,26 +1083,53 @@ jarvis/
 ├── tools/          Tool registry, executor, built-in tools, and the
 │                   WebSearchProvider abstraction plus the concrete
 │                   DuckDuckGoSearchProvider adapter (Phase 16)
-│   └── builtin/    echo, info, memory (list/search/save/get), file_list,
-│                   file_read, web_search (GREEN); file_create,
-│                   file_append, file_delete (quarantine-only, Phase 35),
-│                   memory_update, memory_forget
-│                   (YELLOW, approval-gated)
+│   └── builtin/    GREEN (read-only): echo, info, memory, file_list,
+│                   file_read, file_search, web_search, quarantine_list,
+│                   config, approval_history, workflow_history,
+│                   schedule_list. YELLOW guarded read: webpage_read.
+│                   YELLOW approval-gated write: file_create,
+│                   file_append, file_copy, file_move, file_delete
+│                   (quarantine-only, never permanent), file_restore,
+│                   memory_update, memory_forget, schedule_create,
+│                   schedule_enable, schedule_disable
 ├── approval/       Approval models and the Approval Manager
 ├── workflow/       Sequential Workflow Engine, the deterministic
 │                   two-step workflow plan factory, and the durable
 │                   workflow lifecycle history store
+├── inbox/          Durable Inbox store for saved AI-generated outputs
+│                   (Phase 20) - today, one producer: web-search-summary
+│                   results, both interactive and scheduled
+├── scheduling/     Durable schedule store, the atomic due/claim guard, and
+│                   the scheduled web-search-summary execution helper
+│                   (Phase 21) - scheduler.py's own poll loop is the
+│                   process that actually runs a due schedule
+├── quarantine/     Durable quarantine metadata store (QuarantineStore,
+│                   Phase 37): records original_path/quarantine_path for
+│                   every file FileDeleteTool moves into .jarvis_trash/,
+│                   so FileRestoreTool (Phase 38) can move it back -
+│                   storage layer only, no tool/command/UI code
 ├── core/           Orchestrator that wires everything together, plus the
 │                   CommandRouter that matches request text to a tool
-├── ui/             Command-line interface and approval prompts
+├── ui/             Command-line interface and approval prompts, plus the
+│                   tkinter/ttk dashboard presentation layer
+│                   (ui/dashboard_app.py, Phase 19)
 ├── web/            Webpage fetch/read safety foundation (Phase 32):
 │                   WebFetchPolicy (URL/target validation), SafeWebFetcher
 │                   (the sole module permitted to import httpx), and a
-│                   deterministic HTML text extractor - internal only,
-│                   not yet registered as a tool or wired into anything
+│                   deterministic HTML text extractor - used by the
+│                   registered "read webpage"/"summarize webpage" tools
+│                   (Phase 33/34)
+├── dashboard/      Read-only DashboardReadModel composition layer
+│                   (Phase 19) over the durable stores above - the sole
+│                   persistence-facing layer ui/dashboard_app.py depends
+│                   on; contains no tool/command/UI code itself
 ├── tests/          Unit and integration tests
 ├── docs/           Specifications, implementation plans, and reports
-└── main.py         Entry point — starts Jarvis
+├── main.py         Entry point — starts Jarvis (the CLI)
+├── dashboard.py    Entry point — starts the read-only dashboard window,
+│                   a separate local process sharing only the SQLite file
+└── scheduler.py    Entry point — polls and runs due, enabled schedules,
+                    a separate local process sharing only the SQLite file
 ```
 
 ---
@@ -1117,12 +1146,22 @@ jarvis/
 
 ## Next Phase
 
-**Phase 17 is complete**: two more fixed, hand-authored, two-step workflow commands, reusing the exact same Workflow Engine, Security Manager, and Approval Manager every prior workflow already used — no engine change, no new tool, no AI involvement — see `docs/phase_17_completion_report.md` for the full closure write-up.
+**Phase 39 is the latest closed phase**: read-only dashboard visibility for quarantine contents — a seventh "Quarantine" tab — completing the quarantine feature family started in Phase 35 across both the CLI and the dashboard. See `docs/phase_39_completion_report.md` for its full closure write-up. Phase 40 (`docs/phase_40_completion_report.md`) is a documentation-only accuracy pass over this README; it changes no runtime behavior.
 
-An architectural and product-value review performed before this phase concluded that with only the two original Phase 15 templates, AI-assisted allowlisted planning would have been mostly cosmetic — the allowlist was too small and too narrow to justify the trust-boundary cost. Phase 17 grew that allowlist to four genuinely distinct templates, but this alone does not automatically justify that direction either: exact commands remain obviously simpler for all four, and the same review's own honest conclusion — that the *diversity* of intent categories matters more than the raw count — still stands. Phase 16 (web search) and the Durable Workflow Lifecycle Foundation both remain independent branches, untouched by this phase. The next *numbered* architectural direction still has not been chosen and still requires its own fresh review, in the same way every prior phase boundary has: what AI-assisted or AI-authored planning, AI-facing summarisation of search results, scheduled or background execution, resumable checkpointing, or remote/client-server execution would each require of the Security Manager, the approval flow, and Jarvis's single-user, single-session execution model, has not yet been assessed. None of these is authorized by Phase 17; each remains a separately-scoped decision.
+The quarantine feature family is now complete for its declared, safe scope: `delete file <path>` quarantines a file into `.jarvis_trash/` (never permanently); `list quarantine`/`show quarantine` show what's recorded, including original path when known; `restore file <quarantine-file-or-path>` moves a file with known metadata back to its original location; and the dashboard's Quarantine tab shows that same durable metadata, read-only. Webpage commands (`read webpage <url>`, `summarize webpage <url>`/`summarise webpage <url>`) and the seven-tab read-only dashboard (Overview, Memories, Approval History, Workflow History, Inbox, Schedules, Quarantine) also exist today, unrelated to and unchanged by the quarantine work.
 
-Resumable approvals beyond a single paused workflow, and deeper but still-advisory AI assistance, remain deliberately deferred from earlier phases, each requiring its own safety review and architecture decision before it could even be scoped. Every future addition continues to go only behind the Security Manager, with the user in control.
+As with every prior phase boundary, the next *numbered* architectural direction has not been chosen and requires its own fresh review before being scoped. Several genuinely valid future directions exist, **none yet selected or committed to**:
+
+- Empty-trash/permanent delete for quarantine — would need its own RED classification and a dedicated safety-design review before being considered at all.
+- A cleanup/retention policy for `.jarvis_trash/` — premature without real evidence it's actually needed.
+- A scheduler schema/type foundation — currently blocks scheduled webpage summaries and any additional scheduled action type, since `ScheduleEntry` has no `action_type`/`kind` column, but remains unjustified without a concrete second use case.
+- Inbox integration for webpage summaries — a producer-policy decision (whether an approval-gated summary should also auto-save) that hasn't been made yet, independent of implementation cost.
+- Dashboard write actions of any kind — the dashboard has been strictly read-only since Phase 19; nothing has changed that.
+- A Research Agent or autonomous browsing foundation — a standing non-goal unless explicitly selected through its own dedicated review.
+- A Project/Repo Health Check Tool — evaluated and found speculative; no expressed need exists yet.
+
+None of the above is authorized by Phase 40 or any phase before it; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6, Phase 7, Phase 8, Phase 9, Phase 10, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, Phase 16, and Phase 17 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 through Phase 40 are complete for their defined scope, not yet tagged. None is a finished product.*

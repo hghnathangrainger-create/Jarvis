@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from approval.approval_manager import ApprovalManager
-from approval.approval_models import ApprovalDecision, ApprovalError, ApprovalRequest
+from approval.approval_models import ApprovalDecision, ApprovalError
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
 from security.security_manager import SecurityManager
