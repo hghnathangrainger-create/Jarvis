@@ -924,7 +924,7 @@ Classified **YELLOW**, reusing the pre-existing `"delete file"` rule in `Securit
 
 ### What is deliberately NOT included in Phase 35
 
-No permanent/irreversible delete of any kind — no production code path calls `os.remove()`, `Path.unlink()`, `shutil.rmtree()`, or any equivalent. No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No Research Agent or autonomous behavior. No Core service, voice, phone, goals, projects, or tasks. No command aliases beyond the one exact grammar (`remove file`, `trash file`, `quarantine file`, `rm`, etc. were all deliberately not added). **Listing quarantine contents has since been added** — see Phase 36 below — still with no restore/empty-trash/cleanup behavior of any kind. **Durable original-path metadata recording has since been added** — see Phase 37 below — still not a restore command itself.
+No permanent/irreversible delete of any kind — no production code path calls `os.remove()`, `Path.unlink()`, `shutil.rmtree()`, or any equivalent. No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No Research Agent or autonomous behavior. No Core service, voice, phone, goals, projects, or tasks. No command aliases beyond the one exact grammar (`remove file`, `trash file`, `quarantine file`, `rm`, etc. were all deliberately not added). **Listing quarantine contents has since been added** — see Phase 36 below — still with no restore/empty-trash/cleanup behavior of any kind. **Durable original-path metadata recording has since been added** — see Phase 37 below — still not a restore command itself. **A restore command has since been added** — see Phase 38 below — still no empty-trash/permanent-delete/cleanup behavior of any kind.
 
 ---
 
@@ -943,7 +943,7 @@ Both phrases route to the same fixed, no-argument request. Classified **GREEN**,
 
 ### What is deliberately NOT included in Phase 36
 
-No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No file content is ever read — only filesystem metadata (name, size, modified time). No command aliases beyond the two exact phrases (`list trash`, `show trash`, `open quarantine`, `quarantine list`, etc. were all deliberately not added). **Original-path display has since been added** — see Phase 37 below — still read-only, still no restore.
+No restore/undo command. No "empty trash" command. No automatic cleanup or retention policy. No dashboard, scheduler, Inbox, workflow, or AI integration. No file content is ever read — only filesystem metadata (name, size, modified time). No command aliases beyond the two exact phrases (`list trash`, `show trash`, `open quarantine`, `quarantine list`, etc. were all deliberately not added). **Original-path display has since been added** — see Phase 37 below — still read-only, still no restore. **A restore command has since been added** — see Phase 38 below.
 
 ---
 
@@ -957,7 +957,27 @@ Files quarantined before this phase (Phase 35/36) have no such record — `list 
 
 ### What is deliberately NOT included in Phase 37
 
-No restore/undo command — this phase only makes a future restore command *safer to build later*; it does not restore anything itself. No "empty trash" command. No permanent delete. No automatic cleanup or retention policy. No dashboard visibility into quarantine contents. No migration or backfill of pre-Phase-37 quarantined files — a missing record is always treated as the ordinary, expected case, never an error. No dashboard, scheduler, Inbox, workflow, or AI integration. `QuarantineStore` itself exposes no update, delete, restore, or cleanup method of any kind — only recording a new row and reading one back by quarantine path.
+No restore/undo command — this phase only makes a future restore command *safer to build later*; it does not restore anything itself. No "empty trash" command. No permanent delete. No automatic cleanup or retention policy. No dashboard visibility into quarantine contents. No migration or backfill of pre-Phase-37 quarantined files — a missing record is always treated as the ordinary, expected case, never an error. No dashboard, scheduler, Inbox, workflow, or AI integration. `QuarantineStore` itself exposes no update, delete, restore, or cleanup method of any kind — only recording a new row and reading one back by quarantine path. **A restore command has since been added** — see Phase 38 below.
+
+---
+
+## Phase 38 — Quarantine Restore Command (complete)
+
+Completes the quarantine feature family started in Phase 35: a command that restores one previously-quarantined file back to its recorded original location, using the durable metadata Phase 37 added. See `docs/phase_38_completion_report.md` for the full write-up.
+
+### File restore command
+
+```
+restore file <quarantine-file-or-path>
+```
+
+Classified **YELLOW**, via a new dedicated `SecurityManager` rule (`"restore file"`, fixed and input-independent). On approval, `FileRestoreTool` looks up the quarantined file's recorded metadata via `QuarantineStore`, and — only if a record exists — moves the file (`Path.rename()`, never a copy) from `.jarvis_trash/` back to its exact recorded `original_path`. The identifier can be either a bare filename as shown by `list quarantine`/`show quarantine` (resolved directly inside `.jarvis_trash/`), or any path that resolves to a file directly inside the quarantine directory — anything else, including path traversal attempts, is rejected.
+
+A file with no metadata record (quarantined before Phase 37, or otherwise unrecorded) cannot be restored automatically — Jarvis never guesses an original location from the quarantine filename. If the recorded `original_path` already exists, or its parent folder no longer exists, the restore is refused and the quarantined file is left untouched — this tool never overwrites anything and never recreates folders.
+
+### What is deliberately NOT included in Phase 38
+
+No empty-trash command. No permanent delete. No automatic cleanup or retention policy. No bulk/"restore all" command — exactly one file per request. No overwrite behavior, ever. No destination-choice — the restored path is always exactly the recorded `original_path`, never something Nathan types. No dashboard, scheduler, Inbox, workflow, or AI integration. No command aliases beyond the one exact grammar (`undo delete`, `restore quarantine`, `restore trash`, `recover file`, `untrash file`, `move back file`, etc. were all deliberately not added). `FileDeleteTool`, `QuarantineStore`, and `QuarantineListTool` were not changed in this phase beyond sharing the existing `QuarantineStore` instance with the new tool.
 
 ---
 

@@ -23,12 +23,16 @@ from pathlib import Path
 
 import pytest
 
+from sqlalchemy import create_engine
+
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalError
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from planner.planner import Planner
+from quarantine.quarantine_store import QuarantineStore
 from security.security_manager import SecurityManager
+from storage.database import create_session_factory, initialize_database
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.builtin import (
     EchoTool,
@@ -39,6 +43,7 @@ from tools.builtin import (
     FileListTool,
     FileMoveTool,
     FileReadTool,
+    FileRestoreTool,
 )
 from tools.builtin.file_delete_tool import _QUARANTINE_DIR_NAME
 from tools.executor import ToolExecutor
@@ -103,6 +108,14 @@ class _System:
         self.security = SecurityManager()
         self.registry = ToolRegistry()
         self.red = _RedWriteTool()
+        # A real, isolated in-memory QuarantineStore (Phase 37/38) - shared
+        # by FileDeleteTool and FileRestoreTool exactly as main.py's own
+        # composition root shares one instance between them, so a restore
+        # test can find the metadata an earlier delete in the same test
+        # actually recorded.
+        engine = create_engine("sqlite:///:memory:")
+        initialize_database(engine)
+        self.quarantine_store = QuarantineStore(create_session_factory(engine))
         self.registry.register_tool(EchoTool())
         self.registry.register_tool(FileListTool())
         self.registry.register_tool(FileReadTool())
@@ -110,7 +123,8 @@ class _System:
         self.registry.register_tool(FileAppendTool())
         self.registry.register_tool(FileCopyTool())
         self.registry.register_tool(FileMoveTool())
-        self.registry.register_tool(FileDeleteTool())
+        self.registry.register_tool(FileDeleteTool(self.quarantine_store))
+        self.registry.register_tool(FileRestoreTool(self.quarantine_store))
         self.registry.register_tool(self.red)
         self.executor = ToolExecutor(
             registry=self.registry,
@@ -558,6 +572,381 @@ def test_delete_decisions_are_audited(system: _System, workspace: Path) -> None:
     approval_events = system.logger.approval_events()
     assert len(approval_events) == 1
     assert "outcome=approved" in str(approval_events[0]["detail"])
+
+
+# --- Restore: approved moves back, declined/timed-out does not (Phase 38) -----
+
+
+def test_restore_file_requires_yellow_approval_before_execution(
+    system: _System, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    quarantined = quarantine_dir / "notes__a1b2c3d4.txt"
+    quarantined.write_text("content")
+
+    response = system.orchestrator.handle_request(
+        f"restore file {quarantined.name}"
+    )
+
+    assert response.requires_confirmation is True
+    assert response.success is False
+    assert quarantined.exists()  # not yet restored
+
+
+def test_restore_file_classification_is_fixed_and_not_path_dependent(
+    system: _System, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "a__11111111.txt").write_text("a")
+
+    response_one = system.orchestrator.handle_request(
+        "restore file a__11111111.txt"
+    )
+    response_two = system.orchestrator.handle_request(
+        "restore file ../../../etc/passwd"
+    )
+
+    assert response_one.requires_confirmation is True
+    assert response_two.requires_confirmation is True
+    assert response_one.approval_request.security_tier == (
+        response_two.approval_request.security_tier
+    )
+    assert response_one.tool_name == "file_restore"
+    assert response_two.tool_name == "file_restore"
+
+
+def test_restore_approval_prompt_clearly_indicates_restore_action(
+    system: _System, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "notes__a1b2c3d4.txt").write_text("content")
+
+    response = system.orchestrator.handle_request(
+        "restore file notes__a1b2c3d4.txt"
+    )
+
+    formatted = format_approval_request(response.approval_request)
+    lowered = formatted.lower()
+    assert "restore file" in lowered
+    assert "restor" in lowered or "confirm" in lowered
+
+
+def test_approved_restore_moves_file_back_to_original_path(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("important content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    assert deleted.success is True
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.approve(
+        restore_response.approval_request.request_id
+    )
+    restored = system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert restored.success is True
+    assert source.exists()
+    assert source.read_text() == "important content"
+
+
+def test_approved_restore_removes_file_from_quarantine(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.approve(
+        restore_response.approval_request.request_id
+    )
+    system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert not quarantine_path.exists()
+    assert list((workspace / _QUARANTINE_DIR_NAME).iterdir()) == []
+
+
+def test_restored_content_is_preserved_byte_for_byte(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "binary.bin"
+    original_bytes = bytes(range(256))
+    source.write_bytes(original_bytes)
+
+    delete_response = system.orchestrator.handle_request("delete file binary.bin")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.approve(
+        restore_response.approval_request.request_id
+    )
+    system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert source.read_bytes() == original_bytes
+
+
+def test_denied_restore_leaves_file_in_quarantine(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.decline(
+        restore_response.approval_request.request_id
+    )
+    restored = system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert restored.success is False
+    assert quarantine_path.exists()
+
+
+def test_denied_restore_does_not_recreate_original_path(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+    assert not source.exists()
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.decline(
+        restore_response.approval_request.request_id
+    )
+    system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert not source.exists()
+
+
+def test_timed_out_restore_leaves_file_in_quarantine(workspace: Path) -> None:
+    clock = _FakeClock(_START)
+    system = _System(timeout_seconds=60, clock=clock)
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    clock.now = _START + timedelta(seconds=60)
+
+    with pytest.raises(ApprovalError):
+        system.approvals.approve(restore_response.approval_request.request_id)
+
+    assert quarantine_path.exists()
+
+
+def test_timed_out_restore_does_not_recreate_original_path(workspace: Path) -> None:
+    clock = _FakeClock(_START)
+    system = _System(timeout_seconds=60, clock=clock)
+    source = workspace / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+    assert not source.exists()
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    clock.now = _START + timedelta(seconds=60)
+
+    with pytest.raises(ApprovalError):
+        system.approvals.approve(restore_response.approval_request.request_id)
+
+    assert not source.exists()
+
+
+def test_metadata_less_quarantined_file_fails_cleanly_after_approval(
+    system: _System, workspace: Path
+) -> None:
+    """A file placed directly into .jarvis_trash/ (simulating one
+    quarantined before Phase 37's metadata table existed) has no
+    QuarantineRecord - restore must fail cleanly, never guess."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    legacy = quarantine_dir / "legacy__abcdef01.txt"
+    legacy.write_text("pre-Phase-37 content")
+
+    response = system.orchestrator.handle_request(
+        "restore file legacy__abcdef01.txt"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert legacy.exists()  # untouched
+
+
+def test_restore_fails_cleanly_and_does_not_overwrite_if_original_path_exists(
+    system: _System, workspace: Path
+) -> None:
+    source = workspace / "notes.txt"
+    source.write_text("original content")
+
+    delete_response = system.orchestrator.handle_request("delete file notes.txt")
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    # Something new now occupies the original path.
+    source.write_text("a brand new file with the same name")
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.approve(
+        restore_response.approval_request.request_id
+    )
+    restored = system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert restored.success is False
+    assert source.read_text() == "a brand new file with the same name"
+    assert quarantine_path.exists()  # still in quarantine - nothing moved
+
+
+def test_restore_fails_cleanly_and_does_not_create_directories_if_parent_missing(
+    system: _System, workspace: Path
+) -> None:
+    nested_dir = workspace / "some_folder"
+    nested_dir.mkdir()
+    source = nested_dir / "notes.txt"
+    source.write_text("content")
+
+    delete_response = system.orchestrator.handle_request(
+        "delete file some_folder/notes.txt"
+    )
+    delete_decision = system.approvals.approve(
+        delete_response.approval_request.request_id
+    )
+    deleted = system.orchestrator.execute_approved(delete_response, delete_decision)
+    quarantine_path = Path(deleted.tool_result.metadata["quarantine_path"])
+
+    # The original folder is now gone.
+    nested_dir.rmdir()
+    assert not nested_dir.exists()
+
+    restore_response = system.orchestrator.handle_request(
+        f"restore file {quarantine_path.name}"
+    )
+    restore_decision = system.approvals.approve(
+        restore_response.approval_request.request_id
+    )
+    restored = system.orchestrator.execute_approved(restore_response, restore_decision)
+
+    assert restored.success is False
+    assert not nested_dir.exists()  # never recreated
+    assert quarantine_path.exists()  # still in quarantine - nothing moved
+
+
+def test_restore_requires_no_direct_bypass_around_approval_manager(
+    system: _System, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    quarantined = quarantine_dir / "notes__a1b2c3d4.txt"
+    quarantined.write_text("content")
+
+    response = system.orchestrator.handle_request(
+        "restore file notes__a1b2c3d4.txt"
+    )
+
+    assert response.requires_confirmation is True
+    assert response.success is False
+    assert quarantined.exists()
+
+
+def test_restore_action_is_fixed_and_path_never_becomes_part_of_action_for(
+    system: _System, workspace: Path
+) -> None:
+    """The path must never leak into the fixed action_for() string that
+    the Security Manager classifies against - only the displayed
+    ApprovalRequest.action (the raw request text) may vary."""
+    from config.constants import SecurityTier
+
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "a__11111111.txt").write_text("a")
+
+    response = system.orchestrator.handle_request("restore file a__11111111.txt")
+
+    tool = system.registry.get_tool("file_restore")
+    request = ToolRequest(
+        tool_name="file_restore", input_data={"path": "a__11111111.txt"}
+    )
+    assert tool.action_for(request) == "restore file"
+    assert response.approval_request.security_tier == SecurityTier.YELLOW
+
+
+def test_restore_decisions_are_audited(system: _System, workspace: Path) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "notes__a1b2c3d4.txt").write_text("content")
+
+    response = system.orchestrator.handle_request(
+        "restore file notes__a1b2c3d4.txt"
+    )
+    decision = system.approvals.decline(response.approval_request.request_id)
+    system.orchestrator.execute_approved(response, decision)
+
+    approval_events = system.logger.approval_events()
+    assert len(approval_events) == 1
+    assert "outcome=declined" in str(approval_events[0]["detail"])
 
 
 # --- RED stays blocked, writes are audited -----------------------------------

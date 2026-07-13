@@ -1,0 +1,81 @@
+"""
+test_main_file_restore_wiring.py
+
+Composition tests for FileRestoreTool wiring in main.build_orchestrator()
+(Phase 38, Batch 2).
+
+These tests confirm FileRestoreTool is registered and routed to
+correctly via "restore file <path>", and that it shares the exact same
+QuarantineStore instance as FileDeleteTool/QuarantineListTool - never a
+second, separate database connection - without ever needing a live AI
+or network call, matching the existing test_main_file_delete_wiring.py
+pattern exactly.
+
+Run with:
+    pytest tests/unit/test_main_file_restore_wiring.py
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import main
+from quarantine.quarantine_store import QuarantineStore
+from tools.builtin.file_restore_tool import FileRestoreTool
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point every setting at safe, isolated values so build_orchestrator()
+    never touches the real .env file or the real database."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test_jarvis.db"))
+    monkeypatch.delenv("AI_REASONING_ENABLED", raising=False)
+
+
+def test_file_restore_tool_is_registered() -> None:
+    orchestrator = main.build_orchestrator()
+    assert orchestrator._registry.has_tool("file_restore")
+
+
+def test_file_restore_tool_is_the_correct_type() -> None:
+    orchestrator = main.build_orchestrator()
+    tool = orchestrator._registry.get_tool("file_restore")
+    assert isinstance(tool, FileRestoreTool)
+
+
+def test_command_router_routes_restore_file_to_file_restore() -> None:
+    orchestrator = main.build_orchestrator()
+    assert orchestrator._command_router.match("restore file a.txt") == "file_restore"
+
+
+def test_exactly_one_file_restore_tool_instance_is_registered() -> None:
+    orchestrator = main.build_orchestrator()
+    assert orchestrator._registry.list_tool_names().count("file_restore") == 1
+
+
+def test_file_restore_tool_is_backed_by_a_real_quarantine_store() -> None:
+    orchestrator = main.build_orchestrator()
+    tool = orchestrator._registry.get_tool("file_restore")
+    assert isinstance(tool._store, QuarantineStore)
+
+
+def test_file_restore_tool_shares_one_quarantine_store_with_delete_and_list() -> None:
+    """main.py must construct QuarantineStore exactly once and inject
+    the same instance into all three quarantine-family tools - never a
+    second, redundant store/database connection."""
+    orchestrator = main.build_orchestrator()
+    restore_tool = orchestrator._registry.get_tool("file_restore")
+    delete_tool = orchestrator._registry.get_tool("file_delete")
+    list_tool = orchestrator._registry.get_tool("quarantine_list")
+    assert restore_tool._store is delete_tool._store
+    assert restore_tool._store is list_tool._store
+
+
+def test_build_orchestrator_return_type_and_signature_are_unchanged() -> None:
+    import inspect
+
+    signature = inspect.signature(main.build_orchestrator)
+    assert list(signature.parameters) == []

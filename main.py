@@ -64,6 +64,7 @@ from tools.builtin import (
     FileListTool,
     FileMoveTool,
     FileReadTool,
+    FileRestoreTool,
     FileSearchTool,
     InfoTool,
     MemoryForgetTool,
@@ -153,8 +154,9 @@ def build_orchestrator() -> JarvisOrchestrator:
     # (original_path/quarantine_path) for every successful quarantine,
     # so a future restore command has trustworthy information to work
     # with, and lets QuarantineListTool display it (Phase 37, Batch 2).
-    # Constructed once here and shared by both tools below - never a
-    # second, separate database connection.
+    # Constructed once here and shared by all three quarantine-family
+    # tools below (list/delete/restore) - never a second, separate
+    # database connection.
     quarantine_store = QuarantineStore(session_factory)
     # QuarantineListTool (Phase 36; extended Phase 37, Batch 2) only
     # lists .jarvis_trash/'s current contents plus a read-only original-
@@ -172,6 +174,10 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(FileCopyTool())
     registry.register_tool(FileMoveTool())
     registry.register_tool(FileDeleteTool(quarantine_store))
+    # FileRestoreTool (Phase 38): restores one quarantined file back to
+    # its recorded original_path - reuses the same shared quarantine_store
+    # instance above, never a second QuarantineStore/database connection.
+    registry.register_tool(FileRestoreTool(quarantine_store))
     registry.register_tool(ApprovalHistoryTool(approval_history))
 
     # Durable workflow lifecycle history (Durable Workflow Lifecycle

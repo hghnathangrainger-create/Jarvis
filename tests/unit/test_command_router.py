@@ -57,6 +57,7 @@ _ALL_TOOL_NAMES = (
     "file_copy",
     "file_move",
     "file_delete",
+    "file_restore",
     "approval_history",
     "workflow_history",
     "web_search",
@@ -382,6 +383,95 @@ def test_build_input_file_delete_empty_path_returns_empty_string(
     router: CommandRouter,
 ) -> None:
     assert router.build_input("file_delete", "delete file ") == {"path": ""}
+
+
+# --- match(): file restore (Phase 38) ------------------------------------------
+
+
+def test_match_file_restore(router: CommandRouter) -> None:
+    assert router.match("restore file a.txt") == "file_restore"
+
+
+def test_match_file_restore_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("RESTORE FILE a.txt") == "file_restore"
+
+
+def test_match_file_restore_not_returned_when_tool_unregistered() -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "file_restore":
+            registry.register_tool(_StubTool(name))
+    router = CommandRouter(registry)
+    assert router.match("restore file a.txt") is None
+
+
+def test_match_file_restore_does_not_collide_with_delete_copy_or_move(
+    router: CommandRouter,
+) -> None:
+    assert router.match("delete file a.txt") == "file_delete"
+    assert router.match("copy file a.txt to b.txt") == "file_copy"
+    assert router.match("move file a.txt to b.txt") == "file_move"
+    assert router.match("restore file a.txt") == "file_restore"
+
+
+def test_match_file_restore_does_not_collide_with_quarantine_list(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list quarantine") == "quarantine_list"
+    assert router.match("show quarantine") == "quarantine_list"
+    assert router.match("restore file a.txt") == "file_restore"
+
+
+def test_match_file_restore_does_not_collide_with_list_or_read_file(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list files") == "file_list"
+    assert router.match("read file a.txt") == "file_read"
+    assert router.match("restore file a.txt") == "file_restore"
+
+
+def test_near_misses_do_not_route_as_file_restore(router: CommandRouter) -> None:
+    # Close, but not the exact required prefix - must not match.
+    assert router.match("restorefile a.txt") != "file_restore"
+    assert router.match("restore folder a.txt") != "file_restore"
+    assert router.match("restore directory a.txt") != "file_restore"
+    assert router.match("restore quarantine a.txt") != "file_restore"
+    assert router.match("restore trash a.txt") != "file_restore"
+    assert router.match("recover file a.txt") != "file_restore"
+    assert router.match("untrash file a.txt") != "file_restore"
+    assert router.match("restore all") != "file_restore"
+    assert router.match("move back file a.txt") != "file_restore"
+    # A bare command with no path at all must not match either - this
+    # is exactly why _FILE_RESTORE_PREFIXES includes a trailing space,
+    # mirroring _FILE_DELETE_PREFIXES's own deliberately stricter
+    # grammar.
+    assert router.match("restore file") != "file_restore"
+
+
+def test_build_input_file_restore_extracts_path(router: CommandRouter) -> None:
+    assert router.build_input("file_restore", "restore file a.txt") == {
+        "path": "a.txt"
+    }
+
+
+def test_build_input_file_restore_with_nested_path(router: CommandRouter) -> None:
+    assert router.build_input(
+        "file_restore", "restore file .jarvis_trash/notes__a1b2c3d4.txt"
+    ) == {"path": ".jarvis_trash/notes__a1b2c3d4.txt"}
+
+
+def test_build_input_file_restore_strips_surrounding_quotes(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("file_restore", 'restore file "a.txt"') == {
+        "path": "a.txt"
+    }
+
+
+def test_build_input_file_restore_empty_path_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert router.build_input("file_restore", "restore file ") == {"path": ""}
 
 
 # --- match(): file search (Phase 24) -------------------------------------------

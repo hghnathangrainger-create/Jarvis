@@ -236,6 +236,30 @@ _FILE_MOVE_PREFIXES: tuple[str, ...] = ("move file", "rename file")
 #: _WEB_SEARCH_PREFIXES's own docstring precedent).
 _FILE_DELETE_PREFIXES: tuple[str, ...] = ("delete file ",)
 
+#: The one exact, mandatory prefix for the quarantine-restore request
+#: (Phase 38). Deliberately includes a trailing space, mirroring
+#: _FILE_DELETE_PREFIXES's own reasoning exactly: a restore-shaped
+#: command is held to the same stricter, more conservative grammar on
+#: purpose - a bare "restore file" with no path at all must not match,
+#: and _file_prefix() matches via plain str.startswith(), so the
+#: trailing space is what enforces that word boundary. This also
+#: correctly excludes "restorefile <path>" (no space at all), "restore
+#: folder <path>"/"restore directory <path>"/"restore quarantine
+#: <path>"/"restore trash <path>" (all diverge at or before the 8th
+#: character), "recover file <path>"/"untrash file <path>" (different
+#: first word entirely), and "restore all" (different second word) -
+#: confirmed by direct comparison, not assumed. Checked directly
+#: against every existing prefix/exact-command table in this module:
+#: shares no second word with _FILE_COPY_PREFIXES ("copy" vs
+#: "restore"), _FILE_MOVE_PREFIXES ("move"/"rename" vs "restore"), or
+#: _QUARANTINE_LIST_EXACT_COMMANDS ("list"/"show" vs "restore").
+#: Deliberately a single, exact phrase - no aliases such as "undo
+#: delete", "restore quarantine", "restore trash", "recover file",
+#: "untrash file", or "move back file" - matching this project's own
+#: "no looser synonym set" discipline (see _WEB_SEARCH_PREFIXES's own
+#: docstring precedent).
+_FILE_RESTORE_PREFIXES: tuple[str, ...] = ("restore file ",)
+
 #: Leading phrases for a filename search (Phase 24). Two aliases are
 #: recognised for the same operation, mirroring the project's existing
 #: "summarise"/"summarize" alias convention. Checked directly against
@@ -736,6 +760,18 @@ class CommandRouter:
             self._registry.has_tool("file_delete")
         ):
             return "file_delete"
+
+        # Quarantine restore (Phase 38): YELLOW, requires approval.
+        # Checked here, alongside file_delete immediately above, before
+        # the generic memory-keyword fallback below, so a quarantine
+        # path that happens to contain a substring like "memory" is
+        # never misrouted to the memory tool. "restore file" already
+        # matches a new, dedicated YELLOW rule (confirmed directly in
+        # security/security_manager.py before this tool was written).
+        if self._file_prefix(lowered, _FILE_RESTORE_PREFIXES) is not None and (
+            self._registry.has_tool("file_restore")
+        ):
+            return "file_restore"
 
         # File search (Phase 24): read-only, GREEN. Checked here, before
         # the generic memory-keyword fallback below, so a query that
@@ -1433,6 +1469,10 @@ class CommandRouter:
 
         if tool_name == "file_delete":
             path = self._extract_path(text, _FILE_DELETE_PREFIXES)
+            return {"path": path}
+
+        if tool_name == "file_restore":
+            path = self._extract_path(text, _FILE_RESTORE_PREFIXES)
             return {"path": path}
 
         if tool_name == "schedule_create":
