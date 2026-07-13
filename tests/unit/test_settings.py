@@ -3,13 +3,17 @@ test_settings.py
 
 Unit tests for config/settings.py's voice-related fields (Phase 41,
 Batch 2: voice_enabled, voice_speak_mode, voice_provider; Phase 41,
-Batch 4: voice_input_enabled, voice_input_provider).
+Batch 4: voice_input_enabled, voice_input_provider), and for LOG_LEVEL
+validation (Phase 46: log_level is now validated against
+config.constants.LogLevel, case-insensitively, instead of accepting any
+string).
 
 No dedicated unit test file existed for config/settings.py before Batch
 2 (load_settings() was previously only exercised indirectly, via
-main.build_orchestrator() and various integration tests) - this file is
-scoped narrowly to the new voice fields only, not a general audit of
-every existing setting.
+main.build_orchestrator() and various integration tests) - this file
+remains scoped narrowly to fields with their own dedicated validation
+logic worth testing directly, not a general audit of every existing
+setting.
 
 Run with:
     pytest tests/unit/test_settings.py
@@ -37,6 +41,7 @@ def _hermetic_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("VOICE_PROVIDER", raising=False)
     monkeypatch.delenv("VOICE_INPUT_ENABLED", raising=False)
     monkeypatch.delenv("VOICE_INPUT_PROVIDER", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
 
 
 # --- defaults -----------------------------------------------------------------
@@ -178,3 +183,81 @@ def test_no_voice_field_is_treated_as_a_secret() -> None:
         "voice_input_token",
     ):
         assert not hasattr(settings, forbidden_name)
+
+
+# --- LOG_LEVEL validation (Phase 46) --------------------------------------------
+
+
+def test_log_level_defaults_to_info_when_unset() -> None:
+    assert load_settings().log_level == "INFO"
+
+
+@pytest.mark.parametrize(
+    "level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+)
+def test_log_level_accepts_every_valid_uppercase_level(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    monkeypatch.setenv("LOG_LEVEL", level)
+    assert load_settings().log_level == level
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("debug", "DEBUG"),
+        ("Debug", "DEBUG"),
+        ("info", "INFO"),
+        ("Info", "INFO"),
+        ("warning", "WARNING"),
+        ("error", "ERROR"),
+        ("critical", "CRITICAL"),
+    ],
+)
+def test_log_level_normalises_lowercase_and_mixed_case(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    """Preserves LOG_LEVEL's pre-existing case-insensitive behaviour -
+    only genuinely invalid values are now rejected, not a different case
+    spelling of an otherwise-valid level."""
+    monkeypatch.setenv("LOG_LEVEL", raw)
+    assert load_settings().log_level == expected
+
+
+def test_invalid_log_level_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "banana")
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_empty_log_level_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty/whitespace-only value is treated as unset, matching every
+    other optional setting's own established behaviour - not a
+    validation error."""
+    monkeypatch.setenv("LOG_LEVEL", "   ")
+    assert load_settings().log_level == "INFO"
+
+
+def test_settings_module_actually_uses_log_level_enum() -> None:
+    """Structural: confirms config/settings.py genuinely imports and uses
+    LogLevel (Phase 46), rather than validating against a second,
+    separately-maintained hardcoded list - closing the exact gap where
+    LogLevel previously existed as unused dead code with a docstring
+    falsely claiming it validated LOG_LEVEL."""
+    import ast
+    import inspect
+
+    import config.settings as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                imported_names.add(f"{node.module}.{alias.name}")
+
+    assert "config.constants.LogLevel" in imported_names

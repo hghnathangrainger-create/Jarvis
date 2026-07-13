@@ -28,6 +28,8 @@ from typing import Final
 
 from dotenv import load_dotenv
 
+from config.constants import LogLevel
+
 
 class ConfigError(Exception):
     """Raised when configuration is missing, empty, or invalid.
@@ -57,7 +59,14 @@ class Settings:
             False (the default), Jarvis runs entirely rule-based and never calls
             a provider, so no API key or credits are required.
         database_path: Filesystem path to the SQLite database file.
-        log_level: Logging verbosity level (e.g. "DEBUG", "INFO", "WARNING").
+        log_level: Logging verbosity level. Must be one of LogLevel's own
+            values ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
+            validated at load time (Phase 46); the raw environment value
+            is upper-cased before validation, so "debug"/"Debug"/"DEBUG"
+            all normalise to the same stored value. Not yet wired into
+            any actual logging verbosity - see observability/logger.py;
+            this field is currently read, validated, and displayed
+            (ConfigTool/"show config") only.
         approval_timeout_seconds: Seconds to wait for a YELLOW-tier approval
             before the action is aborted.
         debug: Whether the application is running in debug mode.
@@ -256,6 +265,46 @@ def _get_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
     return value
 
 
+def _get_log_level(name: str, default: str) -> str:
+    """Read an optional environment variable and validate it as a log level.
+
+    Deliberately not implemented via _get_choice() (Phase 46): that helper
+    is case-sensitive, and is shared with several other settings (e.g. the
+    voice ones) that must keep their own exact-case behaviour unchanged.
+    This helper preserves LOG_LEVEL's own pre-existing, separate
+    behaviour instead - the raw value is upper-cased before validation,
+    so "debug"/"Debug"/"DEBUG" all normalise to the same accepted value,
+    matching what LOG_LEVEL has always accepted (previously without any
+    validation at all).
+
+    Args:
+        name: The name of the environment variable to read.
+        default: The value to use when the variable is missing or empty.
+            Must already be one of LogLevel's own values.
+
+    Returns:
+        The upper-cased, validated log level string, or the default if
+        unset or empty.
+
+    Raises:
+        ConfigError: If the variable is set (after upper-casing) to a
+            value that is not one of LogLevel's own values.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+
+    value = raw.strip().upper()
+    valid_levels = tuple(level.value for level in LogLevel)
+    if value not in valid_levels:
+        raise ConfigError(
+            f"Environment variable '{name}' must be one of "
+            f"{valid_levels}, got '{raw.strip()}'."
+        )
+
+    return value
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     """Load, validate, and return application configuration.
 
@@ -291,7 +340,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ai_max_tokens=_get_int("AI_MAX_TOKENS", 4096),
         ai_reasoning_enabled=_get_bool("AI_REASONING_ENABLED", False),
         database_path=Path(_get_optional("DATABASE_PATH", "data/jarvis.db")),
-        log_level=_get_optional("LOG_LEVEL", "INFO").upper(),
+        log_level=_get_log_level("LOG_LEVEL", "INFO"),
         approval_timeout_seconds=_get_int("APPROVAL_TIMEOUT_SECONDS", 60),
         debug=_get_bool("DEBUG", False),
         voice_enabled=_get_bool("VOICE_ENABLED", False),
