@@ -8,8 +8,9 @@ Responsibilities:
     - Load configuration and open the same configured SQLite-backed
       Jarvis database main.py uses, independently.
     - Construct MemoryManager, ApprovalHistoryStore,
-      WorkflowHistoryStore, InboxStore, and ScheduleStore, and compose
-      them into a DashboardReadModel.
+      WorkflowHistoryStore, InboxStore, ScheduleStore, and
+      QuarantineStore (Phase 39, Batch 1), and compose them into a
+      DashboardReadModel.
     - Start the tkinter/ttk dashboard window.
 
 Does NOT:
@@ -39,6 +40,7 @@ from dashboard.read_model import DashboardReadModel
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from storage.database import (
     create_database_engine,
@@ -70,7 +72,10 @@ def build_read_model() -> DashboardReadModel:
     workflows = WorkflowHistoryStore(session_factory)
     inbox = InboxStore(session_factory)
     schedules = ScheduleStore(session_factory)
-    return DashboardReadModel(memory, approvals, workflows, inbox, schedules)
+    quarantine = QuarantineStore(session_factory)
+    return DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules, quarantine
+    )
 
 
 def main() -> None:

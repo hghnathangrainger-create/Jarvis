@@ -161,6 +161,109 @@ def test_duplicate_quarantine_path_raises_and_does_not_corrupt_existing_record(
     assert original.original_path == "/a/notes.txt"
 
 
+# --- list_recent (Phase 39, Batch 1) --------------------------------------
+
+
+def test_list_recent_returns_empty_list_when_no_records_exist(
+    store: QuarantineStore,
+) -> None:
+    assert store.list_recent() == []
+
+
+def test_list_recent_returns_recorded_quarantine_records(
+    store: QuarantineStore,
+) -> None:
+    store.record_quarantine(
+        original_path="/a/notes.txt",
+        quarantine_path="/trash/notes__11111111.txt",
+    )
+
+    records = store.list_recent()
+
+    assert len(records) == 1
+    assert records[0].original_path == "/a/notes.txt"
+    assert records[0].quarantine_path == "/trash/notes__11111111.txt"
+
+
+def test_list_recent_orders_newest_first_by_id(store: QuarantineStore) -> None:
+    """Records share created-in-the-same-instant timestamps in a fast
+    test run, so id (not just quarantined_at) must break the tie -
+    mirroring InboxStore.list_recent()'s own
+    (created_at.desc(), id.desc()) ordering exactly."""
+    store.record_quarantine(
+        original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+    )
+    store.record_quarantine(
+        original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+    )
+    store.record_quarantine(
+        original_path="/c/third.txt", quarantine_path="/trash/third__3.txt"
+    )
+
+    records = store.list_recent()
+
+    assert [record.original_path for record in records] == [
+        "/c/third.txt",
+        "/b/second.txt",
+        "/a/first.txt",
+    ]
+
+
+def test_list_recent_respects_limit(store: QuarantineStore) -> None:
+    for i in range(5):
+        store.record_quarantine(
+            original_path=f"/a/file{i}.txt",
+            quarantine_path=f"/trash/file{i}__{i:08d}.txt",
+        )
+
+    records = store.list_recent(limit=2)
+
+    assert len(records) == 2
+
+
+def test_list_recent_clamps_limit_below_one(store: QuarantineStore) -> None:
+    store.record_quarantine(
+        original_path="/a/notes.txt",
+        quarantine_path="/trash/notes__11111111.txt",
+    )
+
+    records = store.list_recent(limit=0)
+
+    assert len(records) == 1
+
+
+def test_list_recent_clamps_limit_above_max(store: QuarantineStore) -> None:
+    for i in range(5):
+        store.record_quarantine(
+            original_path=f"/a/file{i}.txt",
+            quarantine_path=f"/trash/file{i}__{i:08d}.txt",
+        )
+
+    records = store.list_recent(limit=10_000)
+
+    assert len(records) == 5
+
+
+def test_list_recent_does_not_modify_existing_records(
+    store: QuarantineStore,
+) -> None:
+    original = store.record_quarantine(
+        original_path="/a/notes.txt",
+        quarantine_path="/trash/notes__11111111.txt",
+        session_id=7,
+    )
+
+    store.list_recent()
+    store.list_recent()
+
+    unchanged = store.get_by_quarantine_path("/trash/notes__11111111.txt")
+    assert unchanged is not None
+    assert unchanged.id == original.id
+    assert unchanged.original_path == original.original_path
+    assert unchanged.quarantine_path == original.quarantine_path
+    assert unchanged.session_id == original.session_id
+
+
 # --- Structural: write-once, no update/delete/restore/cleanup surface ----------
 
 

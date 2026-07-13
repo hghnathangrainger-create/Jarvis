@@ -3,32 +3,39 @@ read_model.py
 
 Narrow, read-only composition layer over Jarvis's durable stores, for the
 local dashboard (Phase 19; extended Phase 20 with the inbox; extended
-Phase 21 with schedules).
+Phase 21 with schedules; extended Phase 39, Batch 1 with quarantine
+visibility).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
       display (MemoryRow, ApprovalRow, WorkflowRow, WorkflowTransitionRow,
-      InboxRow, ScheduleRow, DashboardOverview).
+      InboxRow, ScheduleRow, QuarantineRow, DashboardOverview).
     - Define DashboardReadModel, which composes MemoryManager,
-      ApprovalHistoryStore, WorkflowHistoryStore, InboxStore, and
-      ScheduleStore's existing public read methods into those view
-      models.
+      ApprovalHistoryStore, WorkflowHistoryStore, InboxStore,
+      ScheduleStore, and (optionally) QuarantineStore's existing public
+      read methods into those view models.
 
 Does NOT:
     - Call any write/mutating method on any store (save, update_content,
       update_category, forget, record_request, record_decision,
       record_timeout, record_transition, append, create, enable, disable,
-      claim_due).
+      claim_due, record_quarantine).
     - Parse CLI output, tool output, or any formatted display string.
     - Import CommandRouter, ToolExecutor, the live ApprovalManager,
       WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
     - Implement a generic CQRS, event-sourcing, or reporting framework.
-      This module exists only to compose the five approved dashboard
-      domains; it has exactly as many methods as the dashboard's six
-      views need, no more.
+      This module exists only to compose the approved dashboard domains;
+      it has exactly as many methods as the dashboard's views need, no
+      more.
     - Truncate, summarise, or otherwise rewrite memory or inbox content
       using AI. Preview truncation here is a fixed, deterministic
       character cut, never a semantic rewrite.
+    - Inspect .jarvis_trash/'s actual filesystem contents for quarantine
+      visibility. get_quarantine_entries() reads only QuarantineStore's
+      own durable database records (Phase 39, Batch 1) - reconciling
+      those records against the live filesystem, if ever needed, is a
+      distinct, separately-reviewed future decision, not part of this
+      narrow read model.
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -38,10 +45,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from approval.approval_history_store import ApprovalHistoryStore
 from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
+from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from scheduling.scheduled_summary_runner import SCHEDULED_SOURCE_TYPE
 from workflow.workflow_history_store import WorkflowHistoryStore
@@ -256,6 +265,38 @@ class ScheduleRow:
 
 
 @dataclass(frozen=True, slots=True)
+class QuarantineRow:
+    """A single quarantined file's durable metadata, shaped for dashboard
+    display (Phase 39).
+
+    This describes a durable QuarantineRecord (Phase 37) only - it does
+    not confirm the file still physically exists at quarantine_path
+    (for example, it may have already been restored, Phase 38, which
+    never deletes or updates the record). It is never a live filesystem
+    listing; QuarantineListTool's own CLI command remains the only thing
+    that reads .jarvis_trash/'s actual current contents.
+
+    Attributes:
+        quarantine_path: The absolute, resolved path the file was moved
+            to inside the quarantine directory.
+        quarantine_name: Just the filename portion of quarantine_path,
+            for a shorter list-view display (derived here, not stored -
+            QuarantineRecord itself has no separate name column).
+        original_path: The absolute, resolved path the file was
+            quarantined from.
+        quarantined_at: UTC-in-substance timestamp of when the file was
+            quarantined.
+        session_id: The session the quarantine happened under, if any.
+    """
+
+    quarantine_path: str
+    quarantine_name: str
+    original_path: str
+    quarantined_at: datetime
+    session_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardOverview:
     """The small, at-a-glance summary shown on the Overview tab.
 
@@ -292,18 +333,27 @@ class DashboardOverview:
 
 
 class DashboardReadModel:
-    """Composes the four approved durable stores into dashboard view models.
+    """Composes the approved durable stores into dashboard view models.
 
     This is the only object the dashboard UI depends on for data. It
     holds no write path of any kind - every method here calls only an
     existing read method already present on MemoryManager,
-    ApprovalHistoryStore, WorkflowHistoryStore, or InboxStore.
+    ApprovalHistoryStore, WorkflowHistoryStore, InboxStore, ScheduleStore,
+    or QuarantineStore.
 
     Attributes:
         _memory: The memory manager to read from.
         _approvals: The approval history store to read from.
         _workflows: The workflow history store to read from.
         _inbox: The inbox store to read from.
+        _schedules: The schedule store to read from.
+        _quarantine: The quarantine store to read from, or None. Optional
+            (Phase 39, Batch 1) - unlike the other five stores, which
+            have always been mandatory here, a caller that has not yet
+            wired one in simply sees an empty quarantine list rather
+            than being forced to construct one just to keep working,
+            matching FileDeleteTool/QuarantineListTool/FileRestoreTool's
+            own established optional-store pattern (Phase 37/38).
     """
 
     def __init__(
@@ -313,8 +363,9 @@ class DashboardReadModel:
         workflows: WorkflowHistoryStore,
         inbox: InboxStore,
         schedules: ScheduleStore,
+        quarantine: QuarantineStore | None = None,
     ) -> None:
-        """Initialise the read model with the five approved durable stores.
+        """Initialise the read model with the approved durable stores.
 
         Args:
             memory: The memory manager to read from.
@@ -322,12 +373,16 @@ class DashboardReadModel:
             workflows: The workflow history store to read from.
             inbox: The inbox store to read from.
             schedules: The schedule store to read from.
+            quarantine: Optional quarantine store to read from. Defaults
+                to None, in which case get_quarantine_entries() safely
+                returns an empty list rather than failing.
         """
         self._memory = memory
         self._approvals = approvals
         self._workflows = workflows
         self._inbox = inbox
         self._schedules = schedules
+        self._quarantine = quarantine
 
     def get_overview(self) -> DashboardOverview:
         """Return the small, real-data-only Overview summary.
@@ -514,6 +569,45 @@ class DashboardReadModel:
                 full_body=record.body,
                 included_count=record.included_count,
                 created_at=record.created_at,
+            )
+            for record in records
+        ]
+
+    def get_quarantine_entries(self, limit: int = 50) -> list[QuarantineRow]:
+        """Return recorded quarantine metadata as QuarantineRows, newest first.
+
+        Reuses QuarantineStore.list_recent() unchanged - no new store API
+        surface is added specifically for the dashboard beyond that one
+        narrow read method (Phase 39, Batch 1). Returns an empty list
+        when no QuarantineStore was supplied (backward compatible with
+        any caller predating Phase 39) or when no quarantine records
+        exist yet - never an error either way.
+
+        This describes durable, database-recorded quarantine metadata
+        only. It does not inspect .jarvis_trash/'s actual filesystem
+        contents, so a row here does not guarantee the file still
+        physically exists at its quarantine_path (for example, if it
+        was already restored, Phase 38, which never deletes or updates
+        the underlying record). Reconciling database records against
+        the live filesystem, if ever needed, is a distinct, separately-
+        reviewed future decision - see the module/class docstrings.
+
+        Args:
+            limit: Maximum number of records to return.
+
+        Returns:
+            A list of QuarantineRow objects, newest first.
+        """
+        if self._quarantine is None:
+            return []
+        records = self._quarantine.list_recent(limit=limit)
+        return [
+            QuarantineRow(
+                quarantine_path=record.quarantine_path,
+                quarantine_name=Path(record.quarantine_path).name,
+                original_path=record.original_path,
+                quarantined_at=record.quarantined_at,
+                session_id=record.session_id,
             )
             for record in records
         ]

@@ -2,15 +2,16 @@
 test_dashboard_read_model.py
 
 Unit tests for dashboard/read_model.py (Phase 19, Batch 1; extended Phase
-20, Batch 2 for the inbox; extended Phase 21, Batch 3 for schedules): the
-narrow, read-only composition layer over MemoryManager,
-ApprovalHistoryStore, WorkflowHistoryStore, InboxStore, and ScheduleStore
-that the dashboard UI depends on.
+20, Batch 2 for the inbox; extended Phase 21, Batch 3 for schedules;
+extended Phase 39, Batch 1 for quarantine visibility): the narrow,
+read-only composition layer over MemoryManager, ApprovalHistoryStore,
+WorkflowHistoryStore, InboxStore, ScheduleStore, and (optionally)
+QuarantineStore that the dashboard UI depends on.
 
 These use a real in-memory SQLite database (not a fake), exercising the
 same storage layer Jarvis uses at runtime, plus a structural (AST-based)
 test proving dashboard/read_model.py never calls a write-capable method on
-any of the five stores.
+any of the six stores.
 
 Run with:
     pytest tests/unit/test_dashboard_read_model.py
@@ -32,6 +33,7 @@ from dashboard.read_model import DashboardReadModel
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
+from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from storage.database import create_session_factory, initialize_database
 from workflow.workflow_history_store import WorkflowHistoryStore
@@ -46,9 +48,10 @@ def _make_read_model() -> tuple[
     WorkflowHistoryStore,
     InboxStore,
     ScheduleStore,
+    QuarantineStore,
 ]:
-    """Build a DashboardReadModel over five stores sharing one fresh
-    in-memory database, plus the five underlying stores themselves so
+    """Build a DashboardReadModel over six stores sharing one fresh
+    in-memory database, plus the six underlying stores themselves so
     tests can seed real data through their own real write methods."""
     engine = create_engine("sqlite:///:memory:")
     initialize_database(engine)
@@ -59,8 +62,11 @@ def _make_read_model() -> tuple[
     workflows = WorkflowHistoryStore(factory)
     inbox = InboxStore(factory)
     schedules = ScheduleStore(factory)
-    read_model = DashboardReadModel(memory, approvals, workflows, inbox, schedules)
-    return read_model, memory, approvals, workflows, inbox, schedules
+    quarantine = QuarantineStore(factory)
+    read_model = DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules, quarantine
+    )
+    return read_model, memory, approvals, workflows, inbox, schedules, quarantine
 
 
 @pytest.fixture()
@@ -71,6 +77,7 @@ def rm() -> tuple[
     WorkflowHistoryStore,
     InboxStore,
     ScheduleStore,
+    QuarantineStore,
 ]:
     return _make_read_model()
 
@@ -79,7 +86,7 @@ def rm() -> tuple[
 
 
 def test_recent_memories_are_newest_first(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     memory.save("first")
     memory.save("second")
     memory.save("third")
@@ -89,7 +96,7 @@ def test_recent_memories_are_newest_first(rm) -> None:
 
 
 def test_memory_preview_unchanged_at_exactly_120_chars(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     content = "x" * 120
     memory.save(content)
 
@@ -99,7 +106,7 @@ def test_memory_preview_unchanged_at_exactly_120_chars(rm) -> None:
 
 
 def test_memory_preview_truncated_above_120_chars(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     content = "y" * 121
     memory.save(content)
 
@@ -109,7 +116,7 @@ def test_memory_preview_truncated_above_120_chars(rm) -> None:
 
 
 def test_memory_row_fields_map_from_real_record(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     memory.save("budget notes", category="project")
 
     row = read_model.get_recent_memories()[0]
@@ -119,7 +126,7 @@ def test_memory_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_memory_category_filter_is_honoured(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     memory.save("a", category="project")
     memory.save("b", category="personal")
 
@@ -129,7 +136,7 @@ def test_memory_category_filter_is_honoured(rm) -> None:
 
 def test_memory_rows_remain_usable_after_call_returns(rm) -> None:
     """Detached data: no lazy-loading, no dependency on an open session."""
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     memory.save("detached check")
 
     rows = read_model.get_recent_memories()
@@ -141,7 +148,7 @@ def test_memory_rows_remain_usable_after_call_returns(rm) -> None:
 
 
 def test_recent_memories_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_memories() == []
 
 
@@ -149,7 +156,7 @@ def test_recent_memories_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_approval_row_fields_map_exactly_from_history(rm) -> None:
-    read_model, _, approvals, _, _, _ = rm
+    read_model, _, approvals, _, _, _, _ = rm
     approvals.record_request(
         request_id="req-1",
         action="forget memory",
@@ -169,7 +176,7 @@ def test_approval_row_fields_map_exactly_from_history(rm) -> None:
 def test_approval_row_reflects_a_recorded_decision(rm) -> None:
     from datetime import datetime, timezone
 
-    read_model, _, approvals, _, _, _ = rm
+    read_model, _, approvals, _, _, _, _ = rm
     approvals.record_request(
         request_id="req-2",
         action="update memory",
@@ -190,7 +197,7 @@ def test_approval_row_reflects_a_recorded_decision(rm) -> None:
 
 
 def test_recent_approvals_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_approvals() == []
 
 
@@ -198,7 +205,7 @@ def test_recent_approvals_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_recent_workflow_ids_are_distinct(rm) -> None:
-    read_model, _, _, workflows, _, _ = rm
+    read_model, _, _, workflows, _, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
 
@@ -207,7 +214,7 @@ def test_recent_workflow_ids_are_distinct(rm) -> None:
 
 
 def test_recent_workflows_ordering_is_deterministic(rm) -> None:
-    read_model, _, _, workflows, _, _ = rm
+    read_model, _, _, workflows, _, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-2", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
@@ -219,7 +226,7 @@ def test_recent_workflows_ordering_is_deterministic(rm) -> None:
 def test_transition_heavy_workflow_does_not_crowd_out_others_in_read_model(
     rm,
 ) -> None:
-    read_model, _, _, workflows, _, _ = rm
+    read_model, _, _, workflows, _, _, _ = rm
     workflows.record_transition(workflow_id="wf-quiet", status="workflow_started")
     for step in range(1, 8):
         workflows.record_transition(
@@ -236,7 +243,7 @@ def test_transition_heavy_workflow_does_not_crowd_out_others_in_read_model(
 
 
 def test_workflow_row_latest_status_matches_store_semantics(rm) -> None:
-    read_model, _, _, workflows, _, _ = rm
+    read_model, _, _, workflows, _, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_step_waiting")
 
@@ -247,7 +254,7 @@ def test_workflow_row_latest_status_matches_store_semantics(rm) -> None:
 
 
 def test_workflow_transitions_are_oldest_first(rm) -> None:
-    read_model, _, _, workflows, _, _ = rm
+    read_model, _, _, workflows, _, _, _ = rm
     workflows.record_transition(workflow_id="wf-1", status="workflow_started")
     workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
 
@@ -256,12 +263,12 @@ def test_workflow_transitions_are_oldest_first(rm) -> None:
 
 
 def test_workflow_transitions_unknown_id_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_workflow_transitions("does-not-exist") == []
 
 
 def test_recent_workflows_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_workflows() == []
 
 
@@ -269,7 +276,7 @@ def test_recent_workflows_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_overview_total_memory_count_uses_the_existing_count_path(rm) -> None:
-    read_model, memory, _, _, _, _ = rm
+    read_model, memory, _, _, _, _, _ = rm
     memory.save("one")
     memory.save("two")
     memory.save("three")
@@ -279,7 +286,7 @@ def test_overview_total_memory_count_uses_the_existing_count_path(rm) -> None:
 
 
 def test_overview_recent_approvals_and_workflows_populated(rm) -> None:
-    read_model, _, approvals, workflows, inbox, _ = rm
+    read_model, _, approvals, workflows, inbox, _, _ = rm
     approvals.record_request(
         request_id="req-1",
         action="delete file",
@@ -297,7 +304,7 @@ def test_overview_recent_approvals_and_workflows_populated(rm) -> None:
 
 
 def test_overview_on_empty_database_is_a_valid_empty_view_model(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     overview = read_model.get_overview()
     assert overview.total_memory_count == 0
     assert overview.recent_approvals == ()
@@ -309,7 +316,7 @@ def test_overview_on_empty_database_is_a_valid_empty_view_model(rm) -> None:
 
 
 def test_overview_scheduled_inbox_count_excludes_interactive_entries(rm) -> None:
-    read_model, _, _, _, inbox, _ = rm
+    read_model, _, _, _, inbox, _, _ = rm
     inbox.append(source_type="web_search_summary", source_query="interactive", body="b")
     inbox.append(
         source_type="scheduled_web_search_summary", source_query="scheduled", body="b"
@@ -326,7 +333,7 @@ def test_overview_scheduled_inbox_count_is_independent_of_any_marker(rm) -> None
     never reads or depends on notice/scheduled_inbox_notice_store.py's
     own CLI-owned marker, so it always reflects every scheduled entry
     ever created, not "since the CLI last checked"."""
-    read_model, _, _, _, inbox, _ = rm
+    read_model, _, _, _, inbox, _, _ = rm
     inbox.append(source_type="scheduled_web_search_summary", source_query="q1", body="b")
     inbox.append(source_type="scheduled_web_search_summary", source_query="q2", body="b")
 
@@ -338,7 +345,7 @@ def test_overview_scheduled_inbox_count_is_independent_of_any_marker(rm) -> None
 
 
 def test_recent_inbox_entries_are_newest_first(rm) -> None:
-    read_model, _, _, _, inbox, _ = rm
+    read_model, _, _, _, inbox, _, _ = rm
     inbox.append(source_type="web_search_summary", source_query="first", body="b")
     inbox.append(source_type="web_search_summary", source_query="second", body="b")
     inbox.append(source_type="web_search_summary", source_query="third", body="b")
@@ -348,7 +355,7 @@ def test_recent_inbox_entries_are_newest_first(rm) -> None:
 
 
 def test_inbox_row_fields_map_from_real_record(rm) -> None:
-    read_model, _, _, _, inbox, _ = rm
+    read_model, _, _, _, inbox, _, _ = rm
     inbox.append(
         source_type="web_search_summary",
         source_query="jarvis news",
@@ -365,7 +372,7 @@ def test_inbox_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_inbox_preview_truncated_above_120_chars(rm) -> None:
-    read_model, _, _, _, inbox, _ = rm
+    read_model, _, _, _, inbox, _, _ = rm
     long_body = "z" * 121
     inbox.append(source_type="web_search_summary", source_query="q", body=long_body)
 
@@ -375,7 +382,7 @@ def test_inbox_preview_truncated_above_120_chars(rm) -> None:
 
 
 def test_recent_inbox_entries_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_inbox_entries() == []
 
 
@@ -383,12 +390,12 @@ def test_recent_inbox_entries_empty_store_returns_empty_list(rm) -> None:
 
 
 def test_get_schedules_empty_store_returns_empty_list(rm) -> None:
-    read_model, _, _, _, _, _ = rm
+    read_model, _, _, _, _, _, _ = rm
     assert read_model.get_schedules() == []
 
 
 def test_get_schedules_returns_real_data_in_id_ascending_order(rm) -> None:
-    read_model, _, _, _, _, schedules = rm
+    read_model, _, _, _, _, schedules, _ = rm
     schedules.create(query="first", time_of_day="08:00")
     schedules.create(query="second", time_of_day="09:00")
 
@@ -397,7 +404,7 @@ def test_get_schedules_returns_real_data_in_id_ascending_order(rm) -> None:
 
 
 def test_schedule_row_fields_map_from_real_record(rm) -> None:
-    read_model, _, _, _, _, schedules = rm
+    read_model, _, _, _, _, schedules, _ = rm
     schedules.create(query="jarvis ai news", time_of_day="08:30", name="Morning news")
 
     row = read_model.get_schedules()[0]
@@ -410,7 +417,7 @@ def test_schedule_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_schedule_row_shows_disabled_state(rm) -> None:
-    read_model, _, _, _, _, schedules = rm
+    read_model, _, _, _, _, schedules, _ = rm
     record = schedules.create(query="q", time_of_day="08:00")
     schedules.disable(record.id)
 
@@ -421,7 +428,7 @@ def test_schedule_row_shows_disabled_state(rm) -> None:
 def test_schedule_row_shows_last_run_at_after_a_claim(rm) -> None:
     from datetime import datetime, timezone
 
-    read_model, _, _, _, _, schedules = rm
+    read_model, _, _, _, _, schedules, _ = rm
     record = schedules.create(query="q", time_of_day="00:00")
     now = datetime.now(timezone.utc)
     schedules.claim_due(record.id, now=now)
@@ -431,7 +438,7 @@ def test_schedule_row_shows_last_run_at_after_a_claim(rm) -> None:
 
 
 def test_schedule_query_preview_truncated_above_120_chars(rm) -> None:
-    read_model, _, _, _, _, schedules = rm
+    read_model, _, _, _, _, schedules, _ = rm
     long_query = "z" * 200
     schedules.create(query=long_query, time_of_day="08:00")
 
@@ -439,9 +446,86 @@ def test_schedule_query_preview_truncated_above_120_chars(rm) -> None:
     assert row.query_preview == ("z" * 120) + "..."
 
 
+# --- get_quarantine_entries (Phase 39, Batch 1) ---------------------------------
+
+
+def test_get_quarantine_entries_empty_store_returns_empty_list(rm) -> None:
+    read_model, _, _, _, _, _, _ = rm
+    assert read_model.get_quarantine_entries() == []
+
+
+def test_get_quarantine_entries_returns_no_store_supplied_safely(
+    rm,
+) -> None:
+    """A read model constructed with no QuarantineStore at all (the
+    Phase 39 default) must return an empty list, never fail - backward
+    compatible with any caller predating this phase."""
+    from dashboard.read_model import DashboardReadModel
+
+    read_model, memory, approvals, workflows, inbox, schedules, _ = rm
+    no_quarantine_model = DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules
+    )
+    assert no_quarantine_model.get_quarantine_entries() == []
+
+
+def test_get_quarantine_entries_returns_real_data_newest_first(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/a/first.txt",
+        quarantine_path="/trash/first__11111111.txt",
+    )
+    quarantine.record_quarantine(
+        original_path="/b/second.txt",
+        quarantine_path="/trash/second__22222222.txt",
+    )
+
+    rows = read_model.get_quarantine_entries()
+    assert [row.original_path for row in rows] == ["/b/second.txt", "/a/first.txt"]
+
+
+def test_quarantine_row_fields_map_from_real_record(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/home/nathan/notes.txt",
+        quarantine_path="/home/nathan/.jarvis_trash/notes__a1b2c3d4.txt",
+        session_id=7,
+    )
+
+    row = read_model.get_quarantine_entries()[0]
+    assert row.original_path == "/home/nathan/notes.txt"
+    assert row.quarantine_path == "/home/nathan/.jarvis_trash/notes__a1b2c3d4.txt"
+    assert row.quarantine_name == "notes__a1b2c3d4.txt"
+    assert row.session_id == 7
+    assert row.quarantined_at is not None
+
+
+def test_quarantine_row_session_id_defaults_to_none(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/a/notes.txt",
+        quarantine_path="/trash/notes__11111111.txt",
+    )
+
+    row = read_model.get_quarantine_entries()[0]
+    assert row.session_id is None
+
+
+def test_get_quarantine_entries_respects_limit(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    for i in range(5):
+        quarantine.record_quarantine(
+            original_path=f"/a/file{i}.txt",
+            quarantine_path=f"/trash/file{i}__{i:08d}.txt",
+        )
+
+    rows = read_model.get_quarantine_entries(limit=2)
+    assert len(rows) == 2
+
+
 # --- structural: no write path -------------------------------------------------
 
-#: Method names, on any of the five stores, that imply a mutation. If
+#: Method names, on any of the six stores, that imply a mutation. If
 #: dashboard/read_model.py ever calls any of these, the read-only boundary
 #: is broken.
 _WRITE_METHOD_NAMES = frozenset(
@@ -459,6 +543,7 @@ _WRITE_METHOD_NAMES = frozenset(
         "enable",
         "disable",
         "claim_due",
+        "record_quarantine",
         # Deliberately NOT "append" or "create": InboxStore.append() and
         # ScheduleStore.create() are real write methods, but this AST scan
         # matches any Call(Attribute) node's attribute name regardless of

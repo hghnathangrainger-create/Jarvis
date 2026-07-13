@@ -6,9 +6,12 @@ Data-access layer for durable quarantine metadata (Phase 37, Batch 1).
 Responsibilities:
     - Record one new QuarantineRecord when a file is successfully
       quarantined (write-once; there is no update method).
-    - Retrieve a single record by its quarantine_path, for a future
-      restore command (or Batch 2's own display extension) to look up
-      a quarantined file's original location.
+    - Retrieve a single record by its quarantine_path, so a restore
+      command (Phase 38) or the quarantine-listing display (Phase 37,
+      Batch 2) can look up a quarantined file's original location.
+    - List recorded quarantine metadata, newest first, for dashboard
+      display (Phase 39) - a read-only listing over the same durable
+      records, never the live filesystem.
 
 Does NOT:
     - Provide any update, delete, restore, or cleanup method. This is a
@@ -40,6 +43,11 @@ from sqlalchemy.orm import sessionmaker
 
 from storage.database import session_scope
 from storage.models import QuarantineRecord
+
+#: Maximum number of records list_recent() will ever return in one
+#: call, matching InboxStore/ScheduleStore's own established convention
+#: for a bounded, dashboard-sized listing.
+_MAX_LIMIT = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +156,59 @@ class QuarantineStore:
             if record is None:
                 return None
             return self._to_view(record)
+
+    def list_recent(self, limit: int = 50) -> list[QuarantineRecordView]:
+        """Return recorded quarantine metadata, newest first.
+
+        A read-only listing intended for dashboard display (Phase 39).
+        This reads only the durable database records already written by
+        record_quarantine() - it never inspects the filesystem or
+        .jarvis_trash/'s actual contents. A row here does not guarantee
+        the underlying file still exists in quarantine (for example, it
+        may have already been restored - Phase 38 never deletes or
+        updates a QuarantineRecord on restore); reconciling database
+        records against the live filesystem, if ever needed, is a
+        distinct, separately-reviewed future decision.
+
+        Args:
+            limit: Maximum number of records to return. Clamped to the
+                range [1, 50].
+
+        Returns:
+            A list of QuarantineRecordView objects, newest first (by
+            quarantined_at, then id, both descending) - mirroring
+            InboxStore.list_recent()'s own append-only-history ordering
+            convention exactly, since quarantine records are likewise
+            write-once and never updated.
+        """
+        safe_limit = self._clamp_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(QuarantineRecord)
+                .order_by(
+                    QuarantineRecord.quarantined_at.desc(),
+                    QuarantineRecord.id.desc(),
+                )
+                .limit(safe_limit)
+                .all()
+            )
+            return [self._to_view(row) for row in rows]
+
+    @staticmethod
+    def _clamp_limit(value: int) -> int:
+        """Clamp a requested limit into a safe range.
+
+        Args:
+            value: The requested limit.
+
+        Returns:
+            An integer between 1 and _MAX_LIMIT, inclusive.
+        """
+        if value < 1:
+            return 1
+        if value > _MAX_LIMIT:
+            return _MAX_LIMIT
+        return value
 
     @staticmethod
     def _to_view(record: QuarantineRecord) -> QuarantineRecordView:
