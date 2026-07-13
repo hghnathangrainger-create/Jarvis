@@ -6,8 +6,10 @@ Structured event logging for the Jarvis AI Operating System.
 Responsibilities:
     - Define the structured Event record that every subsystem emits.
     - Stamp each event with a UTC timestamp and a unique identifier.
-    - Emit events to two destinations: the console (for live visibility) and
-      the append-only audit log (for the permanent record).
+    - Route each event through Python's standard logging module (the
+      intended path to console visibility) and persist it to the
+      append-only audit log - the one destination that is always
+      durable and complete (see the accuracy note below).
     - Provide a simple, uniform API so every subsystem logs events the same way.
 
 Does NOT:
@@ -15,10 +17,24 @@ Does NOT:
     - Implement AI logic.
     - Implement Memory logic.
     - Persist events itself (persistence is delegated to security.audit_log).
+    - Configure any logging handler or level (Phase 48; see
+      docs/phase_47_logging_console_visibility_plan.md for the full
+      investigation). No production entry point (main.py, scheduler.py)
+      attaches a handler or sets a level today, so console visibility is
+      not fully configured: WARNING/ERROR-level events (BLOCKED/TIMEOUT/
+      FAILURE outcomes) may still appear via Python's own
+      logging.lastResort fallback handler, but INFO-level events (every
+      GREEN/successful outcome - the majority of what Jarvis does) are
+      not guaranteed to appear on the console at all without a future
+      handler-configuration phase.
 
 This module is the single entry point for structured logging. No subsystem
 should write to the console or the audit log directly; all events flow
 through the EventLogger so that format and destinations stay consistent.
+The append-only audit log (security.audit_log.AuditLog) is unaffected by any
+of the above and remains the durable, permanent record regardless of console
+configuration - every existing history command ("show approval history",
+"show workflow history") and the dashboard's read-only tabs read from it.
 """
 
 from __future__ import annotations
@@ -98,13 +114,19 @@ class Event:
 class EventLogger:
     """Builds, emits, and persists structured events.
 
-    The EventLogger is the uniform logging API for every subsystem. It writes
-    each event to the console for live visibility and to the append-only audit
-    log for the permanent record.
+    The EventLogger is the uniform logging API for every subsystem. It routes
+    each event through the standard-library logging module and persists it to
+    the append-only audit log for the permanent record. The audit log write
+    always succeeds regardless of logging configuration; console visibility
+    depends on handler/level configuration that no production entry point
+    currently sets up (see module docstring above for the full accuracy note).
 
     Attributes:
-        _audit_log: The append-only audit log events are persisted to.
-        _logger: The standard-library logger used for console output.
+        _audit_log: The append-only audit log events are persisted to -
+            always durable, regardless of console logging configuration.
+        _logger: The standard-library logger events are routed through.
+            Not guaranteed to produce visible console output for INFO-level
+            (GREEN/successful) events today - see module docstring above.
     """
 
     def __init__(self, audit_log: AuditLog) -> None:
@@ -120,8 +142,15 @@ class EventLogger:
     def log(self, event: Event) -> str:
         """Emit a fully constructed event to all destinations.
 
-        The event is written to the console at a level derived from its
-        outcome, then persisted to the append-only audit log.
+        The event is routed to the standard-library logger at a level
+        derived from its outcome, then persisted to the append-only audit
+        log. The audit log write always durably succeeds. The logging call
+        does not guarantee visible console output today: no production
+        entry point configures a handler or level, so WARNING/ERROR-level
+        events (BLOCKED/TIMEOUT/FAILURE) may appear via Python's own
+        logging.lastResort fallback, while INFO-level events (GREEN/
+        successful outcomes) are not guaranteed to appear on the console at
+        all (see the module docstring's accuracy note).
 
         Args:
             event: The event to emit.
