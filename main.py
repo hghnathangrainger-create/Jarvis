@@ -23,6 +23,14 @@ Responsibilities:
       this always yields a disabled, provider-less service, and
       JarvisCLI._handle_voice_input_once() (not reachable from the
       interactive typed-input loop yet) remains a safe no-op.
+    - Configure console logging (Phase 54, Batch 1) via
+      observability.logging_setup.configure_console_logging(), called
+      once, directly inside main() - never inside build_orchestrator(),
+      so the many existing tests that call build_orchestrator() directly
+      are completely unaffected. Idempotent: attaches at most one console
+      handler to the "jarvis" app logger regardless of how many times
+      it is called in a single process. Uses the already-validated
+      settings.log_level (Phase 46) - no new setting.
     - Start the terminal CLI.
 
 Does NOT:
@@ -35,6 +43,9 @@ Does NOT:
       voice/tts.py's/voice/stt.py's own silent, audio-free fake
       providers - never real audio - and neither value is set by
       default.
+    - Wire console logging into scheduler.py yet (Phase 54, Batch 2,
+      not yet done) or into dashboard.py (which has no logging calls
+      of any kind and is not part of this phase's scope at all).
     - Contain any business logic; it only assembles the system and starts it.
 
 This module is the single composition root for Phase 1. It is the one place
@@ -61,6 +72,7 @@ from memory.memory_manager import MemoryManager
 from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
 from notice.scheduled_inbox_notice_store import ScheduledInboxNoticeStore
 from observability.logger import EventLogger
+from observability.logging_setup import configure_console_logging
 from planner.planner import Planner
 from quarantine.quarantine_store import QuarantineStore
 from security.audit_log import AuditLog
@@ -479,6 +491,12 @@ def main() -> None:
     startup_notice = build_startup_notice()
     voice_output, speak_responses = build_voice_output_service()
     voice_input = build_voice_input_service()
+    # Phase 54, Batch 1: console logging is configured here, directly in
+    # the real process entry point - never inside build_orchestrator(),
+    # so the many existing tests that call build_orchestrator() directly
+    # are never affected. Idempotent - see configure_console_logging()'s
+    # own docstring.
+    configure_console_logging(load_settings())
     cli = JarvisCLI(
         orchestrator,
         startup_notice=startup_notice,
