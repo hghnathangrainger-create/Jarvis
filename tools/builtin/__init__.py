@@ -56,7 +56,13 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
       Jarvis-managed .jarvis_trash/ directory (Phase 35) - it is never
       permanently destroyed. Never overwrites a file already in
       quarantine, never touches symlinks or directories, and has no
-      companion restore/empty-trash command in this phase.
+      companion empty-trash command.
+    - FileRestoreTool: restores one previously-quarantined file back to
+      its recorded original location (Phase 38) - only when a durable
+      QuarantineRecord (Phase 37) exists for it. Never overwrites an
+      existing file, never creates the original parent folder, never
+      copies (always moves), and never permanently deletes or mutates
+      quarantine metadata.
     - MemoryUpdateTool: updates a memory's content or category by id.
     - MemoryForgetTool: forgets one specific memory by id; no bulk delete.
     - ScheduleCreateTool: creates a new daily web-search-summary schedule
@@ -67,11 +73,12 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
       only way to stop a schedule from running; there is no delete tool.
 
 No built-in tool edits in place, installs software, runs commands, or
-controls the computer. FileMoveTool and FileDeleteTool are the sole
-exceptions to "no move" - one relocates a file to a Nathan-chosen
-destination, the other relocates it into Jarvis's own quarantine
-directory - and neither ever overwrites an existing destination or
-permanently destroys anything.
+controls the computer. FileMoveTool, FileDeleteTool, and FileRestoreTool
+are the sole exceptions to "no move" - one relocates a file to a
+Nathan-chosen destination, one relocates it into Jarvis's own
+quarantine directory, and the third relocates a quarantined file back
+to its recorded original location - and none of the three ever
+overwrites an existing destination or permanently destroys anything.
 """
 
 from __future__ import annotations
@@ -86,6 +93,7 @@ from tools.builtin.file_delete_tool import FileDeleteTool
 from tools.builtin.file_list_tool import FileListTool
 from tools.builtin.file_move_tool import FileMoveTool
 from tools.builtin.file_read_tool import FileReadTool
+from tools.builtin.file_restore_tool import FileRestoreTool
 from tools.builtin.file_search_tool import FileSearchTool
 from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
@@ -115,6 +123,7 @@ __all__ = [
     "FileCopyTool",
     "FileMoveTool",
     "FileDeleteTool",
+    "FileRestoreTool",
     "MemoryUpdateTool",
     "MemoryForgetTool",
     "WorkflowHistoryTool",

@@ -166,6 +166,12 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("move memory", SecurityTier.YELLOW, "Moving a memory to another category changes it and must be confirmed."),
     _Rule("delete file", SecurityTier.YELLOW, "Deleting a file changes state and should be confirmed."),
     _Rule("delete folder", SecurityTier.YELLOW, "Deleting a folder changes state and should be confirmed."),
+    # Phase 38: restoring a quarantined file changes the filesystem (a
+    # new file appears at its original path, and the quarantine copy
+    # disappears), so it needs its own dedicated, reason-bearing rule -
+    # matching how "copy file"/"move file" each got their own entry
+    # rather than relying on the generic YELLOW default fallback.
+    _Rule("restore file", SecurityTier.YELLOW, "Restoring a quarantined file changes the filesystem and should be confirmed."),
     _Rule("delete", SecurityTier.YELLOW, "Deletion changes state and should be confirmed."),
     _Rule("remove", SecurityTier.YELLOW, "Removing data changes state and should be confirmed."),
     _Rule("send email", SecurityTier.YELLOW, "Sending an email communicates on your behalf."),

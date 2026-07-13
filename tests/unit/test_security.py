@@ -313,6 +313,47 @@ def test_quarantine_list_rule_does_not_affect_unrelated_existing_classifications
     assert manager.classify_action("format drive").is_blocked
 
 
+# --- Phase 38: quarantine restore classification --------------------------------
+
+
+def test_restore_file_requires_confirmation(manager: SecurityManager) -> None:
+    """Confirms the new "restore file" YELLOW rule added for Phase 38 -
+    exactly what FileRestoreTool.action_for() classifies against."""
+    decision = manager.classify_action("restore file")
+    assert decision.requires_confirmation
+    assert not decision.is_allowed_automatically
+    assert not decision.is_blocked
+    reason = decision.reason.lower()
+    assert "filesystem" in reason or "restor" in reason or "confirm" in reason
+    assert decision.matched_keyword == "restore file"
+
+
+def test_restore_file_classification_is_input_independent(
+    manager: SecurityManager,
+) -> None:
+    """The fixed action string is classified the same way regardless of
+    what quarantine path a caller might have appended (FileRestoreTool.
+    action_for() never does this, but the rule itself must not depend
+    on it either)."""
+    decision = manager.classify_action("restore file ../../../etc/passwd")
+    assert decision.requires_confirmation
+    assert decision.matched_keyword == "restore file"
+
+
+def test_restore_file_rule_does_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does not
+    touch remains exactly as it was."""
+    assert manager.classify_action("delete file notes.txt").requires_confirmation
+    assert manager.classify_action("move file a.txt to b.txt").requires_confirmation
+    assert manager.classify_action("copy file a.txt to b.txt").requires_confirmation
+    assert manager.classify_action("list quarantine").is_allowed_automatically
+    assert manager.classify_action("show quarantine").is_allowed_automatically
+    assert manager.classify_action("delete all files").is_blocked
+    assert manager.classify_action("format drive").is_blocked
+
+
 # --- Input validation --------------------------------------------------------
 
 
