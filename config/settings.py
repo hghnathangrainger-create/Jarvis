@@ -82,6 +82,21 @@ class Settings:
             voice/tts.py's own silent, audio-free test/wiring provider -
             never real audio). No real TTS engine value exists yet;
             Nathan has not chosen one (docs/phase_41_implementation_plan.md).
+        voice_input_enabled: Whether the voice input subsystem is
+            switched on at all (Phase 41, Batch 4). When False (the
+            default), no STT provider is ever constructed and nothing
+            in the CLI ever attempts to transcribe anything - Jarvis
+            behaves exactly as it always has. There is no microphone,
+            no audio capture, and no real STT provider yet regardless
+            of this flag; see voice_input_provider.
+        voice_input_provider: Which SpeechToTextProvider to construct,
+            if any. One of "none" (no provider is constructed; voice
+            input is inactive regardless of voice_input_enabled - the
+            default) or "fake" (constructs FakeSpeechToTextProvider,
+            voice/stt.py's own silent, microphone-free test/wiring
+            provider - never real audio or a real microphone). No real
+            STT engine value exists yet; Nathan has not chosen one
+            (docs/phase_41_implementation_plan.md).
     """
 
     anthropic_api_key: str
@@ -95,6 +110,8 @@ class Settings:
     voice_enabled: bool = False
     voice_speak_mode: str = "off"
     voice_provider: str = "none"
+    voice_input_enabled: bool = False
+    voice_input_provider: str = "none"
 
 
 def _get_required(name: str) -> str:
@@ -280,4 +297,8 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         voice_enabled=_get_bool("VOICE_ENABLED", False),
         voice_speak_mode=_get_choice("VOICE_SPEAK_MODE", "off", ("off", "all")),
         voice_provider=_get_choice("VOICE_PROVIDER", "none", ("none", "fake")),
+        voice_input_enabled=_get_bool("VOICE_INPUT_ENABLED", False),
+        voice_input_provider=_get_choice(
+            "VOICE_INPUT_PROVIDER", "none", ("none", "fake")
+        ),
     )

@@ -132,6 +132,7 @@ def test_main_passes_startup_notice_into_jarvis_cli(
             startup_notice=None,
             voice_output=None,
             speak_responses=False,
+            voice_input=None,
         ) -> None:
             captured["orchestrator"] = orchestrator
             captured["startup_notice"] = startup_notice

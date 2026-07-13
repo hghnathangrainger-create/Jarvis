@@ -5,7 +5,9 @@ Terminal interface for the Jarvis AI Operating System.
 
 Responsibilities:
     - Start an interactive read-eval-print loop on the terminal.
-    - Pass each typed request to JarvisOrchestrator.handle_request().
+    - Pass each typed request to JarvisOrchestrator.handle_request()
+      through _handle_text_request() - the single, shared entry point
+      every request source in this CLI uses, regardless of origin.
     - Format and print the response, clearly distinguishing OK, NEEDS
       CONFIRMATION, BLOCKED, and NOT HANDLED outcomes.
     - When a response carries an approval request (a YELLOW action), present
@@ -16,10 +18,19 @@ Responsibilities:
     - Optionally speak a response's message through an injected
       VoiceOutputService (Phase 41, Batch 2), best-effort, if both a
       service was supplied and speak_responses is True. Off by default.
+    - Optionally produce one request string via an injected
+      VoiceInputService (Phase 41, Batch 4, fake provider only) through
+      _handle_voice_input_once(), then hand it to the exact same
+      _handle_text_request() typed input uses - never a shortcut, never
+      a separate execution path. Not reachable from the interactive
+      typed-input loop yet; this exists so voice-originated routing can
+      be proven safe now, ahead of a future batch's real push-to-talk
+      trigger.
 
 Does NOT:
-    - Call the Claude API, add phone support, add a microphone, or add
-      speech-to-text of any kind.
+    - Call the Claude API, add phone support, add a microphone, or
+      capture real audio of any kind. No real speech-to-text or
+      text-to-speech engine is wired in anywhere in this project yet.
     - Execute approved actions itself (that is handled in a later step) or
       bypass the Core or ToolExecutor.
     - Implement orchestration, planning, or security logic.
@@ -33,6 +44,13 @@ Does NOT:
       routed to CommandRouter, or passed to ToolExecutor/ApprovalManager/
       any AI component. Speaking happens strictly after the response is
       already fully decided.
+    - Treat a voice-originated transcription as anything other than an
+      ordinary request string. It is never trusted more or less than
+      typed input, never given a shortcut around CommandRouter/
+      SecurityManager/ApprovalManager, and never executed directly by
+      voice code - _handle_voice_input_once() only ever produces a
+      string and forwards it to _handle_text_request(), the exact same
+      method the typed-input loop calls.
 
 The CLI is a thin presentation layer. All decisions about risk are made by the
 Core and Security Manager; the CLI only reads input, forwards it, prints what
@@ -50,6 +68,7 @@ from config.constants import APP_NAME, STARTUP_BANNER
 from core.orchestrator import JarvisOrchestrator
 from core.request_models import JarvisResponse
 from ui.approval_prompt import prompt_for_approval
+from voice.input import VoiceInputService
 from voice.output import VoiceOutputService
 
 #: Commands that end the session, matched case-insensitively.
@@ -225,6 +244,12 @@ class JarvisCLI:
             `enabled` flag is a second, independent gate on top of this
             one; both must allow it for a provider to actually be
             called.
+        _voice_input: Optional VoiceInputService to produce a request
+            string through (Phase 41, Batch 4, fake provider only).
+            None by default - no transcription is ever attempted unless
+            one is explicitly supplied. Entirely independent of
+            _voice_output/_speak_responses: enabling one never enables
+            or requires the other.
     """
 
     def __init__(
@@ -236,6 +261,7 @@ class JarvisCLI:
         startup_notice: str | None = None,
         voice_output: VoiceOutputService | None = None,
         speak_responses: bool = False,
+        voice_input: VoiceInputService | None = None,
     ) -> None:
         """Initialise the CLI.
 
@@ -256,6 +282,11 @@ class JarvisCLI:
                 response. Defaults to False (opt-in) - even with a
                 voice_output supplied, nothing is spoken unless this is
                 also explicitly True.
+            voice_input: Optional VoiceInputService to produce a
+                request string through _handle_voice_input_once().
+                Defaults to None, in which case that method is a safe
+                no-op. Independent of voice_output/speak_responses -
+                neither setting affects the other.
         """
         self._orchestrator = orchestrator
         self._input = input_fn
@@ -263,6 +294,7 @@ class JarvisCLI:
         self._startup_notice = startup_notice
         self._voice_output = voice_output
         self._speak_responses = speak_responses
+        self._voice_input = voice_input
 
     def run(self) -> None:
         """Run the interactive loop until an exit command or end of input.
@@ -289,12 +321,59 @@ class JarvisCLI:
                 self._output(_GOODBYE)
                 return
 
-            response = self._orchestrator.handle_request(text)
-            self._output(format_response(response))
-            self._speak_if_enabled(response.message)
+            self._handle_text_request(text)
 
-            if response.approval_request is not None:
-                self._handle_approval(response)
+    def _handle_text_request(self, text: str) -> None:
+        """Handle one already-produced request string through the Core.
+
+        This is the single, shared entry point every request source in
+        this CLI uses - the typed-input loop above calls it directly,
+        and _handle_voice_input_once() (Phase 41, Batch 4) calls it with
+        a transcribed string, with no separate or shortened path for
+        either origin. The text is forwarded to
+        JarvisOrchestrator.handle_request() exactly as received - it is
+        never re-interpreted or treated differently based on where it
+        came from.
+
+        Args:
+            text: The request text to handle - typed, or, since Batch
+                4, transcribed by a (currently fake-only) voice input
+                provider.
+        """
+        response = self._orchestrator.handle_request(text)
+        self._output(format_response(response))
+        self._speak_if_enabled(response.message)
+
+        if response.approval_request is not None:
+            self._handle_approval(response)
+
+    def _handle_voice_input_once(self) -> None:
+        """Transcribe once via _voice_input, if active, and route the
+        result through _handle_text_request() - the exact same path
+        typed input uses.
+
+        Not reachable from the interactive typed-input loop yet; this
+        exists so voice-originated routing can be proven safe now (see
+        tests/unit/test_cli.py's adversarial approval-bypass proofs),
+        ahead of a future batch's real push-to-talk trigger, which will
+        call this method (or an equivalent) once a real recording
+        mechanism exists. Only ever produces a plain string and hands
+        it to _handle_text_request() - this method never constructs a
+        ToolRequest, never calls CommandRouter/ToolExecutor/
+        ApprovalManager directly, and never executes anything itself.
+
+        Safe no-op when _voice_input is None, inactive (disabled or
+        provider-less), or produces no usable transcription - nothing
+        is handled in any of those cases.
+        """
+        if self._voice_input is None:
+            return
+
+        result = self._voice_input.transcribe()
+        if not result.success or not result.text.strip():
+            return
+
+        self._handle_text_request(result.text)
 
     def _speak_if_enabled(self, text: str) -> None:
         """Best-effort speak the given text, if voice output is opted in.

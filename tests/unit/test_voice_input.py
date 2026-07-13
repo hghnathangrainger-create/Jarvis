@@ -1,14 +1,16 @@
 """
 test_voice_input.py
 
-Unit tests for VoiceInputService (voice/input.py), Phase 41, Batch 3.
+Unit tests for VoiceInputService (voice/input.py), Phase 41, Batch 3;
+extended Batch 4 to reflect main.py/ui/cli.py now wiring it in.
 
 These use only the fake provider (voice.stt.FakeSpeechToTextProvider) -
 no real audio, no microphone, no network. Structural (AST-based) tests
 confirm this module never imports anything from the execution/mutation
-side of Jarvis, and that no default runtime path (main.py, ui/cli.py)
-wires it in - Batch 3 is foundation only, exactly like voice/output.py
-began in Batch 1 before being wired into the CLI in Batch 2.
+side of Jarvis, and that main.py/ui/cli.py's own voice input wiring
+(proven in detail in test_main_voice_input_wiring.py and the adversarial
+approval-bypass tests in test_cli.py) never pulls in a real audio/
+microphone/network library either.
 
 Run with:
     pytest tests/unit/test_voice_input.py
@@ -204,11 +206,11 @@ def test_voice_input_module_imports_no_forbidden_components() -> None:
     assert not (imported_names & forbidden), imported_names
 
 
-def test_main_does_not_import_voice_input_yet() -> None:
-    """Batch 3 must not change default runtime behaviour - main.py does
-    not construct or import VoiceInputService yet (it does construct
-    VoiceOutputService, from Batch 2 - this checks specifically for the
-    input side, which remains unwired)."""
+def test_main_imports_voice_input_but_no_real_audio_dependency() -> None:
+    """Phase 41, Batch 4: main.py now wires VoiceInputService in (see
+    tests/unit/test_main_voice_input_wiring.py for the full wiring
+    proof), but it must still never import a real audio/microphone/
+    network library - only the fake, silent provider exists."""
     source = Path("main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
@@ -218,11 +220,18 @@ def test_main_does_not_import_voice_input_yet() -> None:
             for alias in node.names:
                 imported_names.add(f"{node.module}.{alias.name}")
 
-    assert "voice.input.VoiceInputService" not in imported_names
-    assert "voice.stt.FakeSpeechToTextProvider" not in imported_names
+    assert "voice.input.VoiceInputService" in imported_names
+
+    forbidden = {"pyaudio", "sounddevice", "whisper", "speech_recognition", "pyttsx3", "win32com"}
+    top_level_modules = {name.split(".")[0] for name in imported_names}
+    assert not (top_level_modules & forbidden), imported_names
 
 
-def test_ui_cli_does_not_import_voice_input_yet() -> None:
+def test_ui_cli_imports_voice_input_but_no_real_audio_dependency() -> None:
+    """Phase 41, Batch 4: ui/cli.py now accepts an optional
+    VoiceInputService (see tests/unit/test_cli.py for the full
+    behavioural and adversarial approval-bypass proof), but must still
+    never import a real audio library itself."""
     source = Path("ui/cli.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
@@ -232,4 +241,8 @@ def test_ui_cli_does_not_import_voice_input_yet() -> None:
             for alias in node.names:
                 imported_names.add(f"{node.module}.{alias.name}")
 
-    assert "voice.input.VoiceInputService" not in imported_names
+    assert "voice.input.VoiceInputService" in imported_names
+
+    forbidden = {"pyaudio", "sounddevice", "whisper", "speech_recognition", "pyttsx3", "win32com"}
+    top_level_modules = {name.split(".")[0] for name in imported_names}
+    assert not (top_level_modules & forbidden), imported_names

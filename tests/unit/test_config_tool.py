@@ -44,7 +44,12 @@ def _settings(*, api_key: str = _REAL_API_KEY) -> Settings:
 
 
 def _settings_with_voice(
-    *, voice_enabled: bool = False, voice_speak_mode: str = "off", voice_provider: str = "none"
+    *,
+    voice_enabled: bool = False,
+    voice_speak_mode: str = "off",
+    voice_provider: str = "none",
+    voice_input_enabled: bool = False,
+    voice_input_provider: str = "none",
 ) -> Settings:
     return Settings(
         anthropic_api_key=_REAL_API_KEY,
@@ -58,6 +63,8 @@ def _settings_with_voice(
         voice_enabled=voice_enabled,
         voice_speak_mode=voice_speak_mode,
         voice_provider=voice_provider,
+        voice_input_enabled=voice_input_enabled,
+        voice_input_provider=voice_input_provider,
     )
 
 
@@ -83,6 +90,8 @@ def test_reports_every_non_secret_field() -> None:
     assert "Voice enabled: False" in result.output
     assert "Voice speak mode: off" in result.output
     assert "Voice provider: none" in result.output
+    assert "Voice input enabled: False" in result.output
+    assert "Voice input provider: none" in result.output
 
 
 def test_reports_debug_true_when_set() -> None:
@@ -127,13 +136,17 @@ def test_voice_fields_default_to_safe_disabled_values() -> None:
 
 
 def test_no_voice_field_is_or_resembles_a_secret() -> None:
-    """None of the three voice fields is a credential/API key, so
-    (unlike anthropic_api_key) they are always shown in full - this
-    confirms no secret-shaped value ever needs redacting here."""
+    """None of the voice fields is a credential/API key, so (unlike
+    anthropic_api_key) they are always shown in full - this confirms no
+    secret-shaped value ever needs redacting here."""
     result = _run(
         ConfigTool(
             _settings_with_voice(
-                voice_enabled=True, voice_speak_mode="all", voice_provider="fake"
+                voice_enabled=True,
+                voice_speak_mode="all",
+                voice_provider="fake",
+                voice_input_enabled=True,
+                voice_input_provider="fake",
             )
         )
     )
@@ -143,6 +156,37 @@ def test_no_voice_field_is_or_resembles_a_secret() -> None:
     assert lowered.count("api key: ") == 1
     for forbidden in ("secret", "credential"):
         assert forbidden not in lowered
+
+
+# --- voice input fields (Phase 41, Batch 4): safe, non-secret, shown in full --
+
+
+def test_reports_voice_input_enabled_true_when_set() -> None:
+    result = _run(ConfigTool(_settings_with_voice(voice_input_enabled=True)))
+    assert "Voice input enabled: True" in result.output
+
+
+def test_reports_voice_input_provider_fake_when_set() -> None:
+    result = _run(ConfigTool(_settings_with_voice(voice_input_provider="fake")))
+    assert "Voice input provider: fake" in result.output
+
+
+def test_voice_input_fields_default_to_safe_disabled_values() -> None:
+    result = _run(ConfigTool(_settings_with_voice()))
+    assert "Voice input enabled: False" in result.output
+    assert "Voice input provider: none" in result.output
+
+
+def test_voice_input_fields_are_independent_of_voice_output_fields() -> None:
+    """Enabling voice output must not affect the displayed voice input
+    fields, and vice versa - they are reported independently."""
+    result = _run(
+        ConfigTool(
+            _settings_with_voice(voice_enabled=True, voice_input_enabled=False)
+        )
+    )
+    assert "Voice enabled: True" in result.output
+    assert "Voice input enabled: False" in result.output
 
 
 # --- API key handling: set/not-set only, never the value ---------------------

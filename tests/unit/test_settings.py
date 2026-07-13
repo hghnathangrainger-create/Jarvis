@@ -2,10 +2,11 @@
 test_settings.py
 
 Unit tests for config/settings.py's voice-related fields (Phase 41,
-Batch 2): voice_enabled, voice_speak_mode, voice_provider.
+Batch 2: voice_enabled, voice_speak_mode, voice_provider; Phase 41,
+Batch 4: voice_input_enabled, voice_input_provider).
 
-No dedicated unit test file existed for config/settings.py before this
-batch (load_settings() was previously only exercised indirectly, via
+No dedicated unit test file existed for config/settings.py before Batch
+2 (load_settings() was previously only exercised indirectly, via
 main.build_orchestrator() and various integration tests) - this file is
 scoped narrowly to the new voice fields only, not a general audit of
 every existing setting.
@@ -34,6 +35,8 @@ def _hermetic_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("VOICE_ENABLED", raising=False)
     monkeypatch.delenv("VOICE_SPEAK_MODE", raising=False)
     monkeypatch.delenv("VOICE_PROVIDER", raising=False)
+    monkeypatch.delenv("VOICE_INPUT_ENABLED", raising=False)
+    monkeypatch.delenv("VOICE_INPUT_PROVIDER", raising=False)
 
 
 # --- defaults -----------------------------------------------------------------
@@ -109,13 +112,69 @@ def test_empty_voice_speak_mode_falls_back_to_default(
     assert load_settings().voice_speak_mode == "off"
 
 
+# --- voice input fields (Phase 41, Batch 4) -------------------------------------
+
+
+def test_voice_input_enabled_defaults_to_false() -> None:
+    assert load_settings().voice_input_enabled is False
+
+
+def test_voice_input_provider_defaults_to_none() -> None:
+    assert load_settings().voice_input_provider == "none"
+
+
+def test_voice_input_enabled_true_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOICE_INPUT_ENABLED", "true")
+    assert load_settings().voice_input_enabled is True
+
+
+def test_voice_input_provider_fake_is_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOICE_INPUT_PROVIDER", "fake")
+    assert load_settings().voice_input_provider == "fake"
+
+
+def test_invalid_voice_input_provider_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOICE_INPUT_PROVIDER", "whisper")
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_voice_input_enabled_is_independent_of_voice_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabling voice output must never implicitly enable voice input,
+    and vice versa - they are two separate settings."""
+    monkeypatch.setenv("VOICE_ENABLED", "true")
+    settings = load_settings()
+    assert settings.voice_enabled is True
+    assert settings.voice_input_enabled is False
+
+
+def test_voice_enabled_is_independent_of_voice_input_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOICE_INPUT_ENABLED", "true")
+    settings = load_settings()
+    assert settings.voice_input_enabled is True
+    assert settings.voice_enabled is False
+
+
 # --- no secret voice fields exist -----------------------------------------------
 
 
 def test_no_voice_field_is_treated_as_a_secret() -> None:
-    """Structural: none of the three voice settings is a credential or
+    """Structural: none of the five voice settings is a credential or
     API key - none should ever need redaction the way
     anthropic_api_key does."""
     settings = load_settings()
-    for forbidden_name in ("voice_api_key", "voice_secret", "voice_token"):
+    for forbidden_name in (
+        "voice_api_key",
+        "voice_secret",
+        "voice_token",
+        "voice_input_api_key",
+        "voice_input_secret",
+        "voice_input_token",
+    ):
         assert not hasattr(settings, forbidden_name)

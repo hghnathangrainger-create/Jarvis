@@ -3,7 +3,7 @@ config_tool.py
 
 A safe, read-only tool that reports Jarvis's current configuration
 status (Phase 31; extended Phase 41, Batch 2 with voice output
-settings).
+settings; extended Phase 41, Batch 4 with voice input settings).
 
 ConfigTool is a GREEN tool: it only reads the already-loaded Settings
 object (never .env or os.environ directly) and reports its fields back
@@ -14,9 +14,10 @@ The one secret field, anthropic_api_key, is reported only as "set" or
 "not set" - never as a value, a masked/partial value, a length, or a
 hash/fingerprint. Every other Settings field is plain, non-secret
 configuration and is shown in full - including voice_enabled,
-voice_speak_mode, and voice_provider (Phase 41), none of which is a
-secret: no API key or credential exists for the fake/local-only voice
-foundation built so far.
+voice_speak_mode, voice_provider, voice_input_enabled, and
+voice_input_provider (Phase 41), none of which is a secret: no API key
+or credential exists for the fake/local-only voice foundation built so
+far.
 """
 
 from __future__ import annotations
@@ -105,5 +106,7 @@ class ConfigTool(BaseTool):
             f"  Voice enabled: {self._settings.voice_enabled}",
             f"  Voice speak mode: {self._settings.voice_speak_mode}",
             f"  Voice provider: {self._settings.voice_provider}",
+            f"  Voice input enabled: {self._settings.voice_input_enabled}",
+            f"  Voice input provider: {self._settings.voice_input_provider}",
         )
         return self.ok("\n".join(lines))

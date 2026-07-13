@@ -17,15 +17,24 @@ Responsibilities:
       best-effort composition step. With VOICE_ENABLED unset/false (the
       default), this always yields a disabled, provider-less service and
       changes nothing about how Jarvis runs.
+    - Independently build the Phase 41, Batch 4 voice input service
+      (see build_voice_input_service()) - the same pattern, for the
+      input side. With VOICE_INPUT_ENABLED unset/false (the default),
+      this always yields a disabled, provider-less service, and
+      JarvisCLI._handle_voice_input_once() (not reachable from the
+      interactive typed-input loop yet) remains a safe no-op.
     - Start the terminal CLI.
 
 Does NOT:
     - Call the Claude API unless AI_REASONING_ENABLED=true (Phase 7, Batch 2).
-    - Add phone support, a microphone, or speech-to-text of any kind.
-    - Construct a real text-to-speech engine. VOICE_PROVIDER="fake" (the
-      only non-default value accepted today) only ever constructs
-      voice/tts.py's own silent, audio-free FakeTextToSpeechProvider -
-      never real audio - and no such value is set by default.
+    - Add phone support, a microphone, or real speech-to-text of any
+      kind - no audio is ever captured anywhere in this project.
+    - Construct a real text-to-speech or speech-to-text engine.
+      VOICE_PROVIDER="fake"/VOICE_INPUT_PROVIDER="fake" (the only
+      non-default values accepted today) only ever construct
+      voice/tts.py's/voice/stt.py's own silent, audio-free fake
+      providers - never real audio - and neither value is set by
+      default.
     - Contain any business logic; it only assembles the system and starts it.
 
 This module is the single composition root for Phase 1. It is the one place
@@ -92,7 +101,9 @@ from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from ui.cli import JarvisCLI
+from voice.input import VoiceInputService
 from voice.output import VoiceOutputService
+from voice.stt import FakeSpeechToTextProvider, SpeechToTextProvider
 from voice.tts import FakeTextToSpeechProvider, TextToSpeechProvider
 from web.safe_web_fetcher import SafeWebFetcher
 from workflow.engine import WorkflowEngine
@@ -422,16 +433,54 @@ def build_voice_output_service() -> tuple[VoiceOutputService, bool]:
     return service, speak_responses
 
 
+def build_voice_input_service() -> VoiceInputService:
+    """Independently build the Phase 41, Batch 4 voice input service.
+
+    Mirrors build_voice_output_service()'s own pattern: loads Settings a
+    second, independent time rather than changing build_orchestrator()'s
+    widely-depended-on return type for this narrow, unrelated addition.
+
+    With VOICE_INPUT_ENABLED unset/false and VOICE_INPUT_PROVIDER
+    unset/"none" (both defaults), this always returns a disabled,
+    provider-less service - Jarvis's runtime behaviour is unchanged, and
+    JarvisCLI._handle_voice_input_once() (not reachable from the
+    interactive typed-input loop yet) remains a safe no-op.
+    VOICE_INPUT_PROVIDER="fake" only ever constructs voice/stt.py's own
+    silent, microphone-free FakeSpeechToTextProvider - no real STT
+    engine, and no microphone or recording mechanism of any kind, exists
+    yet (docs/phase_41_implementation_plan.md).
+
+    Never raises: any failure while loading settings falls back to a
+    disabled, provider-less service, so a problem here can never
+    prevent Jarvis from starting.
+
+    Returns:
+        The VoiceInputService to hand to JarvisCLI.
+    """
+    try:
+        settings = load_settings()
+    except Exception:  # noqa: BLE001 - a failing settings load must never block startup
+        return VoiceInputService()
+
+    provider: SpeechToTextProvider | None = None
+    if settings.voice_input_provider == "fake":
+        provider = FakeSpeechToTextProvider()
+
+    return VoiceInputService(provider=provider, enabled=settings.voice_input_enabled)
+
+
 def main() -> None:
     """Build the system and start the interactive CLI."""
     orchestrator = build_orchestrator()
     startup_notice = build_startup_notice()
     voice_output, speak_responses = build_voice_output_service()
+    voice_input = build_voice_input_service()
     cli = JarvisCLI(
         orchestrator,
         startup_notice=startup_notice,
         voice_output=voice_output,
         speak_responses=speak_responses,
+        voice_input=voice_input,
     )
     cli.run()
 
