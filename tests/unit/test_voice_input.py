@@ -235,8 +235,9 @@ def test_pyproject_declares_no_real_audio_or_hotkey_dependency() -> None:
     above. Those tests confirm no forbidden module is *imported* today;
     this one confirms none is even *declared* as a project dependency,
     so a future accidental `pyproject.toml` edit adding one (e.g. while
-    exploring Batch 6's real push-to-talk options) fails this test
-    immediately, before any capture code is ever written."""
+    exploring a future phase's real push-to-talk options - Phase 41
+    closed with fake providers only) fails this test immediately,
+    before any capture code is ever written."""
     source = Path("pyproject.toml").read_text(encoding="utf-8")
 
     forbidden = (

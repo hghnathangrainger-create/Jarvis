@@ -24,8 +24,9 @@ Responsibilities:
       _handle_text_request() typed input uses - never a shortcut, never
       a separate execution path. Not reachable from the interactive
       typed-input loop yet; this exists so voice-originated routing can
-      be proven safe now, ahead of a future batch's real push-to-talk
-      trigger.
+      be proven safe now, ahead of a future, separately-planned phase's
+      real push-to-talk trigger (Phase 41 closed with fake providers
+      only - see docs/phase_41_completion_report.md).
 
 Does NOT:
     - Call the Claude API, add phone support, add a microphone, or
@@ -355,9 +356,11 @@ class JarvisCLI:
         Not reachable from the interactive typed-input loop yet; this
         exists so voice-originated routing can be proven safe now (see
         tests/unit/test_cli.py's adversarial approval-bypass proofs),
-        ahead of a future batch's real push-to-talk trigger, which will
-        call this method (or an equivalent) once a real recording
-        mechanism exists. Only ever produces a plain string and hands
+        ahead of a future, separately-planned phase's real push-to-talk
+        trigger (Phase 41 closed with fake providers only - see
+        docs/phase_41_completion_report.md), which will call this
+        method (or an equivalent) once a real recording mechanism
+        exists. Only ever produces a plain string and hands
         it to _handle_text_request() - this method never constructs a
         ToolRequest, never calls CommandRouter/ToolExecutor/
         ApprovalManager directly, and never executes anything itself.
