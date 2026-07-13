@@ -1123,6 +1123,18 @@ jarvis/
 │                   (Phase 19) over the durable stores above - the sole
 │                   persistence-facing layer ui/dashboard_app.py depends
 │                   on; contains no tool/command/UI code itself
+├── voice/          Voice interface foundation (Phase 41) - fake/mock
+│                   provider abstractions only, disabled by default,
+│                   no real audio, no microphone, no dependency:
+│                   voice/tts.py (TextToSpeechProvider, SpeechResult,
+│                   FakeTextToSpeechProvider), voice/output.py
+│                   (VoiceOutputService), voice/stt.py
+│                   (SpeechToTextProvider, TranscriptionResult,
+│                   FakeSpeechToTextProvider), voice/input.py
+│                   (VoiceInputService) - wired into ui/cli.py behind
+│                   four independent opt-in settings; voice input is
+│                   reachable only from tests today, not from the
+│                   interactive CLI loop
 ├── tests/          Unit and integration tests
 ├── docs/           Specifications, implementation plans, and reports
 ├── main.py         Entry point — starts Jarvis (the CLI)
@@ -1146,12 +1158,15 @@ jarvis/
 
 ## Next Phase
 
-**Phase 39 is the latest closed phase**: read-only dashboard visibility for quarantine contents — a seventh "Quarantine" tab — completing the quarantine feature family started in Phase 35 across both the CLI and the dashboard. See `docs/phase_39_completion_report.md` for its full closure write-up. Phase 40 (`docs/phase_40_completion_report.md`) is a documentation-only accuracy pass over this README; it changes no runtime behavior.
+**Phase 41 is the latest closed phase**: a voice interface foundation — planning, fake/mock text-to-speech and speech-to-text foundations, four independent disabled-by-default voice settings, opt-in CLI wiring for both voice output and voice input, a proven-safe shared request/security/approval path for voice-originated text, and a push-to-talk trigger design review. See `docs/phase_41_completion_report.md` for its full closure write-up. Phase 42 (`docs/phase_42_completion_report.md`) is a documentation-only accuracy pass over this README; it changes no runtime behavior. Phase 39 (read-only dashboard visibility for quarantine contents) and Phase 40 (a prior documentation-only accuracy pass) remain complete and unchanged.
 
-The quarantine feature family is now complete for its declared, safe scope: `delete file <path>` quarantines a file into `.jarvis_trash/` (never permanently); `list quarantine`/`show quarantine` show what's recorded, including original path when known; `restore file <quarantine-file-or-path>` moves a file with known metadata back to its original location; and the dashboard's Quarantine tab shows that same durable metadata, read-only. Webpage commands (`read webpage <url>`, `summarize webpage <url>`/`summarise webpage <url>`) and the seven-tab read-only dashboard (Overview, Memories, Approval History, Workflow History, Inbox, Schedules, Quarantine) also exist today, unrelated to and unchanged by the quarantine work.
+The quarantine feature family remains complete for its declared, safe scope: `delete file <path>` quarantines a file into `.jarvis_trash/` (never permanently); `list quarantine`/`show quarantine` show what's recorded, including original path when known; `restore file <quarantine-file-or-path>` moves a file with known metadata back to its original location; and the dashboard's Quarantine tab shows that same durable metadata, read-only. Webpage commands (`read webpage <url>`, `summarize webpage <url>`/`summarise webpage <url>`) and the seven-tab read-only dashboard (Overview, Memories, Approval History, Workflow History, Inbox, Schedules, Quarantine) also exist today, unrelated to and unchanged by the quarantine work.
+
+Phase 41's voice foundation (see the `voice/` entry in "Project Structure" below) is real, tested code, but delivers no user-reachable voice capability today: `voice_enabled`/`voice_speak_mode`/`voice_provider` (output) and `voice_input_enabled`/`voice_input_provider` (input) all default to off/none, only a fake/mock provider exists for either direction, and voice input is only reachable from tests, not from the interactive CLI loop. **Still not implemented, by design**: real text-to-speech, real speech-to-text, real microphone capture, real push-to-talk, wake-word/always-listening detection, dashboard voice controls, phone integration, and a Core service — each remains its own future, separately-planned phase or review, not committed to by Phase 41's closure. See `docs/phase_41_implementation_plan.md` (Section 14) for the push-to-talk trigger design comparison awaiting Nathan's own choice before any real-capture work begins.
 
 As with every prior phase boundary, the next *numbered* architectural direction has not been chosen and requires its own fresh review before being scoped. Several genuinely valid future directions exist, **none yet selected or committed to**:
 
+- Real push-to-talk/microphone capture, or a real local/free TTS/STT provider — each its own future, separately-planned phase, pending Nathan's own trigger-mechanism and voice choices (see Phase 41's completion report).
 - Empty-trash/permanent delete for quarantine — would need its own RED classification and a dedicated safety-design review before being considered at all.
 - A cleanup/retention policy for `.jarvis_trash/` — premature without real evidence it's actually needed.
 - A scheduler schema/type foundation — currently blocks scheduled webpage summaries and any additional scheduled action type, since `ScheduleEntry` has no `action_type`/`kind` column, but remains unjustified without a concrete second use case.
@@ -1160,8 +1175,8 @@ As with every prior phase boundary, the next *numbered* architectural direction 
 - A Research Agent or autonomous browsing foundation — a standing non-goal unless explicitly selected through its own dedicated review.
 - A Project/Repo Health Check Tool — evaluated and found speculative; no expressed need exists yet.
 
-None of the above is authorized by Phase 40 or any phase before it; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
+None of the above is authorized by Phase 42 or any phase before it; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 through Phase 40 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 through Phase 42 are complete for their defined scope, not yet tagged. None is a finished product.*

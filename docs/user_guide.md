@@ -422,7 +422,7 @@ These are real candidates that have been evaluated in past architectural reviews
 
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
 - The webpage fetch/read safety foundation (Phase 32), the plain read command (Phase 33, §6), and AI webpage summarization (Phase 34, §6) are all complete. Not yet built, each a distinct, separately-reviewed future decision: scheduled webpage summaries (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); saving a webpage summary to the Inbox (a real possibility, since the mechanism already exists for web-search summaries, but not built here — it would need its own explicit review of whether an approval-gated summary should be durably saved by default); and any Research Agent or autonomous multi-step browsing behavior. Further command refinements (e.g. additional grammar) remain possible but are not planned unless Nathan specifically requests them.
-- A Core service allowing an interactive dashboard, voice, or phone client.
+- A Core service allowing an interactive dashboard, voice, or phone client. (Phase 41 added an internal, disabled-by-default fake/mock voice foundation — see `docs/phase_41_completion_report.md` — but this is not the same thing: no real audio, microphone, or user-reachable voice command exists today, and no Core service was added.)
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
 - More Inbox producers beyond web-search summaries.
