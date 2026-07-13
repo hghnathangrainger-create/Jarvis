@@ -235,6 +235,10 @@ _RULES: tuple[_Rule, ...] = (
     # "show" rule below without this entry, but listed explicitly for
     # the same reason as "search files" above.
     _Rule("show configuration", SecurityTier.GREEN, "Showing configuration status is read-only and never exposes secret values."),
+    # Phase 43: command discoverability. Already covered by the generic
+    # "show" rule below without this entry, but listed explicitly for
+    # the same reason as "search files"/"show configuration" above.
+    _Rule("show available commands", SecurityTier.GREEN, "Listing available commands is read-only and safe."),
     _Rule("search", SecurityTier.GREEN, "Searching is read-only and safe."),
     _Rule("read file", SecurityTier.GREEN, "Reading a file does not change anything."),
     _Rule("read", SecurityTier.GREEN, "Reading does not change anything."),

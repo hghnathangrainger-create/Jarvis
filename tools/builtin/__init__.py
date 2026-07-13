@@ -28,6 +28,9 @@ Read-only tools (GREEN) - these never change any state:
       31). Reads only the already-loaded Settings object - never .env
       or os.environ directly, never mutates anything. The API key is
       reported only as "set"/"not set", never its value.
+    - HelpTool: lists Jarvis's currently supported commands (Phase 43).
+      A static, hand-maintained list, never AI-generated and never
+      derived from CommandRouter at runtime.
     - QuarantineListTool: lists what is currently inside Jarvis's
       quarantine directory (.jarvis_trash/, Phase 36) - name, size, and
       modified time only. Never reads file content, never creates the
@@ -95,6 +98,7 @@ from tools.builtin.file_move_tool import FileMoveTool
 from tools.builtin.file_read_tool import FileReadTool
 from tools.builtin.file_restore_tool import FileRestoreTool
 from tools.builtin.file_search_tool import FileSearchTool
+from tools.builtin.help_tool import HelpTool
 from tools.builtin.info_tool import InfoTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
@@ -111,6 +115,7 @@ from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 __all__ = [
     "ApprovalHistoryTool",
     "ConfigTool",
+    "HelpTool",
     "QuarantineListTool",
     "EchoTool",
     "InfoTool",

@@ -45,6 +45,7 @@ _ALL_TOOL_NAMES = (
     "echo",
     "info",
     "config",
+    "help",
     "quarantine_list",
     "memory",
     "memory_update",
@@ -2987,6 +2988,75 @@ def test_match_show_config_does_not_collide_with_file_commands(
 def test_build_input_config_takes_no_input(router: CommandRouter) -> None:
     assert router.build_input("config", "show config") == {}
     assert router.build_input("config", "show settings") == {}
+
+
+# --- match() -> "help" (Phase 43) ---------------------------------------------
+
+
+def test_match_help(router: CommandRouter) -> None:
+    assert router.match("help") == "help"
+
+
+def test_match_list_commands(router: CommandRouter) -> None:
+    assert router.match("list commands") == "help"
+
+
+def test_match_show_commands(router: CommandRouter) -> None:
+    assert router.match("show commands") == "help"
+
+
+def test_match_help_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("HELP") == "help"
+
+
+def test_match_help_ignores_surrounding_whitespace(router: CommandRouter) -> None:
+    assert router.match("  help  ") == "help"
+
+
+def test_match_help_requires_exact_phrase(router: CommandRouter) -> None:
+    """Not a prefix match - trailing free text does not also match."""
+    assert router.match("help me") is None
+    assert router.match("help please") is None
+
+
+def test_match_help_does_not_route_when_tool_unregistered() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match("help") is None
+
+
+def test_match_help_does_not_collide_with_show_config(
+    router: CommandRouter,
+) -> None:
+    assert router.match("help") == "help"
+    assert router.match("show config") == "config"
+
+
+def test_match_help_does_not_collide_with_list_files(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list commands") == "help"
+    assert router.match("list files") == "file_list"
+
+
+def test_match_help_does_not_collide_with_list_quarantine(
+    router: CommandRouter,
+) -> None:
+    assert router.match("list commands") == "help"
+    assert router.match("list quarantine") == "quarantine_list"
+
+
+def test_match_help_does_not_collide_with_list_schedules(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show commands") == "help"
+    assert router.match("show schedules") == "schedule_list"
+
+
+def test_build_input_help_takes_no_input(router: CommandRouter) -> None:
+    assert router.build_input("help", "help") == {}
+    assert router.build_input("help", "list commands") == {}
+    assert router.build_input("help", "show commands") == {}
 
 
 # --- match() -> "quarantine_list" (Phase 36) ----------------------------------

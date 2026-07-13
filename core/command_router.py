@@ -124,6 +124,22 @@ _WORKFLOW_DETAIL_PREFIXES: tuple[str, ...] = ("show workflow", "view workflow")
 #: in this module contains "config" or "settings" as a substring.
 _CONFIG_EXACT_COMMANDS: frozenset[str] = frozenset({"show config", "show settings"})
 
+#: Exact, read-only command-discoverability phrases (Phase 43), matched
+#: case-insensitively after stripping surrounding whitespace, mirroring
+#: _CONFIG_EXACT_COMMANDS's own established pattern exactly: three names
+#: for the same fixed, no-argument request to the same HelpTool, never
+#: three different operations. Checked directly against every other
+#: exact/prefix table in this module: "help" does not collide with any
+#: existing entry; "list commands"/"show commands" do not collide with
+#: _FILE_LIST_PREFIXES ("list files"/"show files in"/etc. - none is a
+#: prefix of, or prefixed by, either phrase), _QUARANTINE_LIST_EXACT_
+#: COMMANDS ("list quarantine"/"show quarantine"), _SCHEDULE_LIST_EXACT
+#: ("list schedules"/"show schedules"), _WORKFLOW_HISTORY_EXACT, or
+#: _APPROVAL_HISTORY_EXACT - confirmed by direct comparison, not assumed.
+_HELP_EXACT_COMMANDS: frozenset[str] = frozenset(
+    {"help", "list commands", "show commands"}
+)
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -648,6 +664,15 @@ class CommandRouter:
             "config"
         ):
             return "config"
+
+        # Command discoverability (Phase 43): read-only and GREEN. Exact
+        # phrases only, mirroring the config check immediately above -
+        # never a prefix/substring match, so this can never be confused
+        # with any other command family.
+        if lowered.strip() in _HELP_EXACT_COMMANDS and self._registry.has_tool(
+            "help"
+        ):
+            return "help"
 
         # Quarantine listing (Phase 36): read-only and GREEN. Exact
         # phrases only, mirroring the config check immediately above -
@@ -1491,6 +1516,7 @@ class CommandRouter:
 
         # schedule_list takes no input
         # info takes no input
+        # help takes no input
         return {}
 
     @staticmethod

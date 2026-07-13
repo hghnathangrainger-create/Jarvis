@@ -995,6 +995,26 @@ No restore button, delete button, empty-trash button, or cleanup button anywhere
 
 ---
 
+## Phase 43 — Command Discoverability: a Read-Only "help" Command (complete)
+
+One small, GREEN, read-only tool answering a real usability gap: with 25+ built-in commands and no in-CLI way to discover them, `HelpTool` lists every currently supported command grammar phrase and a short one-line description, from inside the running program. See `docs/phase_43_completion_report.md` for the full write-up.
+
+### Help command
+
+```
+help
+list commands
+show commands
+```
+
+All three are the same fixed, no-argument request. The output is a static, hand-maintained constant — never AI-generated, and never derived from `CommandRouter` at runtime (which has no machine-readable grammar table to read from). It is grouped to match `docs/user_guide.md`'s own "Command Reference" section (§6) exactly, so both stay easy to keep in sync by hand.
+
+### What is deliberately NOT included in Phase 43
+
+No generic or introspectable command registry (`CommandRouter`'s matching logic was not refactored). No AI-generated help text. No write action of any kind, and no change to approval behavior or to the security classification of any existing action. No dashboard integration. No voice/audio/microphone/hotkey work of any kind. No new dependency. `.env.example`'s own, separate staleness gap was left untouched, as explicitly scoped — a distinct, separately-tracked future item.
+
+---
+
 ## Example Session
 
 ```
@@ -1083,7 +1103,7 @@ jarvis/
 ├── tools/          Tool registry, executor, built-in tools, and the
 │                   WebSearchProvider abstraction plus the concrete
 │                   DuckDuckGoSearchProvider adapter (Phase 16)
-│   └── builtin/    GREEN (read-only): echo, info, memory, file_list,
+│   └── builtin/    GREEN (read-only): echo, info, help, memory, file_list,
 │                   file_read, file_search, web_search, quarantine_list,
 │                   config, approval_history, workflow_history,
 │                   schedule_list. YELLOW guarded read: webpage_read.
@@ -1158,7 +1178,7 @@ jarvis/
 
 ## Next Phase
 
-**Phase 42 is the latest closed phase**: a documentation-only accuracy pass reconciling this README with Phase 41 (the voice interface foundation); it changes no runtime behavior. See `docs/phase_42_completion_report.md` for its full closure write-up. Phase 41 delivered planning, fake/mock text-to-speech and speech-to-text foundations, four independent disabled-by-default voice settings, opt-in CLI wiring for both voice output and voice input, a proven-safe shared request/security/approval path for voice-originated text, and a push-to-talk trigger design review — see `docs/phase_41_completion_report.md`. Phase 39 (read-only dashboard visibility for quarantine contents) and Phase 40 (a prior documentation-only accuracy pass) remain complete and unchanged.
+**Phase 43 is the latest closed phase**: a small, GREEN, read-only `help`/`list commands`/`show commands` tool giving Nathan an in-CLI way to discover Jarvis's commands, described above. See `docs/phase_43_completion_report.md` for its full closure write-up. Phase 42 was a documentation-only accuracy pass reconciling this README with Phase 41 (the voice interface foundation); it changed no runtime behavior — see `docs/phase_42_completion_report.md`. Phase 41 delivered planning, fake/mock text-to-speech and speech-to-text foundations, four independent disabled-by-default voice settings, opt-in CLI wiring for both voice output and voice input, a proven-safe shared request/security/approval path for voice-originated text, and a push-to-talk trigger design review — see `docs/phase_41_completion_report.md`. Phase 39 (read-only dashboard visibility for quarantine contents) and Phase 40 (a prior documentation-only accuracy pass) remain complete and unchanged.
 
 The quarantine feature family remains complete for its declared, safe scope: `delete file <path>` quarantines a file into `.jarvis_trash/` (never permanently); `list quarantine`/`show quarantine` show what's recorded, including original path when known; `restore file <quarantine-file-or-path>` moves a file with known metadata back to its original location; and the dashboard's Quarantine tab shows that same durable metadata, read-only. Webpage commands (`read webpage <url>`, `summarize webpage <url>`/`summarise webpage <url>`) and the seven-tab read-only dashboard (Overview, Memories, Approval History, Workflow History, Inbox, Schedules, Quarantine) also exist today, unrelated to and unchanged by the quarantine work.
 
@@ -1167,6 +1187,7 @@ Phase 41's voice foundation (see the `voice/` entry in "Project Structure" below
 As with every prior phase boundary, the next *numbered* architectural direction has not been chosen and requires its own fresh review before being scoped. Several genuinely valid future directions exist, **none yet selected or committed to**:
 
 - Real push-to-talk/microphone capture, or a real local/free TTS/STT provider — each its own future, separately-planned phase, pending Nathan's own trigger-mechanism and voice choices (see Phase 41's completion report).
+- `.env.example` is missing `AI_REASONING_ENABLED` and the five Phase 41 voice settings — a known, narrow config-template gap, deliberately left untouched by Phase 43 as a distinct, separately-tracked item.
 - Empty-trash/permanent delete for quarantine — would need its own RED classification and a dedicated safety-design review before being considered at all.
 - A cleanup/retention policy for `.jarvis_trash/` — premature without real evidence it's actually needed.
 - A scheduler schema/type foundation — currently blocks scheduled webpage summaries and any additional scheduled action type, since `ScheduleEntry` has no `action_type`/`kind` column, but remains unjustified without a concrete second use case.
@@ -1175,8 +1196,8 @@ As with every prior phase boundary, the next *numbered* architectural direction 
 - A Research Agent or autonomous browsing foundation — a standing non-goal unless explicitly selected through its own dedicated review.
 - A Project/Repo Health Check Tool — evaluated and found speculative; no expressed need exists yet.
 
-None of the above is authorized by Phase 42 or any phase before it; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
+None of the above is authorized by Phase 43 or any phase before it; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control.
 
 ---
 
-*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 through Phase 42 are complete for their defined scope, not yet tagged. None is a finished product.*
+*Jarvis is a personal project under active development. Phase 5 is a complete, tagged milestone; Phase 6 through Phase 43 are complete for their defined scope, not yet tagged. None is a finished product.*

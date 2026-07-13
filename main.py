@@ -84,6 +84,7 @@ from tools.builtin import (
     FileReadTool,
     FileRestoreTool,
     FileSearchTool,
+    HelpTool,
     InfoTool,
     MemoryForgetTool,
     MemoryTool,
@@ -168,6 +169,9 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry = ToolRegistry()
     registry.register_tool(EchoTool())
     registry.register_tool(InfoTool())
+    # HelpTool (Phase 43) returns a static, hand-maintained command list -
+    # it takes no dependency, exactly like InfoTool above.
+    registry.register_tool(HelpTool())
     # ConfigTool (Phase 31) reads only the already-loaded `settings`
     # object above - it never calls load_settings() again, never reads
     # .env/os.environ directly, and never exposes the API key's value.
