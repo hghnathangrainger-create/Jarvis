@@ -12,12 +12,20 @@ a file, never calls AI, and never calls the web (proven structurally,
 by import absence, since this tool's own source has no such
 dependency).
 
+Phase 52 additionally locks ConfigTool's output against Settings' own,
+actual dataclass fields (via dataclasses.fields(Settings)), so a future
+Settings field added without a matching ConfigTool display line - or
+without updating this test file to deliberately account for it - is
+caught immediately, mirroring Phase 51's identical HelpTool/CommandRouter
+consistency check.
+
 Run with:
     pytest tests/unit/test_config_tool.py
 """
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -108,6 +116,64 @@ def test_reports_debug_true_when_set() -> None:
     result = _run(ConfigTool(settings))
     assert "Debug mode: True" in result.output
     assert "AI reasoning enabled: False" in result.output
+
+
+# --- completeness: every Settings field is represented (Phase 52) ------------
+
+#: Maps each non-secret Settings field name to the exact label substring
+#: that must appear in ConfigTool.run()'s output when that field is
+#: displayed. anthropic_api_key is deliberately excluded here - it is the
+#: one secret field, covered by its own dedicated "set"/"not set" tests
+#: above, never shown by name+value the way every other field is.
+_EXPECTED_FIELD_LABELS: dict[str, str] = {
+    "ai_model": "AI model:",
+    "ai_max_tokens": "AI max tokens:",
+    "database_path": "Database path:",
+    "log_level": "Log level:",
+    "approval_timeout_seconds": "Approval timeout (seconds):",
+    "debug": "Debug mode:",
+    "ai_reasoning_enabled": "AI reasoning enabled:",
+    "voice_enabled": "Voice enabled:",
+    "voice_speak_mode": "Voice speak mode:",
+    "voice_provider": "Voice provider:",
+    "voice_input_enabled": "Voice input enabled:",
+    "voice_input_provider": "Voice input provider:",
+}
+
+#: The one Settings field deliberately never shown by name+value - a
+#: real secret/credential, unlike every other field.
+_DELIBERATELY_EXCLUDED_SECRET_FIELDS: frozenset[str] = frozenset(
+    {"anthropic_api_key"}
+)
+
+
+def test_expected_field_labels_cover_every_non_secret_settings_field() -> None:
+    """Structural: if a new field is ever added to Settings, this test
+    fails immediately unless _EXPECTED_FIELD_LABELS (or the secret-field
+    exclusion set) is deliberately updated to account for it - closing,
+    for ConfigTool/Settings, the exact silent-drift risk Phase 51 already
+    closed for HelpTool/CommandRouter."""
+    actual_field_names = {f.name for f in dataclasses.fields(Settings)}
+    accounted_for_field_names = (
+        set(_EXPECTED_FIELD_LABELS) | _DELIBERATELY_EXCLUDED_SECRET_FIELDS
+    )
+    assert actual_field_names == accounted_for_field_names
+
+
+def test_config_tool_displays_every_non_secret_settings_field() -> None:
+    """Confirms ConfigTool.run() genuinely displays every field named in
+    _EXPECTED_FIELD_LABELS - not just the handful spot-checked by the
+    other tests in this file - closing the gap where a future Settings
+    field could be added and forgotten in ConfigTool's own display
+    logic without any test catching it."""
+    tool = ConfigTool(_settings())
+    result = _run(tool)
+
+    for field_name, expected_label in _EXPECTED_FIELD_LABELS.items():
+        assert expected_label in result.output, (
+            f"Settings field {field_name!r} (expected label "
+            f"{expected_label!r}) is missing from ConfigTool's output."
+        )
 
 
 # --- voice fields (Phase 41, Batch 2): safe, non-secret, shown in full --------
