@@ -96,6 +96,7 @@ from tools.builtin import (
     FileReadTool,
     FileRestoreTool,
     FileSearchTool,
+    HealthCheckTool,
     HelpTool,
     InfoTool,
     MemoryForgetTool,
@@ -271,6 +272,18 @@ def build_orchestrator() -> JarvisOrchestrator:
     # or anywhere else in this phase.
     web_fetcher = SafeWebFetcher()
     registry.register_tool(WebpageReadTool(web_fetcher))
+
+    # HealthCheckTool (Phase 57, Batch 1): registered last, so its own
+    # introspection of `registry` naturally sees every tool registered
+    # above (and itself) once it actually runs. Reads only the already-
+    # built `registry`/`settings` objects - never opens a new database
+    # connection, never constructs a new store, never creates a file or
+    # row. Batch 2 will add Inbox/Schedule/Quarantine store-reachability
+    # checks, reusing the same already-built quarantine_store/
+    # inbox_store/schedule_store instances constructed above (not
+    # included yet).
+    registry.register_tool(HealthCheckTool(registry, settings))
+
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,

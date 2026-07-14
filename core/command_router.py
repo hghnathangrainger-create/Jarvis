@@ -140,6 +140,20 @@ _HELP_EXACT_COMMANDS: frozenset[str] = frozenset(
     {"help", "list commands", "show commands"}
 )
 
+#: Exact, read-only system-health phrases (Phase 57, Batch 1), matched
+#: case-insensitively after stripping surrounding whitespace, mirroring
+#: _HELP_EXACT_COMMANDS's own established pattern exactly: three names
+#: for the same fixed, no-argument request to the same HealthCheckTool,
+#: never three different operations. Checked directly against every
+#: other exact/prefix table in this module: "health check" and "show
+#: health" share no keyword with any existing entry; "system health"
+#: does not collide with _INFO_KEYWORDS's own "system info" contains-
+#: check ("system health" does not contain the substring "system info")
+#: - confirmed by direct comparison, not assumed.
+_HEALTH_CHECK_EXACT_COMMANDS: frozenset[str] = frozenset(
+    {"health check", "show health", "system health"}
+)
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -673,6 +687,15 @@ class CommandRouter:
             "help"
         ):
             return "help"
+
+        # System health (Phase 57, Batch 1): read-only and GREEN. Exact
+        # phrases only, mirroring the help check immediately above -
+        # never a prefix/substring match, so this can never be confused
+        # with any other command family.
+        if lowered.strip() in _HEALTH_CHECK_EXACT_COMMANDS and self._registry.has_tool(
+            "health_check"
+        ):
+            return "health_check"
 
         # Quarantine listing (Phase 36): read-only and GREEN. Exact
         # phrases only, mirroring the config check immediately above -
@@ -1517,6 +1540,7 @@ class CommandRouter:
         # schedule_list takes no input
         # info takes no input
         # help takes no input
+        # health_check takes no input
         return {}
 
     @staticmethod

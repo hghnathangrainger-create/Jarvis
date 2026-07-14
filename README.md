@@ -1103,10 +1103,10 @@ jarvis/
 ├── tools/          Tool registry, executor, built-in tools, and the
 │                   WebSearchProvider abstraction plus the concrete
 │                   DuckDuckGoSearchProvider adapter (Phase 16)
-│   └── builtin/    GREEN (read-only): echo, info, help, memory, file_list,
-│                   file_read, file_search, web_search, quarantine_list,
-│                   config, approval_history, workflow_history,
-│                   schedule_list. YELLOW guarded read: webpage_read.
+│   └── builtin/    GREEN (read-only): echo, info, help, health_check,
+│                   memory, file_list, file_read, file_search, web_search,
+│                   quarantine_list, config, approval_history,
+│                   workflow_history, schedule_list. YELLOW guarded read: webpage_read.
 │                   YELLOW approval-gated write: file_create,
 │                   file_append, file_copy, file_move, file_delete
 │                   (quarantine-only, never permanent), file_restore,

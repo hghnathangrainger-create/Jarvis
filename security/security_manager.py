@@ -239,6 +239,10 @@ _RULES: tuple[_Rule, ...] = (
     # "show" rule below without this entry, but listed explicitly for
     # the same reason as "search files"/"show configuration" above.
     _Rule("show available commands", SecurityTier.GREEN, "Listing available commands is read-only and safe."),
+    # Phase 57, Batch 1: system health check. Already covered by the
+    # generic "show" rule below without this entry, but listed
+    # explicitly for the same reason as "show available commands" above.
+    _Rule("show system health", SecurityTier.GREEN, "Showing system health status is read-only and safe."),
     _Rule("search", SecurityTier.GREEN, "Searching is read-only and safe."),
     _Rule("read file", SecurityTier.GREEN, "Reading a file does not change anything."),
     _Rule("read", SecurityTier.GREEN, "Reading does not change anything."),

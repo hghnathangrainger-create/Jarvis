@@ -46,6 +46,7 @@ _ALL_TOOL_NAMES = (
     "info",
     "config",
     "help",
+    "health_check",
     "quarantine_list",
     "memory",
     "memory_update",
@@ -3057,6 +3058,78 @@ def test_build_input_help_takes_no_input(router: CommandRouter) -> None:
     assert router.build_input("help", "help") == {}
     assert router.build_input("help", "list commands") == {}
     assert router.build_input("help", "show commands") == {}
+
+
+# --- match() -> "health_check" (Phase 57, Batch 1) ----------------------------
+
+
+def test_match_health_check(router: CommandRouter) -> None:
+    assert router.match("health check") == "health_check"
+
+
+def test_match_show_health(router: CommandRouter) -> None:
+    assert router.match("show health") == "health_check"
+
+
+def test_match_system_health(router: CommandRouter) -> None:
+    assert router.match("system health") == "health_check"
+
+
+def test_match_health_check_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("HEALTH CHECK") == "health_check"
+
+
+def test_match_health_check_ignores_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match("  health check  ") == "health_check"
+
+
+def test_match_health_check_requires_exact_phrase(router: CommandRouter) -> None:
+    """Not a prefix match - trailing free text does not also match."""
+    assert router.match("health check please") is None
+    assert router.match("health") is None
+    assert router.match("check health") is None
+
+
+def test_match_health_check_does_not_route_when_tool_unregistered() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match("health check") is None
+
+
+def test_match_system_health_does_not_collide_with_system_info(
+    router: CommandRouter,
+) -> None:
+    assert router.match("system health") == "health_check"
+    assert router.match("system info") == "info"
+
+
+def test_match_health_check_does_not_collide_with_help(
+    router: CommandRouter,
+) -> None:
+    assert router.match("health check") == "health_check"
+    assert router.match("help") == "help"
+
+
+def test_match_show_health_does_not_collide_with_show_config(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show health") == "health_check"
+    assert router.match("show config") == "config"
+
+
+def test_match_show_health_does_not_collide_with_list_files(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show health") == "health_check"
+    assert router.match("list files") == "file_list"
+
+
+def test_build_input_health_check_takes_no_input(router: CommandRouter) -> None:
+    assert router.build_input("health_check", "health check") == {}
+    assert router.build_input("health_check", "show health") == {}
+    assert router.build_input("health_check", "system health") == {}
 
 
 # --- match() -> "quarantine_list" (Phase 36) ----------------------------------
