@@ -33,12 +33,15 @@ from sqlalchemy import create_engine
 
 from approval.approval_history_store import ApprovalHistoryStore
 from dashboard.read_model import (
+    ActivityRow,
     ApprovalRow,
     DashboardOverview,
     DashboardReadModel,
+    DashboardSystemStatus,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
+    StoreReachability,
     WorkflowRow,
     WorkflowTransitionRow,
 )
@@ -54,6 +57,7 @@ import ui.dashboard_app as dashboard_app_module
 from ui.dashboard_app import (
     DashboardApp,
     WINDOW_TITLE,
+    activity_row_to_tree_values,
     format_error_state,
     format_timestamp,
     memory_row_to_tree_values,
@@ -61,6 +65,8 @@ from ui.dashboard_app import (
     overview_summary_lines,
     quarantine_row_to_tree_values,
     schedule_row_to_tree_values,
+    store_reachability_line,
+    system_status_lines,
     workflow_row_to_tree_values,
     workflow_transition_row_to_tree_values,
 )
@@ -166,6 +172,15 @@ class _RaisingReadModel:
 
     def get_quarantine_entries(self, limit: int = 50):
         raise RuntimeError("simulated quarantine query failure")
+
+    def get_system_status(self):
+        raise RuntimeError("simulated system status query failure")
+
+    def get_store_reachability(self):
+        raise RuntimeError("simulated store reachability query failure")
+
+    def get_recent_activity(self, limit: int = 20):
+        raise RuntimeError("simulated recent activity query failure")
 
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
@@ -374,6 +389,101 @@ def test_overview_summary_lines_contain_only_real_counts() -> None:
         assert forbidden not in joined
 
 
+# --- system_status_lines / store_reachability_line / activity_row_to_tree_values
+# --- (Phase 62, Batch 2) --------------------------------------------------------
+
+
+def test_system_status_lines_render_real_fields() -> None:
+    status = DashboardSystemStatus(
+        available=True,
+        ai_reasoning_enabled=True,
+        ai_model="claude-test-model",
+        voice_enabled=False,
+        voice_provider="none",
+        voice_input_enabled=False,
+        voice_input_provider="none",
+        log_level="INFO",
+        database_path="data/jarvis.db",
+        approval_timeout_seconds=60,
+        api_key_status="configured",
+    )
+    lines = system_status_lines(status)
+    joined = "\n".join(lines)
+    assert "AI reasoning enabled: True" in joined
+    assert "AI model: claude-test-model" in joined
+    assert "Log level: INFO" in joined
+    assert "Database path: data/jarvis.db" in joined
+    assert "Approval timeout (seconds): 60" in joined
+    assert "Anthropic API key: configured" in joined
+
+
+def test_system_status_lines_show_not_configured_when_api_key_absent() -> None:
+    status = DashboardSystemStatus(available=True, api_key_status="not configured")
+    lines = system_status_lines(status)
+    assert "Anthropic API key: not configured" in "\n".join(lines)
+
+
+def test_system_status_lines_never_show_api_key_value_mask_length_or_hash() -> None:
+    import hashlib
+
+    secret = "sk-super-secret-value-should-never-appear-in-the-ui"
+    status = DashboardSystemStatus(
+        available=True, ai_model="m", api_key_status="configured"
+    )
+    lines = system_status_lines(status)
+    joined = "\n".join(lines)
+    assert secret not in joined
+    assert str(len(secret)) not in joined
+    assert hashlib.sha256(secret.encode()).hexdigest() not in joined
+    for forbidden in ("mask", "hash", "fingerprint", "sk-"):
+        assert forbidden not in joined.lower()
+
+
+def test_system_status_lines_honest_when_unavailable() -> None:
+    status = DashboardSystemStatus(available=False)
+    lines = system_status_lines(status)
+    assert len(lines) == 1
+    assert "unavailable" in lines[0].lower()
+
+
+def test_store_reachability_line_formats_reachable_state() -> None:
+    row = StoreReachability(name="memory", reachable=True)
+    assert store_reachability_line(row) == "memory: reachable"
+
+
+def test_store_reachability_line_formats_not_reachable_state_with_detail() -> None:
+    row = StoreReachability(
+        name="quarantine", reachable=False, detail="not configured"
+    )
+    assert store_reachability_line(row) == "quarantine: not reachable (not configured)"
+
+
+def test_store_reachability_line_formats_workflow_history_label_readably() -> None:
+    row = StoreReachability(name="workflow_history", reachable=True)
+    assert store_reachability_line(row) == "workflow history: reachable"
+
+
+def test_activity_row_to_tree_values_maps_real_fields() -> None:
+    row = ActivityRow(
+        domain="memory",
+        summary="Saved memory (general): buy milk",
+        created_at=datetime(2026, 1, 1, 12, 0, 0),
+    )
+    values = activity_row_to_tree_values(row)
+    assert values == ("2026-01-01 12:00:00 UTC", "memory", "Saved memory (general): buy milk")
+
+
+def test_activity_row_summary_is_never_ai_generated_language() -> None:
+    """Structural sanity check mirroring the help_tool/health_check
+    precedent: no activity summary wording resembles an AI disclaimer,
+    since ActivityRow.summary is always plain string formatting."""
+    row = ActivityRow(domain="inbox", summary="Saved inbox entry: q", created_at=datetime(2026, 1, 1))
+    values = activity_row_to_tree_values(row)
+    joined = " ".join(values).lower()
+    for forbidden in ("[ai ", "advisory only", "readiness", "intelligence score"):
+        assert forbidden not in joined
+
+
 # --- structural: no forbidden import or callback ------------------------------
 
 
@@ -567,6 +677,32 @@ class TestDashboardAppWithRealTk:
         assert "Could not read inbox" in app._inbox_error_var.get()
         assert "Could not read schedules" in app._schedules_error_var.get()
         assert "Could not read quarantine" in app._quarantine_error_var.get()
+        assert "Could not read system status" in app._system_status_error_var.get()
+        assert (
+            "Could not read store reachability" in app._reachability_error_var.get()
+        )
+        assert "Could not read recent activity" in app._activity_error_var.get()
+
+    def test_one_overview_panel_failure_does_not_blank_another(
+        self, root: tk.Tk
+    ) -> None:
+        """Phase 62, Batch 2: the Overview tab now has four independent
+        panels - a failure reading one (recent activity here) must never
+        prevent another panel (system status) from rendering its own
+        real, successfully-read data."""
+
+        class _PartiallyRaisingReadModel(_RaisingReadModel):
+            def get_system_status(self):
+                return DashboardSystemStatus(available=False)
+
+            def get_store_reachability(self):
+                return ()
+
+        app = _build_app(root, _PartiallyRaisingReadModel())
+        assert app._system_status_error_var.get() == ""
+        assert app._reachability_error_var.get() == ""
+        assert "Could not read recent activity" in app._activity_error_var.get()
+        assert "Could not read overview" in app._overview_error_var.get()
 
     def test_command_like_memory_content_renders_literally(self, root: tk.Tk) -> None:
         read_model, memory, _, _, _, _, _ = _make_real_stack()

@@ -56,13 +56,16 @@ from datetime import datetime, timezone
 from tkinter import ttk
 
 from dashboard.read_model import (
+    ActivityRow,
     ApprovalRow,
     DashboardOverview,
     DashboardReadModel,
+    DashboardSystemStatus,
     InboxRow,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
+    StoreReachability,
     WorkflowRow,
     WorkflowTransitionRow,
 )
@@ -83,6 +86,27 @@ _TRANSITIONS_EMPTY_STATE = "Select a workflow above to see its recorded history.
 _INBOX_EMPTY_STATE = "No inbox entries yet."
 _SCHEDULES_EMPTY_STATE = "No schedules configured yet."
 _QUARANTINE_EMPTY_STATE = "No files currently in quarantine."
+_ACTIVITY_EMPTY_STATE = "No recent activity recorded yet."
+
+#: Read-only wording for the redesigned Overview tab (Phase 62, Batch 2):
+#: a clear, honest header - "Online" describes only that the dashboard
+#: process itself is running and has read the database, never a claim
+#: about the CLI, scheduler, or any AI capability being active.
+OVERVIEW_HEADER = "Jarvis Online"
+SYSTEM_STATUS_CAPTION = (
+    "Configuration read directly from Jarvis's own Settings object - "
+    "never a second load, never the API key's actual value."
+)
+STORE_REACHABILITY_CAPTION = (
+    "Whether each durable store this dashboard depends on could be read "
+    "just now - a plain reachability check, never a write, never a new "
+    "database connection."
+)
+ACTIVITY_CAPTION = (
+    "A merged, real-timestamp view across memories, approvals, "
+    "workflows, inbox, and quarantine - deterministic text only, never "
+    "AI-generated, never a score of any kind."
+)
 
 #: Careful, durable-history-only wording (authorizing instructions, items
 #: 15-16): never implies a durable "pending" row is a live, currently
@@ -291,6 +315,66 @@ def overview_summary_lines(overview: DashboardOverview) -> list[str]:
     ]
 
 
+def system_status_lines(status: DashboardSystemStatus) -> list[str]:
+    """Build honest, real-data-only summary lines for the System Status panel
+    (Phase 62, Batch 2).
+
+    Every value here traces directly to a field on the already-loaded
+    Settings object DashboardReadModel was constructed with - nothing is
+    estimated, simulated, or fabricated, and the API key's own value,
+    a masked form, its length, or a hash is never included, only whether
+    it is configured at all.
+
+    Args:
+        status: The system status view model to summarise.
+
+    Returns:
+        A short list of plain-text summary lines. If status.available is
+        False (no Settings object was supplied), a single honest
+        "unavailable" line is returned instead of fabricating any field.
+    """
+    if not status.available:
+        return ["System status: unavailable (no configuration loaded)."]
+    return [
+        f"AI reasoning enabled: {status.ai_reasoning_enabled}",
+        f"AI model: {status.ai_model}",
+        f"Voice enabled: {status.voice_enabled} (provider: {status.voice_provider})",
+        f"Voice input enabled: {status.voice_input_enabled} "
+        f"(provider: {status.voice_input_provider})",
+        f"Log level: {status.log_level}",
+        f"Database path: {status.database_path}",
+        f"Approval timeout (seconds): {status.approval_timeout_seconds}",
+        f"Anthropic API key: {status.api_key_status}",
+    ]
+
+
+def store_reachability_line(row: StoreReachability) -> str:
+    """Format one StoreReachability row as a single honest status line
+    (Phase 62, Batch 2).
+
+    Never fabricates success: a store that failed its read call, or the
+    optional quarantine store when none was configured, is always
+    labelled "not reachable", with the honest reason shown alongside it.
+
+    Args:
+        row: The store reachability view model to format.
+
+    Returns:
+        A single plain-text line naming the store and its status.
+    """
+    label = row.name.replace("_", " ")
+    if row.reachable:
+        return f"{label}: reachable"
+    detail = f" ({row.detail})" if row.detail else ""
+    return f"{label}: not reachable{detail}"
+
+
+def activity_row_to_tree_values(row: ActivityRow) -> tuple[str, str, str]:
+    """Map an ActivityRow to the exact tuple shown in the Recent Activity
+    Treeview (Phase 62, Batch 2)."""
+    return (format_timestamp(row.created_at), row.domain, row.summary)
+
+
 class DashboardApp:
     """The tkinter/ttk read-only dashboard window.
 
@@ -354,14 +438,112 @@ class DashboardApp:
     # --- tab construction ----------------------------------------------------
 
     def _build_overview_tab(self) -> None:
+        """Build the redesigned Overview tab (Phase 62, Batch 2): a clear
+        "Jarvis Online" header, then four honest, real-data-only panels -
+        System Status, Store Reachability, Summary Counts (the original
+        Phase 19-22 overview lines, unchanged), and Recent Activity. Each
+        panel has its own error variable so a failure reading one never
+        blanks out another panel's own last-good state, mirroring this
+        module's own established per-tab isolation convention, now
+        applied within this one tab's four sub-panels."""
         frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Overview")
         self._overview_frame = frame
-        self._overview_labels: list[ttk.Label] = []
+
+        ttk.Label(
+            frame, text=OVERVIEW_HEADER, font=("TkDefaultFont", 14, "bold")
+        ).pack(anchor="w", pady=(0, 6))
+
+        # --- System Status ---------------------------------------------------
+        ttk.Label(frame, text="System Status", font=("TkDefaultFont", 10, "bold")).pack(
+            anchor="w"
+        )
+        ttk.Label(frame, text=SYSTEM_STATUS_CAPTION, wraplength=480).pack(anchor="w")
+        self._system_status_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._system_status_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._system_status_frame = ttk.Frame(frame)
+        self._system_status_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._system_status_labels: list[ttk.Label] = []
+
+        # --- Store Reachability -----------------------------------------------
+        ttk.Label(
+            frame, text="Store Reachability", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+        ttk.Label(frame, text=STORE_REACHABILITY_CAPTION, wraplength=480).pack(
+            anchor="w"
+        )
+        self._reachability_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._reachability_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._reachability_frame = ttk.Frame(frame)
+        self._reachability_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._reachability_labels: list[ttk.Label] = []
+
+        # --- Summary Counts (Phase 19-22, unchanged content) -------------------
+        ttk.Label(frame, text="Summary Counts", font=("TkDefaultFont", 10, "bold")).pack(
+            anchor="w"
+        )
         self._overview_error_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self._overview_error_var, foreground="red").pack(
             anchor="w"
         )
+        self._overview_counts_frame = ttk.Frame(frame)
+        self._overview_counts_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._overview_labels: list[ttk.Label] = []
+
+        # --- Recent Activity ----------------------------------------------------
+        ttk.Label(
+            frame, text="Recent Activity", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w")
+        ttk.Label(frame, text=ACTIVITY_CAPTION, wraplength=480).pack(anchor="w")
+        self._activity_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._activity_error_var, foreground="red"
+        ).pack(anchor="w")
+
+        activity_columns = ("created_at", "domain", "summary")
+        activity_tree = ttk.Treeview(
+            frame, columns=activity_columns, show="headings", height=8
+        )
+        for column, heading in zip(activity_columns, ("Time", "Domain", "Summary")):
+            activity_tree.heading(column, text=heading)
+        activity_tree.column("created_at", width=170, stretch=False)
+        activity_tree.column("domain", width=90, stretch=False)
+        activity_tree.column("summary", width=360)
+        activity_tree.pack(fill="both", expand=True, pady=(4, 4))
+        self._activity_tree = activity_tree
+
+    @staticmethod
+    def _render_label_lines(
+        container: ttk.Frame, existing_labels: list[ttk.Label], lines: list[str]
+    ) -> list[ttk.Label]:
+        """Replace a panel's plain-text label lines with a fresh set.
+
+        Mirrors the destroy-and-recreate approach the original Overview
+        tab already used for its own summary lines (Phase 19-22) - each
+        refresh tears down the previous labels and rebuilds new ones from
+        the latest data, so no label is ever left showing stale text.
+
+        Args:
+            container: The frame these labels are packed into.
+            existing_labels: The previous refresh's own labels, to
+                destroy before rebuilding.
+            lines: The new plain-text lines to render, one label each.
+
+        Returns:
+            The newly created list of labels, replacing existing_labels.
+        """
+        for label in existing_labels:
+            label.destroy()
+        new_labels: list[ttk.Label] = []
+        for line in lines:
+            label = ttk.Label(container, text=line)
+            label.pack(anchor="w")
+            new_labels.append(label)
+        return new_labels
 
     def _build_memories_tab(self) -> None:
         frame = ttk.Frame(self._notebook, padding=(8, 8))
@@ -587,19 +769,71 @@ class DashboardApp:
         )
 
     def _refresh_overview(self) -> None:
+        """Refresh all four Overview panels independently (Phase 62,
+        Batch 2): a failure reading one panel's data sets only that
+        panel's own error message and leaves the other three panels'
+        most recent successful state untouched, exactly as every other
+        tab in this module already isolates its own single query."""
+        self._refresh_system_status()
+        self._refresh_store_reachability()
+        self._refresh_overview_counts()
+        self._refresh_recent_activity()
+
+    def _refresh_system_status(self) -> None:
+        try:
+            status = self._read_model.get_system_status()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._system_status_error_var.set(format_error_state("system status", exc))
+            return
+        self._system_status_error_var.set("")
+        self._system_status_labels = self._render_label_lines(
+            self._system_status_frame,
+            self._system_status_labels,
+            system_status_lines(status),
+        )
+
+    def _refresh_store_reachability(self) -> None:
+        try:
+            rows = self._read_model.get_store_reachability()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._reachability_error_var.set(
+                format_error_state("store reachability", exc)
+            )
+            return
+        self._reachability_error_var.set("")
+        self._reachability_labels = self._render_label_lines(
+            self._reachability_frame,
+            self._reachability_labels,
+            [store_reachability_line(row) for row in rows],
+        )
+
+    def _refresh_overview_counts(self) -> None:
         try:
             overview = self._read_model.get_overview()
         except Exception as exc:  # noqa: BLE001 - isolate any read failure
             self._overview_error_var.set(format_error_state("overview", exc))
             return
         self._overview_error_var.set("")
-        for label in self._overview_labels:
-            label.destroy()
-        self._overview_labels = []
-        for line in overview_summary_lines(overview):
-            label = ttk.Label(self._overview_frame, text=line)
-            label.pack(anchor="w")
-            self._overview_labels.append(label)
+        self._overview_labels = self._render_label_lines(
+            self._overview_counts_frame,
+            self._overview_labels,
+            overview_summary_lines(overview),
+        )
+
+    def _refresh_recent_activity(self) -> None:
+        try:
+            rows = self._read_model.get_recent_activity()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._activity_error_var.set(format_error_state("recent activity", exc))
+            return
+        self._activity_error_var.set("")
+        tree = self._activity_tree
+        tree.delete(*tree.get_children())
+        if not rows:
+            tree.insert("", "end", values=(_ACTIVITY_EMPTY_STATE, "", ""))
+            return
+        for row in rows:
+            tree.insert("", "end", values=activity_row_to_tree_values(row))
 
     def _refresh_memories(self) -> None:
         try:
