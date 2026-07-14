@@ -1434,6 +1434,168 @@ def test_match_webpage_summary_does_not_change_normal_match_behaviour(
     )
 
 
+# --- match_webpage_summary_and_save(): explicit save-to-inbox command (Phase 61, Batch 1)
+
+
+def test_match_webpage_summary_and_save_recognises_summarize_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize webpage https://example.com and save to inbox"
+        )
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_and_save_recognises_summarise_spelling(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarise webpage https://example.com and save to inbox"
+        )
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_and_save_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save(
+            "SUMMARIZE WEBPAGE https://example.com AND SAVE TO INBOX"
+        )
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_and_save_strips_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize webpage   https://example.com   and save to inbox"
+        )
+        == "https://example.com"
+    )
+
+
+def test_match_webpage_summary_and_save_with_no_url_returns_empty_string(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save("summarize webpage  and save to inbox")
+        == ""
+    )
+
+
+def test_match_webpage_summary_and_save_does_gate_on_tool_registration(
+    router: CommandRouter,
+) -> None:
+    registry = ToolRegistry()
+    for name in _ALL_TOOL_NAMES:
+        if name != "webpage_read":
+            registry.register_tool(_StubTool(name))
+    unregistered_router = CommandRouter(registry)
+    assert (
+        unregistered_router.match_webpage_summary_and_save(
+            "summarize webpage https://x.com and save to inbox"
+        )
+        is None
+    )
+
+
+def test_match_webpage_summary_and_save_requires_the_exact_suffix(
+    router: CommandRouter,
+) -> None:
+    """Without the trailing " and save to inbox" phrase, this method
+    must not match at all - it is a strictly narrower grammar than
+    match_webpage_summary, never a replacement for it."""
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize webpage https://example.com"
+        )
+        is None
+    )
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize webpage https://example.com and save it"
+        )
+        is None
+    )
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize webpage https://example.com to inbox"
+        )
+        is None
+    )
+    assert router.match_webpage_summary_and_save("") is None
+
+
+def test_match_webpage_summary_and_save_does_not_match_unrelated_text(
+    router: CommandRouter,
+) -> None:
+    assert (
+        router.match_webpage_summary_and_save(
+            "read webpage https://example.com and save to inbox"
+        )
+        is None
+    )
+    assert (
+        router.match_webpage_summary_and_save(
+            "summarize website https://example.com and save to inbox"
+        )
+        is None
+    )
+    assert (
+        router.match_webpage_summary_and_save(
+            "search the web for jarvis ai and save to inbox"
+        )
+        is None
+    )
+
+
+def test_match_webpage_summary_base_matcher_still_works_unchanged(
+    router: CommandRouter,
+) -> None:
+    """The base match_webpage_summary() matcher must remain completely
+    unaffected by the new save-variant matcher: a plain "summarize
+    webpage <url>" command (no trailing "and save to inbox") is still
+    recognised exactly as before, and its own extracted URL is
+    unaffected."""
+    assert (
+        router.match_webpage_summary("summarize webpage https://example.com")
+        == "https://example.com"
+    )
+    assert (
+        router.match_webpage_summary("summarise webpage https://example.com")
+        == "https://example.com"
+    )
+
+
+def test_save_variant_is_not_swallowed_by_the_base_matcher(
+    router: CommandRouter,
+) -> None:
+    """A concrete, direct proof of the documented ordering requirement:
+    if the base matcher were (incorrectly) checked before the save
+    variant, "summarize webpage <url> and save to inbox" would still
+    match match_webpage_summary() too - with the trailing words
+    incorrectly folded into the extracted URL - which is exactly why
+    JarvisOrchestrator.handle_request() must check
+    match_webpage_summary_and_save() first. This test proves both
+    matchers' own outputs directly, so the ordering requirement has a
+    concrete regression proof, not just a documented convention."""
+    text = "summarize webpage https://example.com and save to inbox"
+
+    save_url = router.match_webpage_summary_and_save(text)
+    base_url = router.match_webpage_summary(text)
+
+    assert save_url == "https://example.com"
+    assert base_url == "https://example.com and save to inbox"
+    assert save_url != base_url
+
+
 # --- match_memory_query_summary(): query-based memory-summary command (Phase 11, Batch 2)
 
 

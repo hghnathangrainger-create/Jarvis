@@ -705,6 +705,32 @@ class JarvisOrchestrator:
             return False
         return response.approval_request.metadata.get("webpage_summary") == "true"
 
+    @staticmethod
+    def _should_save_webpage_summary_to_inbox(response: JarvisResponse) -> bool:
+        """Return whether a pending webpage-summary approval should save
+        its resulting summary to the Inbox once it succeeds (Phase 61,
+        Batch 1).
+
+        Mirrors _is_pending_webpage_summary's own narrow, defensive
+        discriminator pattern exactly: a missing or unrelated metadata
+        entry is never treated as an instruction to save. Only the
+        explicit "... and save to inbox" grammar
+        (match_webpage_summary_and_save) ever sets this key when the
+        approval request was created - the plain "summarize webpage
+        <url>" command never does, so this always returns False for it.
+
+        Args:
+            response: The response being resumed via execute_approved().
+
+        Returns:
+            True only if response.approval_request is present and its
+            metadata's "save_to_inbox" entry is exactly "true". False
+            otherwise.
+        """
+        if response.approval_request is None:
+            return False
+        return response.approval_request.metadata.get("save_to_inbox") == "true"
+
     def _execute_approved_webpage_summary(
         self, response: JarvisResponse, decision: ApprovalDecision
     ) -> JarvisResponse:
@@ -761,9 +787,24 @@ class JarvisOrchestrator:
             if response.approval_request is not None
             else f"summarize webpage {url}"
         )
-        return self._continue_webpage_summary_after_fetch(
+        summary_response = self._continue_webpage_summary_after_fetch(
             response.plan, fetch_result, url, original_user_input, session_id
         )
+
+        # Phase 61, Batch 1: purely additive, reached only after the exact
+        # `summary_response` the CLI will return already exists, and only
+        # when the explicit "... and save to inbox" grammar created this
+        # approval request in the first place. A failed save is caught
+        # inside _save_webpage_summary_to_inbox itself and never changes,
+        # delays, or replaces summary_response.
+        if summary_response.success and self._should_save_webpage_summary_to_inbox(
+            response
+        ):
+            self._save_webpage_summary_to_inbox(
+                url=url, body=summary_response.message, session_id=session_id
+            )
+
+        return summary_response
 
     def _handle_remember_and_show_back_workflow_request(
         self, content: str, session_id: int | None
@@ -1173,6 +1214,25 @@ class JarvisOrchestrator:
                 web_search_summary_query, user_request, session_id
             )
 
+        # Phase 61, Batch 1: the explicit "... and save to inbox" variant
+        # is a strict superset-string of the base webpage-summary prefix,
+        # exactly like Phase 11/12's query/category summary matchers
+        # relative to the plural set-summary matcher - it MUST be checked
+        # first, or it would be swallowed by match_webpage_summary below
+        # and misread as a URL literally containing the trailing words.
+        webpage_summary_and_save_url = (
+            self._command_router.match_webpage_summary_and_save(
+                user_request.strip()
+            )
+        )
+        if webpage_summary_and_save_url is not None:
+            return self._handle_webpage_summary_request(
+                webpage_summary_and_save_url,
+                user_request,
+                session_id,
+                save_to_inbox=True,
+            )
+
         webpage_summary_url = self._command_router.match_webpage_summary(
             user_request.strip()
         )
@@ -1556,10 +1616,16 @@ class JarvisOrchestrator:
         return response
 
     def _handle_webpage_summary_request(
-        self, raw_url: str, user_request: str, session_id: int | None
+        self,
+        raw_url: str,
+        user_request: str,
+        session_id: int | None,
+        *,
+        save_to_inbox: bool = False,
     ) -> JarvisResponse:
         """Handle an explicit "summarize/summarise webpage <url>" request
-        (Phase 34, Batch 2).
+        (Phase 34, Batch 2), optionally saving the resulting summary to
+        the Inbox (Phase 61, Batch 1).
 
         Unlike _handle_web_search_summary_request above, this is a
         two-phase workflow: acquisition is never performed here directly.
@@ -1585,9 +1651,19 @@ class JarvisOrchestrator:
 
         Args:
             raw_url: The raw trailing URL text extracted by
-                CommandRouter.match_webpage_summary - possibly empty.
+                CommandRouter.match_webpage_summary or
+                match_webpage_summary_and_save - possibly empty.
             user_request: The original, full request text.
             session_id: Optional session identifier for the audit trail.
+            save_to_inbox: True only when this request was matched via
+                the explicit "... and save to inbox" grammar
+                (match_webpage_summary_and_save). Threaded into the
+                created approval request's metadata
+                (Phase 61, Batch 1) so execute_approved() can later
+                decide, after a real successful summary, whether to
+                durably save it - the plain "summarize webpage <url>"
+                command never sets this and remains completely
+                Inbox-free, exactly as before this phase.
 
         Returns:
             A JarvisResponse. requires_confirmation=True on a first,
@@ -1635,6 +1711,13 @@ class JarvisOrchestrator:
             )
 
         if result.requires_confirmation:
+            metadata = {"webpage_summary": "true"}
+            if save_to_inbox:
+                # Phase 61, Batch 1: only the explicit "... and save to
+                # inbox" grammar ever sets this key - its absence is what
+                # keeps the plain "summarize webpage <url>" command
+                # completely Inbox-free, exactly as before this phase.
+                metadata["save_to_inbox"] = "true"
             approval = self._approvals.create_request(
                 action=user_request.strip(),
                 reason=(
@@ -1646,7 +1729,7 @@ class JarvisOrchestrator:
                 session_id=session_id,
                 tool_name="webpage_read",
                 tool_input={"url": url},
-                metadata={"webpage_summary": "true"},
+                metadata=metadata,
             )
             return JarvisResponse(
                 success=False,
@@ -1665,9 +1748,14 @@ class JarvisOrchestrator:
         # already ran without needing approval, proceed directly to
         # summarization using its result, exactly like the post-approval
         # path below would.
-        return self._continue_webpage_summary_after_fetch(
+        response = self._continue_webpage_summary_after_fetch(
             plan, result, url, user_request.strip(), session_id
         )
+        if save_to_inbox and response.success:
+            self._save_webpage_summary_to_inbox(
+                url=url, body=response.message, session_id=session_id
+            )
+        return response
 
     def _continue_webpage_summary_after_fetch(
         self,
@@ -1838,6 +1926,65 @@ class JarvisOrchestrator:
         self._audit_inbox_entry_creation(
             outcome=EventOutcome.SUCCESS,
             detail="source_type=web_search_summary",
+            session_id=session_id,
+        )
+
+    def _save_webpage_summary_to_inbox(
+        self, *, url: str, body: str, session_id: int | None
+    ) -> None:
+        """Save one durable inbox entry for a successful, explicitly-
+        requested webpage summary (Phase 61, Batch 1).
+
+        Called only from _execute_approved_webpage_summary (and the
+        currently-unreached immediate-GREEN fallback in
+        _handle_webpage_summary_request), only when
+        _should_save_webpage_summary_to_inbox() is True - i.e. only when
+        the explicit "... and save to inbox" grammar was used - and only
+        after the exact JarvisResponse the CLI will return already
+        exists. `body` is that response's own message text verbatim -
+        the "[AI webpage summary...]" disclosure label included - never
+        the raw extracted webpage text, mirroring
+        _save_web_search_summary_to_inbox's own body=response.message
+        pattern exactly.
+
+        When self._inbox_store is None (the default), this is a no-op:
+        no entry is saved.
+
+        A raising InboxStore.append() call is caught here and audited
+        (never re-raised) - a failed save must never change, delay, or
+        replace the response this method's caller has already built and
+        is about to return, mirroring
+        _save_web_search_summary_to_inbox's own failure-isolation
+        guarantee exactly.
+
+        Args:
+            url: The webpage URL this entry is about, stored verbatim as
+                source_query.
+            body: The exact final response text to store - never raw
+                webpage content.
+            session_id: Optional session identifier for the audit trail.
+        """
+        if self._inbox_store is None:
+            return
+
+        try:
+            self._inbox_store.append(
+                source_type="webpage_summary",
+                source_query=url,
+                body=body,
+                session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a save failure must never break the response
+            self._audit_inbox_entry_creation(
+                outcome=EventOutcome.FAILURE,
+                detail=f"source_type=webpage_summary error={exc}",
+                session_id=session_id,
+            )
+            return
+
+        self._audit_inbox_entry_creation(
+            outcome=EventOutcome.SUCCESS,
+            detail="source_type=webpage_summary",
             session_id=session_id,
         )
 

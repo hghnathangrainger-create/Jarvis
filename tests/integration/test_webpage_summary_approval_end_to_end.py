@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
 from approval.approval_manager import ApprovalManager
@@ -35,8 +36,10 @@ from approval.approval_models import ApprovalError
 from config.constants import ContentTrust
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
+from inbox.inbox_store import InboxStore
 from planner.planner import Planner
 from security.security_manager import SecurityManager
+from storage.database import create_session_factory, initialize_database
 from tools.builtin import EchoTool
 from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.executor import ToolExecutor
@@ -101,6 +104,21 @@ def _success_page(body: bytes, *, url: str = _URL) -> WebFetchSuccess:
     )
 
 
+class _RaisingInboxStore:
+    """A duck-typed InboxStore stand-in whose append() always raises
+    (Phase 61, Batch 1) - mirrors
+    test_web_search_summary_workflow.py's own precedent exactly."""
+
+    def append(self, **kwargs: object) -> None:
+        raise RuntimeError("simulated inbox write failure")
+
+
+def _in_memory_session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    return create_session_factory(engine)
+
+
 class _System:
     """The real components wired together, backed by given fetcher/reasoning."""
 
@@ -111,6 +129,7 @@ class _System:
         *,
         timeout_seconds: int | None = None,
         clock: _FakeClock | None = None,
+        inbox_store: InboxStore | object | None = None,
     ) -> None:
         self.logger = _SpyLogger()
         self.security = SecurityManager()
@@ -137,6 +156,8 @@ class _System:
             command_router=CommandRouter(self.registry),
             approval_manager=self.approvals,
             reasoning_engine=reasoning_engine,  # type: ignore[arg-type]
+            inbox_store=inbox_store,  # type: ignore[arg-type]
+            logger=self.logger,  # type: ignore[arg-type]
         )
 
 
@@ -513,3 +534,298 @@ def test_summarize_webpage_decisions_are_audited(workspace: Path) -> None:
     ]
     assert len(approval_events) == 1
     assert "outcome=approved" in str(approval_events[0]["detail"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 61, Batch 1: explicit "... and save to inbox" behavior
+# ---------------------------------------------------------------------------
+
+
+def _inbox_created_events(logger: _SpyLogger) -> list[dict[str, object]]:
+    return [
+        e for e in logger.events if e.get("action_type") == "inbox_entry_created"
+    ]
+
+
+def _inbox_failed_events(logger: _SpyLogger) -> list[dict[str, object]]:
+    return [
+        e
+        for e in logger.events
+        if e.get("action_type") == "inbox_entry_creation_failed"
+    ]
+
+
+def test_save_command_approval_metadata_carries_save_flag(workspace: Path) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    system = _System(fetcher, reasoning)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+
+    assert response.requires_confirmation is True
+    assert response.approval_request.metadata.get("save_to_inbox") == "true"
+    assert response.approval_request.metadata.get("webpage_summary") == "true"
+
+
+def test_plain_command_approval_metadata_never_carries_save_flag(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    system = _System(fetcher, reasoning)
+
+    response = system.orchestrator.handle_request(f"summarize webpage {_URL}")
+
+    assert response.requires_confirmation is True
+    assert "save_to_inbox" not in response.approval_request.metadata
+
+
+def test_successful_save_command_creates_exactly_one_inbox_entry(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result("Key point."))
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert inbox.count() == 1
+    entry = inbox.list_recent()[0]
+    assert entry.source_type == "webpage_summary"
+    assert entry.source_query == _URL
+    assert entry.body == executed.message
+    assert "[AI webpage summary" in entry.body
+    assert "Key point." in entry.body
+
+
+def test_plain_command_never_creates_an_inbox_entry_even_when_store_configured(
+    workspace: Path,
+) -> None:
+    """Complements test_no_inbox_integration_exists_for_this_command
+    above (which never even constructs an InboxStore): this proves the
+    plain command remains Inbox-free even when an InboxStore IS
+    available to the orchestrator - the absence of the save_to_inbox
+    metadata flag, not the absence of a store, is what keeps it
+    Inbox-free."""
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(f"summarize webpage {_URL}")
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert inbox.count() == 0
+
+
+def test_declined_save_command_creates_no_inbox_entry(workspace: Path) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.decline(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert inbox.count() == 0
+
+
+def test_expired_save_command_approval_creates_no_inbox_entry(
+    workspace: Path,
+) -> None:
+    clock = _FakeClock(_START)
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(
+        fetcher, reasoning, timeout_seconds=60, clock=clock, inbox_store=inbox
+    )
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    clock.now = _START + timedelta(seconds=60)
+
+    with pytest.raises(ApprovalError):
+        system.approvals.approve(response.approval_request.request_id)
+
+    assert inbox.count() == 0
+
+
+def test_blocked_unsafe_url_save_command_creates_no_inbox_entry(
+    workspace: Path,
+) -> None:
+    """Uses the real SafeWebFetcher: the fetch itself fails safely after
+    approval, so no summary is ever produced and nothing is saved."""
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(SafeWebFetcher(), reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        "summarize webpage http://169.254.169.254/latest/meta-data/"
+        " and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert inbox.count() == 0
+
+
+def test_fetch_failure_with_save_command_creates_no_inbox_entry(
+    workspace: Path,
+) -> None:
+    from web.safe_web_fetcher import WebFetchFailureReason
+
+    fetcher = _FakeFetcher(
+        WebFetchFailure(
+            url=_URL,
+            reason=WebFetchFailureReason.CONNECTION_ERROR,
+            detail="Simulated network failure.",
+        )
+    )
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert inbox.count() == 0
+
+
+def test_ai_unavailable_with_save_command_creates_no_inbox_entry(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(None)  # simulates provider failure
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is False
+    assert inbox.count() == 0
+
+
+def test_ai_disabled_with_save_command_creates_no_inbox_entry(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning_engine=None, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+
+    assert response.success is False
+    assert response.requires_confirmation is False
+    assert inbox.count() == 0
+
+
+def test_failed_inbox_write_does_not_break_the_returned_response(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result("A friendly greeting page."))
+    system = _System(fetcher, reasoning, inbox_store=_RaisingInboxStore())
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+    assert "A friendly greeting page." in executed.message
+    assert len(_inbox_failed_events(system.logger)) == 1
+    assert len(_inbox_created_events(system.logger)) == 0
+
+
+def test_no_inbox_store_configured_is_a_safe_no_op_for_save_command(
+    workspace: Path,
+) -> None:
+    fetcher = _FakeFetcher(_success_page(b"<p>content</p>"))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    system = _System(fetcher, reasoning)  # no inbox_store passed at all
+
+    assert system.orchestrator._inbox_store is None
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    executed = system.orchestrator.execute_approved(response, decision)
+
+    assert executed.success is True
+
+
+def test_saved_body_never_contains_raw_webpage_content_only_the_ai_summary(
+    workspace: Path,
+) -> None:
+    """The saved entry's body is the exact displayed AI summary, never
+    the raw extracted webpage text - proven here by a distinctive
+    sentence that appears in the fetched page but is deliberately never
+    echoed by the fake reasoning engine's own canned summary."""
+    distinctive = "A very distinctive sentence about zebras and telescopes."
+    fetcher = _FakeFetcher(_success_page(f"<p>{distinctive}</p>".encode()))
+    reasoning = _FakeReasoningEngine(_summary_result("An unrelated summary."))
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    system.orchestrator.execute_approved(response, decision)
+
+    entry = inbox.list_recent()[0]
+    assert distinctive not in entry.body
+    assert "An unrelated summary." in entry.body
+
+
+def test_ai_still_receives_untrusted_context_for_save_command(
+    workspace: Path,
+) -> None:
+    """The trust boundary is completely unaffected by the save flag:
+    the AI still receives the extracted webpage text as UNTRUSTED
+    context, exactly as the plain command already proves above."""
+    distinctive = "Another distinctive sentence about kangaroos and lighthouses."
+    fetcher = _FakeFetcher(_success_page(f"<p>{distinctive}</p>".encode()))
+    reasoning = _FakeReasoningEngine(_summary_result())
+    inbox = InboxStore(_in_memory_session_factory())
+    system = _System(fetcher, reasoning, inbox_store=inbox)
+
+    response = system.orchestrator.handle_request(
+        f"summarize webpage {_URL} and save to inbox"
+    )
+    decision = system.approvals.approve(response.approval_request.request_id)
+    system.orchestrator.execute_approved(response, decision)
+
+    request = reasoning.calls[0]
+    assert request.context_block is not None
+    assert request.context_block.trust is ContentTrust.UNTRUSTED
+    assert distinctive in request.context_block.text

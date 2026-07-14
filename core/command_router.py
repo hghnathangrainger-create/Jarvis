@@ -368,6 +368,21 @@ _WEBPAGE_SUMMARY_PREFIXES: tuple[str, ...] = (
     "summarise webpage ",
 )
 
+#: The exact, fixed trailing suffix for the explicit webpage-summary-and-
+#: save command (Phase 61, Batch 1): "summarize/summarise webpage <url>
+#: and save to inbox". Mirrors _CREATE_AND_READ_WORKFLOW_SUFFIX/
+#: _UPDATE_AND_SHOW_WORKFLOW_SUFFIX's own suffix-shape reasoning exactly:
+#: match_webpage_summary_and_save() below checks this suffix via a real
+#: str.endswith() comparison against the fully stripped text (never a
+#: substring search), so an occurrence of these words in the MIDDLE of a
+#: URL never triggers anything. This is a substantially narrower risk
+#: than the Phase 17 file-content case: a URL practically never contains
+#: a literal, unencoded space, so a URL legitimately ending in this exact
+#: phrase is a near-impossible collision in practice - still disclosed
+#: honestly here rather than assumed structurally impossible, matching
+#: this project's own established documentation discipline.
+_WEBPAGE_SUMMARY_AND_SAVE_SUFFIX = " and save to inbox"
+
 #: Leading phrases that indicate an explicit memory-summary request (Phase 9,
 #: Batch 2). The text after the phrase is treated as the raw, unparsed
 #: trailing id text. Deliberately a separate, narrow match from
@@ -972,6 +987,56 @@ class CommandRouter:
             return None
 
         return text[len(prefix) :].strip()
+
+    def match_webpage_summary_and_save(self, text: str) -> str | None:
+        """Match the explicit "summarize/summarise webpage <url> and save
+        to inbox" request and extract its URL.
+
+        Recognises the two aliases below (Phase 61, Batch 1) - a
+        strictly more specific grammar than match_webpage_summary's own
+        prefix, since both share the identical leading phrase and this
+        one additionally requires the exact trailing
+        _WEBPAGE_SUMMARY_AND_SAVE_SUFFIX. The caller
+        (JarvisOrchestrator.handle_request) MUST check this method
+        before match_webpage_summary(), or the "and save to inbox"
+        variant would be swallowed by the base matcher and misread as a
+        URL literally containing the trailing words - mirroring the
+        exact ordering requirement documented for
+        match_memory_query_summary()/match_memory_category_summary()
+        relative to match_memory_set_summary().
+
+        Like match_webpage_summary, this method gates on "webpage_read"
+        being registered, for the same reason: this command always
+        executes the real, approval-gated WebpageReadTool for
+        acquisition.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted URL text between the prefix and the mandatory
+            trailing suffix - possibly empty, if the phrase was used
+            with no URL - or None if the text does not match this exact
+            grammar at all (no recognised prefix, no trailing suffix, or
+            "webpage_read" is not registered).
+        """
+        if not self._registry.has_tool("webpage_read"):
+            return None
+
+        lowered = text.casefold()
+        prefix = self._file_prefix(lowered, _WEBPAGE_SUMMARY_PREFIXES)
+        if prefix is None:
+            return None
+
+        if not lowered.endswith(_WEBPAGE_SUMMARY_AND_SAVE_SUFFIX):
+            return None
+
+        start = len(prefix)
+        end = len(text) - len(_WEBPAGE_SUMMARY_AND_SAVE_SUFFIX)
+        if end < start:
+            return None
+
+        return text[start:end].strip()
 
     def match_memory_summary(self, text: str) -> str | None:
         """Match an explicit memory-summary request and extract its raw id text.
