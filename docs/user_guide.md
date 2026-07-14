@@ -1,8 +1,8 @@
 # Jarvis Operating Guide
 
-A practical, task-oriented reference for actually running and using Jarvis. Unlike `README.md` (which is a phase-by-phase build log), this document is organized around *what you want to do* right now, as of Phase 22.
+A practical, task-oriented reference for actually running and using Jarvis. Unlike `README.md` (which is a phase-by-phase build log), this document is organized around *what you want to do* right now — kept current as a living document, updated in place whenever a phase changes user-facing behavior, rather than describing one fixed point in the project's history.
 
-Everything described here was verified directly against the current codebase while writing this guide — nothing here is aspirational or planned.
+Everything described here is verified directly against the current codebase whenever this guide is updated — nothing here is aspirational or planned. If something you observe running Jarvis doesn't match this guide, the codebase is the source of truth; check the highest-numbered `docs/phase_NN_completion_report.md` for the most recently closed phase.
 
 ---
 
@@ -55,6 +55,8 @@ On startup you'll see `Jarvis Online.`, a short usage reminder, and — if any n
 | `APPROVAL_TIMEOUT_SECONDS` | How long a YELLOW approval waits before expiring. | `60` |
 | `LOG_LEVEL` | Logging verbosity. | `INFO` |
 
+**Console logging:** since Phase 54, Jarvis also prints one structured log line to the console for every action it takes (alongside your typed input and its printed response) — for example `2026-...+00:00 [tool_executor] tool_call -> success tier=green 0ms | tool=echo success=True`. This is controlled by the `LOG_LEVEL` setting above: the default, `INFO`, shows every action, including successful ones; set it to `WARNING` or higher for a quieter console showing only blocked/failed actions. This is independent of the durable audit log, which always records everything regardless of `LOG_LEVEL`.
+
 With `AI_REASONING_ENABLED` unset or `false`, every summary command (file summary, web-search summary, memory summaries, scheduled summaries) will simply report that AI reasoning is unavailable, without ever calling the Claude API — but `ANTHROPIC_API_KEY` must still be set to *something* for Jarvis to start at all (confirmed directly in `config/settings.py`).
 
 ---
@@ -76,6 +78,8 @@ poetry run python scheduler.py
 ```
 
 Runs forever, checking every 60 seconds whether any enabled schedule is due. **The scheduler must actually be running for scheduled summaries to happen** — creating a schedule via the CLI only stores it; nothing runs it unless `scheduler.py` is running somewhere (this terminal, a background window, whatever you prefer). Stopping it (Ctrl+C) simply pauses checking; no schedule is lost, and it picks up exactly where it left off next time it runs.
+
+Like the CLI (§3), this process also prints one structured log line to the console per action (each poll cycle, each schedule claimed and run), controlled by the same `LOG_LEVEL` setting — the default, `INFO`, shows every check and run; `WARNING` or higher shows only problems.
 
 ---
 
