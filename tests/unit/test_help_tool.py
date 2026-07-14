@@ -73,6 +73,9 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "help",
         "list commands",
         "show commands",
+        "health check",
+        "show health",
+        "system health",
         "remember this:",
         "show memories",
         "search memories for",
@@ -113,6 +116,20 @@ def test_output_is_identical_regardless_of_input_data() -> None:
 def test_output_includes_every_documented_command_family(expected_phrase: str) -> None:
     result = _run(HelpTool())
     assert expected_phrase in result.output
+
+
+def test_output_documents_health_check_command_and_its_aliases() -> None:
+    """Phase 58 regression: Phase 57 added the health-check command to
+    CommandRouter/main.py/SecurityManager/README/user_guide.md but never
+    to HelpTool's own _HELP_LINES - a real, user-visible gap that
+    test_help_output_routing_consistency.py's existing tests could not
+    have caught, since they only prove phrases already listed in
+    _HELP_LINES route correctly, never that every real command is
+    listed. This test locks all three accepted aliases in place."""
+    result = _run(HelpTool())
+    assert "health check" in result.output
+    assert "show health" in result.output
+    assert "system health" in result.output
 
 
 def test_output_does_not_invent_a_nonexistent_command() -> None:

@@ -34,6 +34,23 @@ reason (a missing file, AI reasoning disabled) all count as "recognised" -
 only the generic not-handled fallback would indicate real drift between
 what HelpTool claims exists and what the router actually recognises.
 
+Known blind spot (found in Phase 58): this file can only prove that a
+phrase already listed in _HELP_LINES still routes correctly. It has no
+way to prove the converse - that every real, registered command is
+actually listed in _HELP_LINES in the first place. Phase 57 added the
+health-check command to CommandRouter/main.py/SecurityManager without
+ever adding it to _HELP_LINES, and every test in this file kept passing
+throughout, because none of them iterate over CommandRouter's own
+grammar - only over _REPRESENTATIVE_PHRASES below, which is itself
+derived from _HELP_LINES. Closing that specific gap for the
+health-check command is tests/unit/test_help_tool.py's own
+test_output_documents_health_check_command_and_its_aliases (Phase 58);
+a general mechanism to catch every future case of this class would
+mean deriving _HELP_LINES from CommandRouter's own grammar - the
+introspectable-registry approach this module's own Phase 43 origin
+explicitly rejected as too large a refactor for a narrow discoverability
+goal - so it is not undertaken here either.
+
 Each phrase gets a fresh orchestrator (a function-scoped fixture is
 created anew per parametrised case): Phase 15's Workflow Engine allows
 only one paused, awaiting-approval workflow at a time process-wide, so
@@ -62,6 +79,7 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     ("Basic: system info", "system info"),
     ("Basic: show config", "show config"),
     ("Basic: help", "help"),
+    ("Basic: health check", "health check"),
     # Memory
     ("Memory: remember this", "remember this: buy milk"),
     ("Memory: show memories", "show memories"),

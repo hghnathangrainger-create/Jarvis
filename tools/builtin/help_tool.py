@@ -37,6 +37,9 @@ _HELP_LINES: tuple[str, ...] = (
     "  system info / version / about / who are you - shows basic system information",
     "  show config / show settings - shows current configuration status",
     "  help / list commands / show commands - shows this list",
+    "  health check / show health / system health - reports basic system health "
+    "(settings, database, tool registry, logging, Inbox/Schedule/Quarantine stores, "
+    "Security Manager self-check)",
     "",
     "Memory:",
     "  remember this: <text> / remember this as <category>: <text> - saves a memory",
