@@ -29,6 +29,15 @@ Does NOT:
     - Execute more than one hard-coded action type. There is no
       action_type dispatch here - every claimed schedule runs the exact
       same scheduled-web-search-summary-to-Inbox call.
+    - Configure console logging anywhere but main() (Phase 54, Batch 2).
+      observability.logging_setup.configure_console_logging() is called
+      once, directly inside main(), independently of build_components()
+      - never inside build_components() itself, so every existing test
+      that calls build_components() directly is unaffected. Idempotent,
+      matching main.py's own Batch 1 wiring exactly: attaches at most
+      one console handler to the "jarvis" app logger regardless of how
+      many times main() runs in a process. Uses the already-validated
+      settings.log_level (Phase 46) - no new setting.
 
 Run with:
     poetry run python scheduler.py
@@ -47,6 +56,7 @@ from ai.router import AIRouter
 from config.settings import load_settings
 from inbox.inbox_store import InboxStore
 from observability.logger import EventLogger
+from observability.logging_setup import configure_console_logging
 from scheduling.schedule_store import ScheduleStore
 from scheduling.scheduled_summary_runner import run_scheduled_web_search_summary
 from security.audit_log import AuditLog
@@ -203,6 +213,12 @@ def main() -> None:
     schedule_store, inbox_store, search_provider, reasoning_engine, logger = (
         build_components()
     )
+    # Phase 54, Batch 2: console logging is configured here, directly in
+    # the real process entry point - never inside build_components(), so
+    # every existing test that calls build_components() directly is
+    # unaffected. Idempotent - see configure_console_logging()'s own
+    # docstring. Mirrors main.py's own Batch 1 wiring exactly.
+    configure_console_logging(load_settings())
     while True:
         run_one_poll_cycle(
             schedule_store, inbox_store, search_provider, reasoning_engine, logger
