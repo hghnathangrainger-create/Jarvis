@@ -2,11 +2,12 @@
 test_main_health_check_wiring.py
 
 Composition tests for HealthCheckTool wiring in main.build_orchestrator()
-(Phase 57, Batch 1).
+(Phase 57, covering both Batch 1 and Batch 2).
 
 These confirm HealthCheckTool is registered, routed to correctly (all
 three "health check"/"show health"/"system health" grammar aliases),
-and receives the real, already-built registry/settings - without ever
+and receives the real, already-built registry/settings/inbox_store/
+schedule_store/quarantine_store/security instances - without ever
 needing a real database connection beyond the one build_orchestrator()
 itself already opens, matching the existing
 test_main_help_wiring.py/test_main_config_wiring.py pattern exactly.

@@ -31,11 +31,13 @@ Read-only tools (GREEN) - these never change any state:
     - HelpTool: lists Jarvis's currently supported commands (Phase 43).
       A static, hand-maintained list, never AI-generated and never
       derived from CommandRouter at runtime.
-    - HealthCheckTool: reports basic Jarvis system health (Phase 57,
-      Batch 1) - settings loaded, database path reachable, tool
-      registry populated, console logging configured. Every check
-      reads an already-constructed object's existing state; nothing
-      is created, opened, or mutated.
+    - HealthCheckTool: reports basic Jarvis system health (Phase 57) -
+      settings loaded, database path reachable, tool registry
+      populated, console logging configured, Inbox store reachable,
+      Schedule store reachable, Quarantine store reachable, and a
+      SecurityManager self-classification check confirming its own
+      action remains GREEN. Every check reads an already-constructed
+      object's existing state; nothing is created, opened, or mutated.
     - QuarantineListTool: lists what is currently inside Jarvis's
       quarantine directory (.jarvis_trash/, Phase 36) - name, size, and
       modified time only. Never reads file content, never creates the
