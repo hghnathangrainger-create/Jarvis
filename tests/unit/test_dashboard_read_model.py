@@ -371,6 +371,28 @@ def test_inbox_row_fields_map_from_real_record(rm) -> None:
     assert row.created_at is not None
 
 
+def test_webpage_summary_source_type_renders_like_any_other_entry(rm) -> None:
+    """Phase 61, Batch 2 smoke check: get_recent_inbox_entries()/InboxRow
+    never reference source_type at all (confirmed by reading
+    dashboard/read_model.py directly) - a "webpage_summary" entry from
+    the new explicit save command flows through identically to a
+    "web_search_summary" entry, with no dashboard code change needed."""
+    read_model, _, _, _, inbox, _, _ = rm
+    inbox.append(
+        source_type="webpage_summary",
+        source_query="https://example.com/article",
+        body="[AI webpage summary - based on one fetched page] A synthesis.",
+    )
+
+    row = read_model.get_recent_inbox_entries()[0]
+    assert row.source_query == "https://example.com/article"
+    assert row.full_body == (
+        "[AI webpage summary - based on one fetched page] A synthesis."
+    )
+    assert isinstance(row.id, int)
+    assert row.created_at is not None
+
+
 def test_inbox_preview_truncated_above_120_chars(rm) -> None:
     read_model, _, _, _, inbox, _, _ = rm
     long_body = "z" * 121

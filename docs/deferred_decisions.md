@@ -53,9 +53,9 @@
 ## 7. Inbox integration for webpage summaries
 
 - **Origin:** Standing since at least Phase 40's own completion report; repeated through Phase 52.
-- **Current status:** Deferred, unselected.
-- **Why it remains deferred:** An unresolved producer-policy decision (whether an approval-gated summary should also auto-save to the Inbox) — not an implementation gap.
-- **Fuller source:** README.md's "Next Phase" section.
+- **Current status:** **Implemented, Phase 61**, via an explicit opt-in command, not automatic saving. Phase 60's planning turn weighed always auto-saving a successful webpage summary (mirroring the existing web-search-summary producer) against making the save fully explicit, and concluded that approving a webpage *fetch* should not be read as automatic consent to durably *store* its summary — a distinct decision Nathan should make each time, via its own command. Phase 61, Batch 1 added the new `summarize webpage <url> and save to inbox` / `summarise webpage <url> and save to inbox` grammar (checked before the base command so it is never swallowed), threaded a `save_to_inbox` flag through the existing YELLOW webpage-read approval via approval metadata, and saves only after a real successful summary — never on a failed fetch, failed/unavailable AI summary, declined/expired approval, or blocked action, and never the raw webpage content. Batch 2 documented the command (README, user guide, HelpTool) and added a dashboard smoke check confirming the dashboard's Inbox view needed no code change, since it was already source-type-agnostic.
+- **Resulting behavior:** The plain `summarize webpage <url>` command is completely unchanged and remains Inbox-free. The new explicit variant additionally saves the exact displayed summary as a `source_type="webpage_summary"` Inbox entry on success.
+- **Fuller source:** `docs/phase_61_completion_report.md` for the full closure write-up.
 
 ## 8. Dashboard write actions of any kind
 

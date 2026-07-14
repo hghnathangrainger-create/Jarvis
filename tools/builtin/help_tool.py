@@ -77,7 +77,10 @@ _HELP_LINES: tuple[str, ...] = (
     "summarizes results, saves a copy to the Inbox",
     "  read webpage <url> - fetches and shows a webpage's text (approval required)",
     "  summarize webpage <url> / summarise webpage <url> - fetches and AI-summarizes a "
-    "webpage (approval required)",
+    "webpage (approval required); does not save to the Inbox",
+    "  summarize webpage <url> and save to inbox / summarise webpage <url> and save to "
+    "inbox - same as above, and also saves the summary to the Inbox on success "
+    "(approval required)",
     "",
     "Schedules:",
     "  schedule web search summary for <query> at <HH:MM> - creates a daily schedule "

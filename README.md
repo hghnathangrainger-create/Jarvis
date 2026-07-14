@@ -902,11 +902,11 @@ summarize webpage <url>
 summarise webpage <url>
 ```
 
-Both spellings route identically. **The central safety design point**: Phase 18's existing `"summarise web search for <query>"` command is safe to leave un-approval-gated only because it always calls one fixed, vetted search provider — that pattern cannot be safely copied for an arbitrary webpage URL, which is exactly the risk category Phase 33 already classified YELLOW. So this command reuses Phase 33's `WebpageReadTool`/`ToolExecutor`/`SecurityManager` path unchanged for acquisition: a first request always requires the same YELLOW approval `read webpage <url>` already uses, classified via the tool's own fixed `"read webpage"` action string, never the URL. Only after Nathan approves and the fetch actually succeeds does `ai/webpage_ingestion.py` wrap the extracted text as `AIContextBlock.from_untrusted(text, source=f"webpage:{url!r}")` — with a preamble explicitly warning the AI that the content may be incomplete, outdated, malicious, or contain prompt-injection attempts — and `AIReasoningEngine.reason()` produce a display-only summary. The summary is never saved anywhere: no Inbox entry, no file, no database row.
+Both spellings route identically. **The central safety design point**: Phase 18's existing `"summarise web search for <query>"` command is safe to leave un-approval-gated only because it always calls one fixed, vetted search provider — that pattern cannot be safely copied for an arbitrary webpage URL, which is exactly the risk category Phase 33 already classified YELLOW. So this command reuses Phase 33's `WebpageReadTool`/`ToolExecutor`/`SecurityManager` path unchanged for acquisition: a first request always requires the same YELLOW approval `read webpage <url>` already uses, classified via the tool's own fixed `"read webpage"` action string, never the URL. Only after Nathan approves and the fetch actually succeeds does `ai/webpage_ingestion.py` wrap the extracted text as `AIContextBlock.from_untrusted(text, source=f"webpage:{url!r}")` — with a preamble explicitly warning the AI that the content may be incomplete, outdated, malicious, or contain prompt-injection attempts — and `AIReasoningEngine.reason()` produce a display-only summary. By itself, this exact command's summary is never saved anywhere: no Inbox entry, no file, no database row. An explicit, separate opt-in command was added later to save it on request instead — see Phase 61 below.
 
 ### What is deliberately NOT included in Phase 34
 
-No new command aliases beyond the two spellings. No autonomous browsing, no multi-page crawling — exactly one fetch per request. No acting on instructions inside the webpage's own text — it is always treated as data to summarize, never a command, regardless of what it says. No automated save-to-file or Inbox integration (unlike the web-search-summary command, which does auto-save — a deliberate difference, since this content is approval-gated in a way that one isn't). No workflow, scheduler, or dashboard integration. No `PromptBuilder` changes — the existing, already-proven automatic injection scan covers this new untrusted source unmodified. No Research Agent, Core service, voice, phone, goals, projects, or tasks. **File delete has since been added** — see Phase 35 below — as a distinct, separately-reviewed capability unrelated to webpage work.
+No new command aliases beyond the two spellings. No autonomous browsing, no multi-page crawling — exactly one fetch per request. No acting on instructions inside the webpage's own text — it is always treated as data to summarize, never a command, regardless of what it says. No *automatic* save-to-file or Inbox integration for this exact command (unlike the web-search-summary command, which always auto-saves) — a deliberate difference, since this content is approval-gated in a way that one isn't; saving a webpage summary requires a separate, explicit command instead (Phase 61). No workflow, scheduler, or dashboard integration. No `PromptBuilder` changes — the existing, already-proven automatic injection scan covers this new untrusted source unmodified. No Research Agent, Core service, voice, phone, goals, projects, or tasks. **File delete has since been added** — see Phase 35 below — as a distinct, separately-reviewed capability unrelated to webpage work.
 
 ---
 
@@ -1032,6 +1032,27 @@ All three are the same fixed, no-argument request. Checks: settings loaded; data
 ### What is deliberately NOT included in Phase 57
 
 No write action of any kind. No new database connection or store instance created solely to check health. No secrets or API key values shown. No invocation of `dashboard.py` and no `DashboardReadModel` construction — the dashboard is a wholly separate process with its own database connection; the shared SQLite file's existence is already covered by the database-path check. No change to approval behavior or to the security classification of any existing action beyond the one new, additive GREEN rule for this tool's own action. No new dependency. No broader "system inspector" scope beyond the eight checks above.
+
+---
+
+## Phase 61 — Explicit Webpage Summary Inbox Save Command (complete)
+
+Phase 34's `summarize webpage <url>` command never saved its summary anywhere — a real inconsistency with the web-search-summary command, which always auto-saves to the Inbox (Phase 20). A dedicated planning review weighed always auto-saving a webpage summary against making the save fully explicit, and concluded that approving a webpage *fetch* should not be read as automatic consent to durably *store* its summary forever — a distinct decision Nathan should make explicitly, each time, via its own command. See `docs/phase_61_completion_report.md` for the full write-up.
+
+### Explicit save command
+
+```
+summarize webpage <url> and save to inbox
+summarise webpage <url> and save to inbox
+```
+
+Both spellings route identically, and are recognised as a distinct, more specific grammar from the plain `summarize webpage <url>` command above — checked first, so it is never swallowed by the plain command's own matching. Everything about acquisition and summarization is completely unchanged: the same YELLOW `read webpage <url>` approval is required before any fetch, the same untrusted-context/injection-scanning path is used, and AI reasoning must be enabled. The only difference is what happens after a real, successful summary already exists: this variant also saves it as a new Inbox entry (`source_type="webpage_summary"`, `source_query` the fetched URL, `body` the exact text Nathan was already shown — the disclosure label included, never the raw extracted webpage text). The plain `summarize webpage <url>` command is completely unaffected and remains Inbox-free, exactly as it was in Phase 34.
+
+No entry is ever saved unless this explicit command was used, and even then only after a real success: a failed fetch, a failed or unavailable AI summary, a declined or expired approval, or a blocked action all save nothing, exactly like the plain command's own existing failure handling. A failed Inbox write is caught and audited without ever changing, delaying, or replacing the response Nathan already sees.
+
+### What is deliberately NOT included in Phase 61
+
+No change to the plain `summarize webpage <url>` command's own behavior. No automatic/implicit saving of any kind — saving only ever happens when this exact explicit command was used. No change to the YELLOW `read webpage` approval gate, to `WebpageReadTool`, or to any trust boundary — webpage content remains untrusted and scanned exactly as before. No dashboard code change (the dashboard's Inbox view was already source-type-agnostic). No scheduler involvement or scheduler schema change. No new dependency. No Research Agent, Core service, voice, phone, goals, projects, or tasks.
 
 ---
 

@@ -100,6 +100,7 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "summarise web search for",
         "read webpage",
         "summarize webpage",
+        "and save to inbox",
         "schedule web search summary for",
         "list schedules",
         "enable schedule",
@@ -130,6 +131,21 @@ def test_output_documents_health_check_command_and_its_aliases() -> None:
     assert "health check" in result.output
     assert "show health" in result.output
     assert "system health" in result.output
+
+
+def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (
+    None
+):
+    """Phase 61, Batch 2: HelpTool documents both the plain webpage-
+    summary command and the new explicit "and save to inbox" variant,
+    and is explicit that the plain command does not save anywhere -
+    proactively closing the exact Phase-58-class gap (a real command
+    missing from _HELP_LINES) before it can occur here, rather than
+    fixing it after the fact."""
+    result = _run(HelpTool())
+    assert "summarize webpage <url> and save to inbox" in result.output
+    assert "summarise webpage <url> and save to inbox" in result.output
+    assert "does not save to the Inbox" in result.output
 
 
 def test_output_does_not_invent_a_nonexistent_command() -> None:

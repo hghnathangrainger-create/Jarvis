@@ -156,13 +156,14 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 
 Unlike `search the web for <query>` above, this sends a network request to an arbitrary, Nathan-supplied target rather than one fixed, vetted search provider, so it always requires approval first. On approval, Jarvis validates the URL, fetches the page, extracts its visible text, strips any terminal/ANSI control sequences the page's own text might contain, and displays the result — never rewritten, never summarized, and never saved anywhere. If the URL is unsafe (points at a private/local network address, uses a disallowed scheme, etc.) or the fetch otherwise fails, you still see the approval prompt first (the URL is not pre-validated before asking), and then a clean, honest failure message after approving — nothing crashes and nothing is silently retried. The page's own text is never treated as an instruction: Jarvis does not follow links, act on anything the page says, or read a second page on its own.
 
-### Webpage summary command (Phase 34)
+### Webpage summary command (Phase 34; explicit Inbox save added Phase 61)
 
 | Command | Does | Tier |
 |---|---|---|
-| `summarize webpage <url>` / `summarise webpage <url>` | Fetches one webpage (same approval-gated path as `read webpage <url>`) and asks AI to summarize its extracted text. | YELLOW — requires approval |
+| `summarize webpage <url>` / `summarise webpage <url>` | Fetches one webpage (same approval-gated path as `read webpage <url>`) and asks AI to summarize its extracted text. Does **not** save to the Inbox. | YELLOW — requires approval |
+| `summarize webpage <url> and save to inbox` / `summarise webpage <url> and save to inbox` | Same as above, and — only once a real summary has actually been produced — also saves it to the Inbox. | YELLOW — requires approval |
 
-Approval happens **before** fetching, exactly like the plain read command — in fact this command reuses that exact same approval step, so the AI is never involved until an approved fetch has already succeeded. Only after that does Jarvis wrap the extracted text as untrusted context (explicitly disclosed to the AI as possibly incomplete, outdated, or containing text designed to look like instructions) and ask it for a summary. The summary is shown to you only — it is never saved to the Inbox, never written to a file, and never fed into any other command; each request is a completely fresh fetch and summary. Like the plain read command, this does not browse multiple pages, does not follow links, and never acts on anything the page's text says, no matter how it's phrased. If approval is declined or times out, or if the fetch or summarization fails for any reason, you get a clear, honest explanation and nothing is fetched or summarized.
+Approval happens **before** fetching, exactly like the plain read command — in fact both commands above reuse that exact same approval step, so the AI is never involved until an approved fetch has already succeeded. Only after that does Jarvis wrap the extracted text as untrusted context (explicitly disclosed to the AI as possibly incomplete, outdated, or containing text designed to look like instructions) and ask it for a summary. The summary is shown to you either way; the plain `summarize webpage <url>` command never saves it anywhere — not the Inbox, not a file, not fed into any other command — each request is a completely fresh fetch and summary. The `... and save to inbox` variant additionally stores the exact text you were shown (never the raw webpage content) as a new Inbox entry, but only after a real success: a failed fetch, a failed or unavailable AI summary, a declined or expired approval, or a blocked action all save nothing, exactly like the plain command's own failure handling. Neither command browses multiple pages, follows links, or acts on anything the page's text says, no matter how it's phrased. If approval is declined or times out, or if the fetch or summarization fails for any reason, you get a clear, honest explanation and nothing is fetched, summarized, or saved.
 
 ### Memory summary commands (all advisory AI syntheses; require `AI_REASONING_ENABLED`)
 
@@ -218,12 +219,13 @@ These show durable **history** only — not a live list of things currently awai
 
 ## 7. Inbox, Scheduled Summaries, and Startup Notices
 
-**The Inbox** is a durable, append-only record of AI-generated web-search summaries that would otherwise vanish once your terminal scrollback is gone. Two things write to it:
+**The Inbox** is a durable, append-only record of AI-generated summaries that would otherwise vanish once your terminal scrollback is gone. Three things write to it:
 
-1. **Interactive**: `summarise web search for <query>` — after a real, successful summary is produced, it's saved automatically alongside showing it to you.
+1. **Interactive web search**: `summarise web search for <query>` — after a real, successful summary is produced, it's saved automatically alongside showing it to you.
 2. **Scheduled**: a due schedule (see §6/§8) that runs successfully.
+3. **Explicit webpage summary** (Phase 61): `summarize webpage <url> and save to inbox` / `summarise webpage <url> and save to inbox` — only when you use this exact opt-in variant, and only after a real, successful summary is produced; the plain `summarize webpage <url>` command (no trailing phrase) never saves anything.
 
-Both kinds are visible in the dashboard's Inbox tab, distinguished internally by `source_type` (`web_search_summary` vs `scheduled_web_search_summary`). Every stored summary is based on search-result **snippets and metadata only** — Jarvis does not read full webpages. A saved entry is a stored **display string**: it is never re-executed, never trusted as an instruction, and never fed back into any AI request. Adversarial-looking text inside a query or summary (fake commands, URLs, anything) is always just displayed as plain text.
+All three are visible in the dashboard's Inbox tab, distinguished internally by `source_type` (`web_search_summary`, `scheduled_web_search_summary`, or `webpage_summary`). The two web-search-based producers are based on search-result **snippets and metadata only** — Jarvis does not read full webpages for those. The webpage-summary producer is different: it stores the AI's summary of a real, fetched webpage's extracted text — but still only the summary text you were already shown, never the raw webpage content itself. A saved entry, from any producer, is a stored **display string**: it is never re-executed, never trusted as an instruction, and never fed back into any AI request. Adversarial-looking text inside a query, URL, or summary (fake commands, URLs, anything) is always just displayed as plain text.
 
 **Scheduled summaries specifically:**
 - Schedules fire once per day at a fixed `HH:MM` in your machine's local time — no cron syntax, no recurrence options.
@@ -252,7 +254,7 @@ Seven tabs, all read-only:
 | **Memories** | Recent memories (filterable by category), full content on selecting a row. |
 | **Approval History** | Past approval requests and decisions — durable history, not a live "awaiting your decision" list. |
 | **Workflow History** | Recently active workflows and their full recorded transition history on selection — durable history, not resumable state. |
-| **Inbox** | Saved summaries (interactive and scheduled), newest first, full text on selection. |
+| **Inbox** | Saved summaries (interactive web search, scheduled, and explicit webpage-summary saves), newest first, full text on selection. |
 | **Schedules** | Every configured schedule: id, name, query, time, enabled state, last run, created date. |
 | **Quarantine** | Recorded quarantined files: name, original path (when known), quarantine path, quarantined-at time, and session id. Durable metadata only — read-only, and a row does not guarantee the file is still physically in `.jarvis_trash/` (it may have already been restored). |
 
@@ -395,7 +397,7 @@ Then, in a separate terminal, leave `scheduler.py` running. Check `list schedule
 Confirmed absent from the current codebase — not deferred silently, each explicitly a future decision:
 
 - No desktop, phone, or email/push notifications of any kind — the only "notice" mechanism is the CLI startup line (§7) and the dashboard's real Overview line.
-- No autonomous webpage browsing, no multi-page crawling, and no scheduled webpage monitoring. `read webpage <url>` (Phase 33, §6) and `summarize webpage <url>`/`summarise webpage <url>` (Phase 34, §6) each fetch exactly one page per request, never follow links, and never act on anything the page's text says. Neither command saves what it fetched or summarized anywhere. Scheduled web search (§7) still uses snippets/metadata only, unrelated to either command.
+- No autonomous webpage browsing, no multi-page crawling, and no scheduled webpage monitoring. `read webpage <url>` (Phase 33, §6) and `summarize webpage <url>`/`summarise webpage <url>` (Phase 34, §6) each fetch exactly one page per request, never follow links, and never act on anything the page's text says. Neither of these two commands saves what it fetched or summarized anywhere — the explicit `... and save to inbox` variant (Phase 61, §6) is a separate, opt-in command, never automatic. Scheduled web search (§7) still uses snippets/metadata only, unrelated to any of these commands.
 - No Research Agent or autonomous multi-step research.
 - No voice interface, no phone app, no remote client of any kind.
 - No Core service, HTTP server, or IPC bridge — the three processes only ever share the SQLite file.
@@ -427,11 +429,11 @@ Confirmed absent from the current codebase — not deferred silently, each expli
 These are real candidates that have been evaluated in past architectural reviews but are **not yet built**, listed here only so expectations stay honest:
 
 - Desktop notification for scheduled Inbox activity (deferred pending real evidence the CLI/dashboard notice isn't enough).
-- The webpage fetch/read safety foundation (Phase 32), the plain read command (Phase 33, §6), and AI webpage summarization (Phase 34, §6) are all complete. Not yet built, each a distinct, separately-reviewed future decision: scheduled webpage summaries (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); saving a webpage summary to the Inbox (a real possibility, since the mechanism already exists for web-search summaries, but not built here — it would need its own explicit review of whether an approval-gated summary should be durably saved by default); and any Research Agent or autonomous multi-step browsing behavior. Further command refinements (e.g. additional grammar) remain possible but are not planned unless Nathan specifically requests them.
+- The webpage fetch/read safety foundation (Phase 32), the plain read command (Phase 33, §6), AI webpage summarization (Phase 34, §6), and an explicit, opt-in `... and save to inbox` variant of that summarization command (Phase 61, §6) are all complete. Not yet built, each a distinct, separately-reviewed future decision: scheduled webpage summaries (blocked on the scheduler's current single-hardcoded-action-type design, which has no `type`/`kind` column to extend without a schema change); *automatic* Inbox saving for the plain webpage-summary command (a deliberate non-goal — Phase 61 chose an explicit opt-in command instead, precisely so that approving a fetch is never read as automatic consent to a durable write); and any Research Agent or autonomous multi-step browsing behavior. Further command refinements (e.g. additional grammar) remain possible but are not planned unless Nathan specifically requests them.
 - A Core service allowing an interactive dashboard, voice, or phone client. (Phase 41 added an internal, disabled-by-default fake/mock voice foundation — see `docs/phase_41_completion_report.md` — but this is not the same thing: no real audio, microphone, or user-reachable voice command exists today, and no Core service was added.)
 - Goals/projects/tasks tracking.
 - Additional scheduled action types beyond web-search summaries.
-- More Inbox producers beyond web-search summaries.
+- More Inbox producers beyond web-search summaries and the explicit webpage-summary save command (Phase 61, §6).
 - A file delete tool exists (Phase 35, §6) as a quarantine-only move into `.jarvis_trash/`, you can list what's in quarantine including original path when known (Phase 36/37, §6), a `restore file <path>` command (Phase 38, §6) can move a file with known metadata back to its original location, and the dashboard's Quarantine tab (Phase 39, §8) shows recorded quarantine metadata read-only. Not yet built, each a distinct future decision: an `empty trash` command, an automatic cleanup/retention policy, and a bulk/"restore all" command.
 - More workflow templates beyond the current five — paused, not closed: the next one should come from a specific need, not just because the machinery exists.
 - Automated "save AI summary to file/Inbox" behavior — paused pending a separate design review of how to let you review the exact content before it's written (see §9).

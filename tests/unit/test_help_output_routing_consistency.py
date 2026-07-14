@@ -107,6 +107,10 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     ("Web: summarise web search", "summarise web search for cats"),
     ("Web: read webpage", "read webpage https://example.com"),
     ("Web: summarize webpage", "summarize webpage https://example.com"),
+    (
+        "Web: summarize webpage and save to inbox",
+        "summarize webpage https://example.com and save to inbox",
+    ),
     # Schedules
     (
         "Schedules: schedule create",
