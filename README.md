@@ -1015,6 +1015,26 @@ No generic or introspectable command registry (`CommandRouter`'s matching logic 
 
 ---
 
+## Phase 57 — Read-Only System Health Check Tool (complete)
+
+A small, GREEN, read-only tool answering a real, explicitly-expressed need: after the Phase 43–56 config/help/logging/dashboard/scheduler hardening work, a way to confirm — from inside the running program — that everything is actually configured and wired correctly. `HealthCheckTool` reports eight checks, each read-only introspection of an object `main.py`'s own composition root already built. See `docs/phase_57_completion_report.md` for the full write-up.
+
+### Health check command
+
+```
+health check
+show health
+system health
+```
+
+All three are the same fixed, no-argument request. Checks: settings loaded; database path reachable (a plain filesystem check, never opening a new database connection); tool registry populated with the expected core tools; console logging configured (Phase 54's `configure_console_logging()`); Inbox store reachable; Schedule store reachable; Quarantine store reachable; and a `SecurityManager` self-classification sanity check. Every store check reuses the exact same `InboxStore`/`ScheduleStore`/`QuarantineStore` instances `main.py` already constructs for other tools — never a new database connection, never a new store instance, never a row created.
+
+### What is deliberately NOT included in Phase 57
+
+No write action of any kind. No new database connection or store instance created solely to check health. No secrets or API key values shown. No invocation of `dashboard.py` and no `DashboardReadModel` construction — the dashboard is a wholly separate process with its own database connection; the shared SQLite file's existence is already covered by the database-path check. No change to approval behavior or to the security classification of any existing action beyond the one new, additive GREEN rule for this tool's own action. No new dependency. No broader "system inspector" scope beyond the eight checks above.
+
+---
+
 ## Example Session
 
 ```
@@ -1197,7 +1217,6 @@ As with every prior phase boundary, the next *numbered* architectural direction 
 - Inbox integration for webpage summaries — a producer-policy decision (whether an approval-gated summary should also auto-save) that hasn't been made yet, independent of implementation cost.
 - Dashboard write actions of any kind — the dashboard has been strictly read-only since Phase 19; nothing has changed that.
 - A Research Agent or autonomous browsing foundation — a standing non-goal unless explicitly selected through its own dedicated review.
-- A Project/Repo Health Check Tool — evaluated and found speculative; no expressed need exists yet.
 
 None of the above is authorized by any closed phase to date; each remains a separately-scoped decision, to be reviewed fresh against the repository's actual state whenever it's next considered. Every future addition continues to go only behind the Security Manager, with the user in control. See `docs/deferred_decisions.md` for the current, consolidated list of these and other deferred decisions, kept up to date independently of this section.
 

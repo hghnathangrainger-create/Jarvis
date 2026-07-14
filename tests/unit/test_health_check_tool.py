@@ -2,16 +2,26 @@
 test_health_check_tool.py
 
 Unit tests for HealthCheckTool (tools/builtin/health_check_tool.py,
-Phase 57, Batch 1).
+Phase 57).
 
-These prove: every Batch 1 check (settings loaded, database path
-reachable, tool registry populated, console logging configured) is
-reported; action_for() is fixed regardless of input; the real
-SecurityManager classifies it GREEN; no secret/API-key value ever
-appears in the output; the database check never creates a file; the
-logging check is read-only and never attaches a handler; and the tool
-never uses a subprocess, never writes a file, and never calls AI or the
-web (proven structurally, by import absence).
+Batch 1 checks proven here: settings loaded, database path reachable,
+tool registry populated, console logging configured.
+
+Batch 2 checks proven here: Inbox/Schedule/Quarantine store
+reachability (using real store instances backed by a real, isolated
+temp database - the same shape main.py's own build_orchestrator()
+uses - never a fake/mock database) and the SecurityManager self-
+classification check. Every Batch 2 test also proves the store checks
+never create a row, and the tool never constructs its own database
+connection, store, or SecurityManager instance - only reuses whatever
+was passed into its constructor.
+
+Also proven throughout: action_for() is fixed regardless of input; the
+real SecurityManager classifies the tool's action GREEN; no secret/
+API-key value ever appears in the output; the database-path check
+never creates a file; the logging check is read-only and never
+attaches a handler; and the tool never uses a subprocess, never writes
+a file, and never calls AI or the web (proven structurally).
 
 Run with:
     pytest tests/unit/test_health_check_tool.py
@@ -28,7 +38,15 @@ import pytest
 
 from config.constants import APP_NAME
 from config.settings import Settings
+from inbox.inbox_store import InboxStore
+from quarantine.quarantine_store import QuarantineStore
+from scheduling.schedule_store import ScheduleStore
 from security.security_manager import SecurityManager
+from storage.database import (
+    create_database_engine,
+    create_session_factory,
+    initialize_database,
+)
 from tools.base_tool import ToolRequest
 from tools.builtin.health_check_tool import HealthCheckTool
 from tools.registry import ToolRegistry
@@ -64,6 +82,59 @@ def _populated_registry() -> ToolRegistry:
     return registry
 
 
+class _FakeInboxStore:
+    """A trivial stand-in for tests that don't care about store
+    behaviour at all (Batch 1 checks, secrets checks, etc.) - avoids
+    the overhead of a real database for tests unrelated to store
+    reachability."""
+
+    def count(self) -> int:
+        return 0
+
+
+class _FakeScheduleStore:
+    def count(self) -> int:
+        return 0
+
+
+class _FakeQuarantineStore:
+    def list_recent(self, limit: int = 50) -> list[object]:
+        return []
+
+
+def _fake_tool(*, database_path: Path, registry: ToolRegistry | None = None) -> HealthCheckTool:
+    """A HealthCheckTool wired with fake stores - for tests that only
+    care about the Batch 1 checks, secrets, or action_for()/security
+    classification, not store reachability itself."""
+    return HealthCheckTool(
+        registry if registry is not None else _populated_registry(),
+        _settings(database_path=database_path),
+        _FakeInboxStore(),
+        _FakeScheduleStore(),
+        _FakeQuarantineStore(),
+        SecurityManager(),
+    )
+
+
+def _real_stores(tmp_path: Path) -> tuple[InboxStore, ScheduleStore, QuarantineStore, Path]:
+    """Real InboxStore/ScheduleStore/QuarantineStore instances backed by
+    a real, isolated, initialized temp SQLite database - the same shape
+    main.py's own build_orchestrator() uses. Never a fake/mock
+    database, so Batch 2's "never mutates" tests are genuinely
+    convincing, not just structurally asserted."""
+    db_path = tmp_path / "health_check_test.db"
+    settings = _settings(database_path=db_path)
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    session_factory = create_session_factory(engine)
+    return (
+        InboxStore(session_factory),
+        ScheduleStore(session_factory),
+        QuarantineStore(session_factory),
+        db_path,
+    )
+
+
 def _run(tool: HealthCheckTool):
     return tool.run(ToolRequest(tool_name="health_check", input_data={}))
 
@@ -88,7 +159,7 @@ def _isolated_jarvis_logger():
 
 
 def test_reports_settings_loaded(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     result = _run(tool)
     assert result.success is True
     assert "Settings: loaded" in result.output
@@ -97,41 +168,40 @@ def test_reports_settings_loaded(tmp_path: Path) -> None:
 def test_reports_database_path_exists(tmp_path: Path) -> None:
     db_path = tmp_path / "jarvis.db"
     db_path.write_text("not a real database, just proving exists() works")
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=db_path))
+    tool = _fake_tool(database_path=db_path)
     result = _run(tool)
     assert "(exists)" in result.output
 
 
 def test_reports_database_parent_exists_when_file_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "does_not_exist_yet.db"
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=db_path))
+    tool = _fake_tool(database_path=db_path)
     result = _run(tool)
     assert "parent directory exists" in result.output
 
 
 def test_reports_database_not_reachable_when_parent_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "missing_dir" / "jarvis.db"
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=db_path))
+    tool = _fake_tool(database_path=db_path)
     result = _run(tool)
     assert "NOT reachable" in result.output
 
 
 def test_reports_tool_registry_populated_with_core_tools(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     result = _run(tool)
     assert "tools registered, including all core tools" in result.output
 
 
 def test_reports_missing_core_tools_honestly(tmp_path: Path) -> None:
-    empty_registry = ToolRegistry()
-    tool = HealthCheckTool(empty_registry, _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db", registry=ToolRegistry())
     result = _run(tool)
     assert "missing expected core tool(s)" in result.output
     assert "echo" in result.output
 
 
 def test_reports_logging_not_configured_when_no_handler(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     result = _run(tool)
     assert "not configured in this process" in result.output
 
@@ -141,7 +211,7 @@ def test_reports_logging_configured_when_handler_present(
 ) -> None:
     _isolated_jarvis_logger.addHandler(logging.StreamHandler())
     _isolated_jarvis_logger.setLevel(logging.INFO)
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     result = _run(tool)
     assert "configured (1 handler(s), level=INFO)" in result.output
 
@@ -151,16 +221,191 @@ def test_logging_check_never_attaches_a_handler(
 ) -> None:
     """The health check must be read-only: running it must never itself
     configure logging, even though it reports on that state."""
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     _run(tool)
     assert _isolated_jarvis_logger.handlers == []
+
+
+# --- Batch 2: Inbox/Schedule/Quarantine store reachability -------------------
+
+
+def test_reports_inbox_reachable(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Inbox store: reachable (0 entries recorded)" in result.output
+
+
+def test_reports_schedule_reachable(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Schedule store: reachable (0 schedules recorded)" in result.output
+
+
+def test_reports_quarantine_reachable(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Quarantine store: reachable" in result.output
+
+
+def test_reports_security_manager_self_classification_green(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert (
+        "Security Manager: reachable (self-classification: GREEN, as expected)"
+        in result.output
+    )
+
+
+def test_store_checks_use_injected_objects_not_new_instances(tmp_path: Path) -> None:
+    """Confirms the exact injected store objects are the ones consulted -
+    not a coincidentally-similar new instance - by adding a row through
+    the injected inbox store directly and confirming the health check's
+    count reflects it."""
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    inbox.append(
+        source_type="web_search_summary",
+        source_query="test query",
+        body="test summary body",
+        included_count=1,
+        session_id=None,
+    )
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Inbox store: reachable (1 entry recorded)" in result.output
+
+
+def test_store_reachability_checks_never_mutate_inbox(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    before = inbox.count()
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    _run(tool)
+    _run(tool)
+    assert inbox.count() == before == 0
+
+
+def test_store_reachability_checks_never_mutate_schedules(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    before = schedule.count()
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    _run(tool)
+    _run(tool)
+    assert schedule.count() == before == 0
+
+
+def test_store_reachability_checks_never_mutate_quarantine(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    before = quarantine.list_recent()
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    _run(tool)
+    _run(tool)
+    assert quarantine.list_recent() == before == []
+
+
+def test_store_checks_never_create_a_second_database_file(tmp_path: Path) -> None:
+    """After constructing the real stores (which does create the one
+    expected database file), running the health check repeatedly must
+    never create any additional file in the same directory."""
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    files_before = set(tmp_path.iterdir())
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    _run(tool)
+    files_after = set(tmp_path.iterdir())
+    assert files_after == files_before
+
+
+def test_reports_not_reachable_when_store_raises(tmp_path: Path) -> None:
+    """A health check must never crash even if a store call fails - it
+    reports the failure as its own status line instead."""
+
+    class _RaisingInboxStore:
+        def count(self) -> int:
+            raise RuntimeError("simulated database failure")
+
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=tmp_path / "x.db"),
+        _RaisingInboxStore(),
+        _FakeScheduleStore(),
+        _FakeQuarantineStore(),
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert result.success is True
+    assert "Inbox store: NOT reachable" in result.output
 
 
 # --- no secrets --------------------------------------------------------------
 
 
 def test_api_key_value_never_appears_in_output(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     result = _run(tool)
     assert _REAL_API_KEY not in result.output
 
@@ -170,9 +415,7 @@ def test_no_hash_or_secret_style_field_in_output() -> None:
     whose auto-generated directory name embeds this test's own function
     name and would otherwise produce a false positive (it contains the
     substring "secret", from this test's own name, in the path)."""
-    tool = HealthCheckTool(
-        _populated_registry(), _settings(database_path=Path("data/jarvis.db"))
-    )
+    tool = _fake_tool(database_path=Path("data/jarvis.db"))
     result = _run(tool)
     lowered = result.output.lower()
     for forbidden in ("secret", "credential", "hash", "fingerprint", "api key"):
@@ -184,7 +427,7 @@ def test_no_hash_or_secret_style_field_in_output() -> None:
 
 def test_database_check_never_creates_a_file(tmp_path: Path) -> None:
     db_path = tmp_path / "subdir" / "does_not_exist.db"
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=db_path))
+    tool = _fake_tool(database_path=db_path)
     _run(tool)
     assert list(tmp_path.iterdir()) == []
 
@@ -197,9 +440,7 @@ def test_does_not_write_any_file(
     monkeypatch.chdir(work_dir)
     db_dir = tmp_path / "db_home"
     db_dir.mkdir()
-    tool = HealthCheckTool(
-        _populated_registry(), _settings(database_path=db_dir / "x.db")
-    )
+    tool = _fake_tool(database_path=db_dir / "x.db")
     _run(tool)
     assert list(work_dir.iterdir()) == []
 
@@ -208,7 +449,7 @@ def test_does_not_write_any_file(
 
 
 def test_action_for_is_fixed_regardless_of_input(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     request_one = ToolRequest(tool_name="health_check", input_data={})
     request_two = ToolRequest(
         tool_name="health_check",
@@ -219,7 +460,7 @@ def test_action_for_is_fixed_regardless_of_input(tmp_path: Path) -> None:
 
 
 def test_real_security_manager_classifies_green(tmp_path: Path) -> None:
-    tool = HealthCheckTool(_populated_registry(), _settings(database_path=tmp_path / "x.db"))
+    tool = _fake_tool(database_path=tmp_path / "x.db")
     security = SecurityManager()
     decision = security.classify_action(
         tool.action_for(ToolRequest(tool_name="health_check"))
@@ -247,10 +488,12 @@ def test_no_subprocess_or_os_system_import() -> None:
         assert forbidden not in imported_names
 
 
-def test_no_ai_web_database_engine_or_store_dependency_imported() -> None:
-    """Structural proof this tool never opens a new database connection
-    or constructs a new store: it imports no store class, no database
-    engine/session factory, no AI, and no web dependency."""
+def test_no_ai_web_or_database_construction_dependency_imported() -> None:
+    """Structural proof this tool never opens a new database connection:
+    it may import the store/SecurityManager *types* (for constructor
+    type hints and dependency injection - Phase 57, Batch 2), but never
+    the machinery that constructs a new database engine/session
+    factory, and never AI/web/dashboard dependencies."""
     import tools.builtin.health_check_tool as module
 
     tree = ast.parse(inspect.getsource(module))
@@ -269,10 +512,39 @@ def test_no_ai_web_database_engine_or_store_dependency_imported() -> None:
         "create_database_engine",
         "create_session_factory",
         "initialize_database",
-        "InboxStore",
-        "ScheduleStore",
-        "QuarantineStore",
         "DashboardReadModel",
+        "load_settings",
     )
     for name in forbidden:
         assert name not in imported_names
+
+
+def test_never_constructs_a_new_store_or_security_manager_itself() -> None:
+    """Structural proof: the module imports the store/SecurityManager
+    *types* for constructor type hints and dependency injection only -
+    it never calls their constructors itself (e.g. InboxStore(...)),
+    which would mean it built its own instance instead of reusing an
+    injected one."""
+    import tools.builtin.health_check_tool as module
+
+    tree = ast.parse(inspect.getsource(module))
+    called_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called_names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called_names.add(func.attr)
+
+    forbidden_constructors = {
+        "InboxStore",
+        "ScheduleStore",
+        "QuarantineStore",
+        "SecurityManager",
+        "create_database_engine",
+        "create_session_factory",
+        "initialize_database",
+        "DashboardReadModel",
+    }
+    assert not (called_names & forbidden_constructors)

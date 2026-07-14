@@ -75,6 +75,23 @@ def test_health_check_tool_output_is_non_empty_through_real_wiring() -> None:
     assert "Jarvis health check:" in result.output
 
 
+def test_health_check_tool_reports_batch_2_store_checks_through_real_wiring() -> None:
+    """Confirms HealthCheckTool receives real, already-built Inbox/
+    Schedule/Quarantine/SecurityManager instances through main.py's own
+    wiring (Phase 57, Batch 2), not fakes or a disconnected copy."""
+    orchestrator = main.build_orchestrator()
+    tool = orchestrator._registry.get_tool("health_check")
+
+    result = tool.run(ToolRequest(tool_name="health_check", input_data={}))
+    assert "Inbox store: reachable" in result.output
+    assert "Schedule store: reachable" in result.output
+    assert "Quarantine store: reachable" in result.output
+    assert (
+        "Security Manager: reachable (self-classification: GREEN, as expected)"
+        in result.output
+    )
+
+
 def test_health_check_tool_sees_the_real_populated_registry_through_wiring() -> None:
     """Confirms the tool receives the *same* registry object main.py
     itself builds - not a disconnected copy - so its own "tools

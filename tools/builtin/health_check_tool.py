@@ -2,7 +2,7 @@
 health_check_tool.py
 
 A safe, read-only tool that reports basic Jarvis system health (Phase
-57, Batch 1).
+57).
 
 HealthCheckTool is a GREEN tool: every check it performs is read-only
 introspection of objects already constructed and loaded by main.py's
@@ -38,9 +38,30 @@ Batch 1 checks (narrow, no new store dependencies):
       existing state - never calls configure_console_logging() itself,
       so this can never attach a duplicate handler.
 
-Deferred to Batch 2 (not included here): Inbox/Schedule/Quarantine
-store reachability checks, and a SecurityManager self-classification
-check.
+Batch 2 checks (reusing main.py's already-built store/SecurityManager
+instances - never a new database connection, never a new store):
+    - Inbox: calls the already-injected InboxStore.count() - a pure SQL
+      COUNT query, no row hydration, no write of any kind.
+    - Schedules: calls the already-injected ScheduleStore.count() - same
+      shape as Inbox above.
+    - Quarantine: calls the already-injected QuarantineStore.
+      list_recent(limit=1) - QuarantineStore has no count() method, so
+      this reads at most one row purely to prove reachability; it never
+      reports a claimed total (that would be misleading, since limit=1
+      caps what is actually read). Never restores, deletes, or modifies
+      anything.
+    - Security Manager: calls the already-injected SecurityManager's own
+      classify_action() on this tool's own fixed "show system health"
+      action string and confirms it still classifies GREEN - a pure,
+      stateless classification call that never touches ApprovalManager,
+      never approves or declines anything, and changes no approval or
+      security state.
+
+dashboard.py is never invoked and DashboardReadModel is never
+constructed - it is a wholly separate process with its own independent
+database connection; the shared SQLite file's existence is already
+covered by the database-path check above, which is the only meaningful
+proxy reachable from this process.
 """
 
 from __future__ import annotations
@@ -48,8 +69,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from config.constants import APP_NAME
+from config.constants import APP_NAME, SecurityTier
 from config.settings import Settings
+from inbox.inbox_store import InboxStore
+from quarantine.quarantine_store import QuarantineStore
+from scheduling.schedule_store import ScheduleStore
+from security.security_manager import SecurityManager
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.registry import ToolRegistry
 
@@ -66,8 +91,21 @@ class HealthCheckTool(BaseTool):
     object's existing state - nothing is created, opened, or mutated.
     """
 
-    def __init__(self, registry: ToolRegistry, settings: Settings) -> None:
-        """Initialise the tool with the already-built registry/settings.
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        settings: Settings,
+        inbox_store: InboxStore,
+        schedule_store: ScheduleStore,
+        quarantine_store: QuarantineStore,
+        security_manager: SecurityManager,
+    ) -> None:
+        """Initialise the tool with already-built dependencies only.
+
+        Every argument is an object main.py's build_orchestrator()
+        already constructs for other tools' use - this tool never
+        constructs its own database connection, store, or
+        SecurityManager instance.
 
         Args:
             registry: The application's already-populated ToolRegistry.
@@ -77,9 +115,23 @@ class HealthCheckTool(BaseTool):
             settings: The already-loaded Settings object. This tool
                 never calls load_settings() itself and never reads
                 .env/os.environ directly.
+            inbox_store: The already-constructed InboxStore. Only
+                count() is ever called.
+            schedule_store: The already-constructed ScheduleStore. Only
+                count() is ever called.
+            quarantine_store: The already-constructed QuarantineStore.
+                Only list_recent(limit=1) is ever called.
+            security_manager: The application's already-constructed
+                SecurityManager. Only classify_action() is ever called,
+                on this tool's own fixed action string - never anything
+                that touches approval state.
         """
         self._registry = registry
         self._settings = settings
+        self._inbox_store = inbox_store
+        self._schedule_store = schedule_store
+        self._quarantine_store = quarantine_store
+        self._security_manager = security_manager
 
     @property
     def name(self) -> str:
@@ -134,6 +186,10 @@ class HealthCheckTool(BaseTool):
             f"  Database path: {self._database_path_status()}",
             f"  Tool registry: {self._registry_status()}",
             f"  Console logging: {self._logging_status()}",
+            f"  Inbox store: {self._inbox_status()}",
+            f"  Schedule store: {self._schedule_status()}",
+            f"  Quarantine store: {self._quarantine_status()}",
+            f"  Security Manager: {self._security_manager_status()}",
         ]
         return self.ok("\n".join(lines))
 
@@ -184,3 +240,77 @@ class HealthCheckTool(BaseTool):
             return "not configured in this process (no console handler attached)"
         level_name = logging.getLevelName(logger.level)
         return f"configured ({len(logger.handlers)} handler(s), level={level_name})"
+
+    def _inbox_status(self) -> str:
+        """Report whether the already-injected InboxStore is reachable.
+
+        Calls only count() - a pure SQL COUNT query, no row hydration,
+        no write of any kind. Never constructs a new InboxStore or
+        database connection.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            count = self._inbox_store.count()
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return f"reachable ({count} entr{'y' if count == 1 else 'ies'} recorded)"
+
+    def _schedule_status(self) -> str:
+        """Report whether the already-injected ScheduleStore is reachable.
+
+        Calls only count() - a pure SQL COUNT query, no row hydration,
+        no write of any kind. Never constructs a new ScheduleStore or
+        database connection.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            count = self._schedule_store.count()
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return f"reachable ({count} schedule{'' if count == 1 else 's'} recorded)"
+
+    def _quarantine_status(self) -> str:
+        """Report whether the already-injected QuarantineStore is reachable.
+
+        Calls only list_recent(limit=1) - QuarantineStore has no
+        count() method, so this reads at most one row purely to prove
+        reachability. Deliberately does not report a claimed total
+        (limit=1 caps what is actually read, so any larger number would
+        be misleading). Never restores, deletes, or modifies anything,
+        and never constructs a new QuarantineStore or database
+        connection.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            self._quarantine_store.list_recent(limit=1)
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return "reachable"
+
+    def _security_manager_status(self) -> str:
+        """Report whether the already-injected SecurityManager correctly
+        classifies this tool's own action as GREEN.
+
+        A pure, stateless call to classify_action() - it never touches
+        ApprovalManager, never approves or declines anything, and
+        changes no approval or security state. Never constructs a new
+        SecurityManager instance.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            decision = self._security_manager.classify_action(
+                self.action_for(ToolRequest(tool_name=self.name))
+            )
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        if decision.tier is SecurityTier.GREEN:
+            return "reachable (self-classification: GREEN, as expected)"
+        return f"reachable, but self-classification was unexpected: {decision.tier.value}"

@@ -73,7 +73,7 @@
 
 ## 10. A Project/Repo Health Check Tool
 
-- **Origin:** Standing since at least Phase 40's own completion report; repeated through Phase 52.
-- **Current status:** Deferred, unselected — evaluated in an earlier architectural review and found speculative.
-- **Why it remains deferred:** No expressed need exists yet.
-- **Fuller source:** README.md's "Next Phase" section.
+- **Origin:** Standing since at least Phase 40's own completion report; repeated through Phase 52, then evaluated again during the Phase 57 proposal review.
+- **Current status:** **Implemented, Phase 57.** The original "no expressed need exists yet" concern was resolved when Nathan explicitly expressed a concrete need (verifying configuration/wiring correctness after the Phase 43–56 hardening work). Batch 1 delivered a GREEN, read-only `HealthCheckTool` (`health check` / `show health` / `system health`) checking settings loaded, database path reachable, tool registry populated, and console logging configured (Phase 54). Batch 2 added Inbox/Schedule/Quarantine store-reachability checks and a `SecurityManager` self-classification check — all reusing objects `main.py`'s `build_orchestrator()` already constructs, never a new database connection, store, or row.
+- **Resulting behavior:** Running `health check` (or either alias) reports an eight-line status summary; every check is read-only, never shows a secret/API-key value, and never invokes `dashboard.py`.
+- **Fuller source:** `docs/phase_57_completion_report.md` for the full closure write-up.

@@ -273,16 +273,24 @@ def build_orchestrator() -> JarvisOrchestrator:
     web_fetcher = SafeWebFetcher()
     registry.register_tool(WebpageReadTool(web_fetcher))
 
-    # HealthCheckTool (Phase 57, Batch 1): registered last, so its own
+    # HealthCheckTool (Phase 57): registered last, so its own
     # introspection of `registry` naturally sees every tool registered
-    # above (and itself) once it actually runs. Reads only the already-
-    # built `registry`/`settings` objects - never opens a new database
-    # connection, never constructs a new store, never creates a file or
-    # row. Batch 2 will add Inbox/Schedule/Quarantine store-reachability
-    # checks, reusing the same already-built quarantine_store/
-    # inbox_store/schedule_store instances constructed above (not
-    # included yet).
-    registry.register_tool(HealthCheckTool(registry, settings))
+    # above (and itself) once it actually runs. Reads only already-built
+    # objects - `registry`, `settings`, and (Batch 2) the same
+    # quarantine_store/inbox_store/schedule_store/security instances
+    # constructed above for other tools' use - never opens a new
+    # database connection, never constructs a new store or
+    # SecurityManager, never creates a file or row.
+    registry.register_tool(
+        HealthCheckTool(
+            registry,
+            settings,
+            inbox_store,
+            schedule_store,
+            quarantine_store,
+            security,
+        )
+    )
 
     executor = ToolExecutor(
         registry=registry,
