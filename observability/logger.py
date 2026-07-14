@@ -6,10 +6,11 @@ Structured event logging for the Jarvis AI Operating System.
 Responsibilities:
     - Define the structured Event record that every subsystem emits.
     - Stamp each event with a UTC timestamp and a unique identifier.
-    - Route each event through Python's standard logging module (the
-      intended path to console visibility) and persist it to the
-      append-only audit log - the one destination that is always
-      durable and complete (see the accuracy note below).
+    - Route each event through Python's standard logging module - the
+      path to console visibility, now genuinely configured (Phase 54;
+      see below) - and persist it to the append-only audit log, the
+      one destination that is always durable and complete regardless
+      of console configuration.
     - Provide a simple, uniform API so every subsystem logs events the same way.
 
 Does NOT:
@@ -17,16 +18,18 @@ Does NOT:
     - Implement AI logic.
     - Implement Memory logic.
     - Persist events itself (persistence is delegated to security.audit_log).
-    - Configure any logging handler or level (Phase 48; see
-      docs/phase_47_logging_console_visibility_plan.md for the full
-      investigation). No production entry point (main.py, scheduler.py)
-      attaches a handler or sets a level today, so console visibility is
-      not fully configured: WARNING/ERROR-level events (BLOCKED/TIMEOUT/
-      FAILURE outcomes) may still appear via Python's own
-      logging.lastResort fallback handler, but INFO-level events (every
-      GREEN/successful outcome - the majority of what Jarvis does) are
-      not guaranteed to appear on the console at all without a future
-      handler-configuration phase.
+    - Configure the logging handler or level itself - that is done by
+      observability.logging_setup.configure_console_logging() (Phase
+      54), called once from each real process entry point (main.py's
+      main(), scheduler.py's main()), using the already-validated
+      settings.log_level (Phase 46). Console visibility now genuinely
+      follows LOG_LEVEL: with the default "INFO", every GREEN/successful
+      event appears on the console, not just WARNING/ERROR (BLOCKED/
+      TIMEOUT/FAILURE) outcomes. See
+      docs/phase_47_logging_console_visibility_plan.md for the original
+      investigation and docs/phase_54_completion_report.md for how it
+      was implemented. dashboard.py has no logging calls of any kind and
+      remains untouched by any of this.
 
 This module is the single entry point for structured logging. No subsystem
 should write to the console or the audit log directly; all events flow
@@ -118,15 +121,19 @@ class EventLogger:
     each event through the standard-library logging module and persists it to
     the append-only audit log for the permanent record. The audit log write
     always succeeds regardless of logging configuration; console visibility
-    depends on handler/level configuration that no production entry point
-    currently sets up (see module docstring above for the full accuracy note).
+    follows the handler/level configuration that main.py's and scheduler.py's
+    real entry points each set up once, via
+    observability.logging_setup.configure_console_logging() (Phase 54) -
+    see the module docstring above for the full accuracy note.
 
     Attributes:
         _audit_log: The append-only audit log events are persisted to -
             always durable, regardless of console logging configuration.
         _logger: The standard-library logger events are routed through.
-            Not guaranteed to produce visible console output for INFO-level
-            (GREEN/successful) events today - see module docstring above.
+            Its level and handler are configured by
+            configure_console_logging() (Phase 54), so INFO-level
+            (GREEN/successful) events genuinely appear on the console
+            by default today - see module docstring above.
     """
 
     def __init__(self, audit_log: AuditLog) -> None:
@@ -144,13 +151,13 @@ class EventLogger:
 
         The event is routed to the standard-library logger at a level
         derived from its outcome, then persisted to the append-only audit
-        log. The audit log write always durably succeeds. The logging call
-        does not guarantee visible console output today: no production
-        entry point configures a handler or level, so WARNING/ERROR-level
-        events (BLOCKED/TIMEOUT/FAILURE) may appear via Python's own
-        logging.lastResort fallback, while INFO-level events (GREEN/
-        successful outcomes) are not guaranteed to appear on the console at
-        all (see the module docstring's accuracy note).
+        log. The audit log write always durably succeeds. The logging
+        call's console visibility follows whatever level
+        configure_console_logging() (Phase 54) set on this logger in the
+        current process - with the default LOG_LEVEL of "INFO", every
+        outcome (including GREEN/successful, not just WARNING/ERROR
+        BLOCKED/TIMEOUT/FAILURE outcomes) genuinely appears on the
+        console today (see the module docstring's accuracy note).
 
         Args:
             event: The event to emit.
