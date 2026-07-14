@@ -20,7 +20,10 @@ Run with:
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
+from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +32,7 @@ sqlalchemy = pytest.importorskip("sqlalchemy")
 from sqlalchemy import create_engine
 
 from approval.approval_history_store import ApprovalHistoryStore
+from config.settings import Settings
 from dashboard.read_model import DashboardReadModel
 from inbox.inbox_store import InboxStore
 from memory.episodic_memory import EpisodicMemoryStore
@@ -80,6 +84,72 @@ def rm() -> tuple[
     QuarantineStore,
 ]:
     return _make_read_model()
+
+
+def _make_read_model_with_settings(
+    settings: Settings | None,
+) -> tuple[
+    DashboardReadModel,
+    MemoryManager,
+    ApprovalHistoryStore,
+    WorkflowHistoryStore,
+    InboxStore,
+    ScheduleStore,
+    QuarantineStore,
+]:
+    """Build a DashboardReadModel the same way _make_read_model() does,
+    but also threading a Settings object through (Phase 62, Batch 1) -
+    kept as a separate helper so _make_read_model()'s own 7-tuple shape,
+    and every existing test destructuring it, are completely unaffected.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+
+    memory = MemoryManager(EpisodicMemoryStore(factory))
+    approvals = ApprovalHistoryStore(factory)
+    workflows = WorkflowHistoryStore(factory)
+    inbox = InboxStore(factory)
+    schedules = ScheduleStore(factory)
+    quarantine = QuarantineStore(factory)
+    read_model = DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules, quarantine, settings
+    )
+    return read_model, memory, approvals, workflows, inbox, schedules, quarantine
+
+
+def _test_settings(**overrides: object) -> Settings:
+    """Build a real Settings object for Phase 62 status-panel tests,
+    mirroring test_web_search_summary_workflow.py's own established
+    _settings() helper pattern."""
+    defaults: dict[str, object] = dict(
+        anthropic_api_key="test-key-not-real",
+        ai_model="test-model",
+        ai_max_tokens=1024,
+        database_path=Path("unused.db"),
+        log_level="INFO",
+        approval_timeout_seconds=60,
+        debug=False,
+        ai_reasoning_enabled=False,
+        voice_enabled=False,
+        voice_speak_mode="off",
+        voice_provider="none",
+        voice_input_enabled=False,
+        voice_input_provider="none",
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)  # type: ignore[arg-type]
+
+
+class _RaisingMemoryManager:
+    """A duck-typed MemoryManager stand-in whose count() always raises
+    (Phase 62, Batch 1) - proves get_store_reachability() isolates one
+    store's failure from the rest, mirroring this project's established
+    _Raising*Store precedent (e.g. test_web_search_summary_workflow.py's
+    own _RaisingInboxStore)."""
+
+    def count(self) -> int:
+        raise RuntimeError("simulated memory read failure")
 
 
 # --- get_recent_memories / previews -------------------------------------------
@@ -543,6 +613,246 @@ def test_get_quarantine_entries_respects_limit(rm) -> None:
 
     rows = read_model.get_quarantine_entries(limit=2)
     assert len(rows) == 2
+
+
+# --- get_system_status (Phase 62, Batch 1) --------------------------------------
+
+
+def test_system_status_maps_from_real_settings() -> None:
+    settings = _test_settings(
+        ai_model="claude-test-model",
+        ai_reasoning_enabled=True,
+        voice_enabled=True,
+        voice_provider="fake",
+        voice_input_enabled=True,
+        voice_input_provider="fake",
+        log_level="DEBUG",
+        approval_timeout_seconds=45,
+        database_path=Path("data/test_jarvis.db"),
+    )
+    read_model, *_ = _make_read_model_with_settings(settings)
+
+    status = read_model.get_system_status()
+
+    assert status.available is True
+    assert status.ai_reasoning_enabled is True
+    assert status.ai_model == "claude-test-model"
+    assert status.voice_enabled is True
+    assert status.voice_provider == "fake"
+    assert status.voice_input_enabled is True
+    assert status.voice_input_provider == "fake"
+    assert status.log_level == "DEBUG"
+    assert status.database_path == str(Path("data/test_jarvis.db"))
+    assert status.approval_timeout_seconds == 45
+    assert status.api_key_status == "configured"
+
+
+def test_system_status_reports_api_key_not_configured_when_blank() -> None:
+    settings = _test_settings(anthropic_api_key="   ")
+    read_model, *_ = _make_read_model_with_settings(settings)
+
+    status = read_model.get_system_status()
+    assert status.api_key_status == "not configured"
+
+
+def test_system_status_never_exposes_api_key_value_mask_length_or_hash() -> None:
+    secret = "sk-super-secret-value-should-never-appear-anywhere"
+    settings = _test_settings(anthropic_api_key=secret)
+    read_model, *_ = _make_read_model_with_settings(settings)
+
+    status = read_model.get_system_status()
+    rendered = " ".join(str(value) for value in asdict(status).values())
+
+    assert secret not in rendered
+    assert str(len(secret)) not in rendered
+    assert hashlib.sha256(secret.encode()).hexdigest() not in rendered
+    assert hashlib.md5(secret.encode()).hexdigest() not in rendered  # noqa: S324
+
+
+def test_system_status_unavailable_when_no_settings_configured() -> None:
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    status = read_model.get_system_status()
+
+    assert status.available is False
+    assert status.ai_reasoning_enabled is None
+    assert status.ai_model is None
+    assert status.voice_enabled is None
+    assert status.voice_provider is None
+    assert status.voice_input_enabled is None
+    assert status.voice_input_provider is None
+    assert status.log_level is None
+    assert status.database_path is None
+    assert status.approval_timeout_seconds is None
+    assert status.api_key_status is None
+
+
+# --- get_store_reachability (Phase 62, Batch 1) ---------------------------------
+
+
+def test_store_reachability_reports_reachable_for_real_stores() -> None:
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    results = {row.name: row for row in read_model.get_store_reachability()}
+
+    assert results["memory"].reachable is True
+    assert results["approvals"].reachable is True
+    assert results["workflow_history"].reachable is True
+    assert results["inbox"].reachable is True
+    assert results["schedules"].reachable is True
+    assert results["quarantine"].reachable is True
+    for row in results.values():
+        assert row.detail is None
+
+
+def test_store_reachability_reports_not_reachable_for_a_raising_store_without_breaking_others() -> (
+    None
+):
+    _, _, approvals, workflows, inbox, schedules, quarantine = (
+        _make_read_model_with_settings(None)
+    )
+    read_model = DashboardReadModel(
+        _RaisingMemoryManager(),  # type: ignore[arg-type]
+        approvals,
+        workflows,
+        inbox,
+        schedules,
+        quarantine,
+    )
+
+    results = {row.name: row for row in read_model.get_store_reachability()}
+
+    assert results["memory"].reachable is False
+    assert "simulated memory read failure" in (results["memory"].detail or "")
+    assert results["approvals"].reachable is True
+    assert results["workflow_history"].reachable is True
+    assert results["inbox"].reachable is True
+    assert results["schedules"].reachable is True
+    assert results["quarantine"].reachable is True
+
+
+def test_store_reachability_quarantine_not_configured_is_honest_not_reachable() -> (
+    None
+):
+    _, memory, approvals, workflows, inbox, schedules, _ = (
+        _make_read_model_with_settings(None)
+    )
+    read_model_no_quarantine = DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules
+    )
+
+    results = {
+        row.name: row for row in read_model_no_quarantine.get_store_reachability()
+    }
+
+    assert results["quarantine"].reachable is False
+    assert results["quarantine"].detail == "not configured"
+
+
+def test_store_reachability_never_mutates_any_store() -> None:
+    read_model, memory, approvals, workflows, inbox, schedules, quarantine = (
+        _make_read_model_with_settings(None)
+    )
+    memory.save("existing memory")
+    inbox.append(source_type="web_search_summary", source_query="q", body="b")
+    before = (
+        memory.count(),
+        inbox.count(),
+        len(schedules.list_all()),
+        len(quarantine.list_recent()),
+    )
+
+    read_model.get_store_reachability()
+
+    after = (
+        memory.count(),
+        inbox.count(),
+        len(schedules.list_all()),
+        len(quarantine.list_recent()),
+    )
+    assert before == after
+
+
+# --- get_recent_activity (Phase 62, Batch 1) ------------------------------------
+
+
+def test_recent_activity_merges_multiple_domains() -> None:
+    read_model, memory, approvals, workflows, inbox, _, quarantine = (
+        _make_read_model_with_settings(None)
+    )
+    memory.save("buy milk")
+    approvals.record_request(
+        request_id="req-1", action="delete file", reason="r", security_tier="yellow"
+    )
+    workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+    inbox.append(source_type="web_search_summary", source_query="q", body="b")
+    quarantine.record_quarantine(
+        original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
+    )
+
+    rows = read_model.get_recent_activity()
+
+    domains = {row.domain for row in rows}
+    assert domains == {"memory", "approval", "workflow", "inbox", "quarantine"}
+
+
+def test_recent_activity_sorts_by_timestamp_descending() -> None:
+    read_model, memory, *_ = _make_read_model_with_settings(None)
+    memory.save("first")
+    memory.save("second")
+    memory.save("third")
+
+    rows = read_model.get_recent_activity()
+
+    timestamps = [row.created_at for row in rows]
+    assert timestamps == sorted(timestamps, reverse=True)
+
+
+def test_recent_activity_respects_the_cap() -> None:
+    read_model, memory, *_ = _make_read_model_with_settings(None)
+    for i in range(10):
+        memory.save(f"memory {i}")
+
+    rows = read_model.get_recent_activity(limit=3)
+    assert len(rows) == 3
+
+
+def test_recent_activity_summary_is_deterministic_and_traceable_to_real_fields() -> (
+    None
+):
+    read_model, memory, *_ = _make_read_model_with_settings(None)
+    memory.save("a very specific note about the quarterly budget")
+
+    first = read_model.get_recent_activity()
+    second = read_model.get_recent_activity()
+
+    assert first == second
+    memory_entry = next(row for row in first if row.domain == "memory")
+    assert "quarterly budget" in memory_entry.summary
+
+
+def test_recent_activity_empty_when_no_data_exists() -> None:
+    read_model, *_ = _make_read_model_with_settings(None)
+    assert read_model.get_recent_activity() == []
+
+
+def test_recent_activity_omits_a_domain_with_no_data() -> None:
+    read_model, memory, *_ = _make_read_model_with_settings(None)
+    memory.save("only a memory exists")
+
+    rows = read_model.get_recent_activity()
+
+    domains = {row.domain for row in rows}
+    assert domains == {"memory"}
+
+
+def test_recent_activity_never_uses_ai_or_fabricated_text() -> None:
+    """Structural proof: get_recent_activity() never imports or calls
+    anything AI-related - its summaries are plain string formatting of
+    already-real fields only."""
+    source = inspect.getsource(read_model_module.DashboardReadModel.get_recent_activity)
+    for forbidden in ("reason(", "AIReasoningEngine", "AIRouter", "reasoning"):
+        assert forbidden not in source
 
 
 # --- structural: no write path -------------------------------------------------

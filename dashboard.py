@@ -2,15 +2,17 @@
 dashboard.py
 
 Entry point for the local, read-only Jarvis dashboard (Phase 19; extended
-Phase 21 with the Schedules tab's read path).
+Phase 21 with the Schedules tab's read path; extended Phase 62, Batch 1
+to also pass the already-loaded Settings object into DashboardReadModel).
 
 Responsibilities:
     - Load configuration and open the same configured SQLite-backed
       Jarvis database main.py uses, independently.
     - Construct MemoryManager, ApprovalHistoryStore,
       WorkflowHistoryStore, InboxStore, ScheduleStore, and
-      QuarantineStore (Phase 39, Batch 1), and compose them into a
-      DashboardReadModel.
+      QuarantineStore (Phase 39, Batch 1), and compose them, along with
+      the Settings object already loaded above (Phase 62, Batch 1), into
+      a DashboardReadModel.
     - Start the tkinter/ttk dashboard window.
 
 Does NOT:
@@ -74,7 +76,7 @@ def build_read_model() -> DashboardReadModel:
     schedules = ScheduleStore(session_factory)
     quarantine = QuarantineStore(session_factory)
     return DashboardReadModel(
-        memory, approvals, workflows, inbox, schedules, quarantine
+        memory, approvals, workflows, inbox, schedules, quarantine, settings
     )
 
 
