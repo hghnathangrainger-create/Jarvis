@@ -44,12 +44,14 @@ instances - never a new database connection, never a new store):
       COUNT query, no row hydration, no write of any kind.
     - Schedules: calls the already-injected ScheduleStore.count() - same
       shape as Inbox above.
-    - Quarantine: calls the already-injected QuarantineStore.
-      list_recent(limit=1) - QuarantineStore has no count() method, so
-      this reads at most one row purely to prove reachability; it never
-      reports a claimed total (that would be misleading, since limit=1
-      caps what is actually read). Never restores, deletes, or modifies
-      anything.
+    - Quarantine: calls the already-injected QuarantineStore.count()
+      (Phase 68) - a true, unbounded COUNT query, the same shape as the
+      Inbox/Schedule checks above. QuarantineStore had no count() method
+      when this tool was first written (Phase 57); Phase 66 added one
+      for the dashboard's own Quarantine Summary panel, and this check
+      now reuses it rather than the previous limit=1 list_recent() probe
+      that could only prove reachability, never a real total. Never
+      restores, deletes, or modifies anything.
     - Security Manager: calls the already-injected SecurityManager's own
       classify_action() on this tool's own fixed "show system health"
       action string and confirms it still classifies GREEN - a pure,
@@ -120,7 +122,7 @@ class HealthCheckTool(BaseTool):
             schedule_store: The already-constructed ScheduleStore. Only
                 count() is ever called.
             quarantine_store: The already-constructed QuarantineStore.
-                Only list_recent(limit=1) is ever called.
+                Only count() is ever called (Phase 68).
             security_manager: The application's already-constructed
                 SecurityManager. Only classify_action() is ever called,
                 on this tool's own fixed action string - never anything
@@ -276,22 +278,20 @@ class HealthCheckTool(BaseTool):
     def _quarantine_status(self) -> str:
         """Report whether the already-injected QuarantineStore is reachable.
 
-        Calls only list_recent(limit=1) - QuarantineStore has no
-        count() method, so this reads at most one row purely to prove
-        reachability. Deliberately does not report a claimed total
-        (limit=1 caps what is actually read, so any larger number would
-        be misleading). Never restores, deletes, or modifies anything,
-        and never constructs a new QuarantineStore or database
-        connection.
+        Calls only count() (Phase 68) - a true, unbounded SQL COUNT
+        query, no row hydration, no write of any kind - the same shape
+        as _inbox_status()/_schedule_status() above. Never restores,
+        deletes, or modifies anything, and never constructs a new
+        QuarantineStore or database connection.
 
         Returns:
             A short, human-readable status string.
         """
         try:
-            self._quarantine_store.list_recent(limit=1)
+            count = self._quarantine_store.count()
         except Exception as exc:  # noqa: BLE001 - a health check must never crash
             return f"NOT reachable ({exc})"
-        return "reachable"
+        return f"reachable ({count} file{'' if count == 1 else 's'} recorded)"
 
     def _security_manager_status(self) -> str:
         """Report whether the already-injected SecurityManager correctly

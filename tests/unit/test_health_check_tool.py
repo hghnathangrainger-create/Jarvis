@@ -101,6 +101,9 @@ class _FakeQuarantineStore:
     def list_recent(self, limit: int = 50) -> list[object]:
         return []
 
+    def count(self) -> int:
+        return 0
+
 
 def _fake_tool(*, database_path: Path, registry: ToolRegistry | None = None) -> HealthCheckTool:
     """A HealthCheckTool wired with fake stores - for tests that only
@@ -268,7 +271,44 @@ def test_reports_quarantine_reachable(tmp_path: Path) -> None:
         SecurityManager(),
     )
     result = _run(tool)
-    assert "Quarantine store: reachable" in result.output
+    assert "Quarantine store: reachable (0 files recorded)" in result.output
+
+
+def test_reports_quarantine_reachable_with_singular_count(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    quarantine.record_quarantine(
+        original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
+    )
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Quarantine store: reachable (1 file recorded)" in result.output
+
+
+def test_reports_quarantine_reachable_with_plural_count(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, db_path = _real_stores(tmp_path)
+    quarantine.record_quarantine(
+        original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+    )
+    quarantine.record_quarantine(
+        original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+    )
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+    )
+    result = _run(tool)
+    assert "Quarantine store: reachable (2 files recorded)" in result.output
 
 
 def test_reports_security_manager_self_classification_green(tmp_path: Path) -> None:
