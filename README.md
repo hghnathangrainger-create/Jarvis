@@ -1326,8 +1326,8 @@ When AI reasoning is enabled, responses may also show an advisory line, clearly 
 
 ```
 jarvis> [OK] Recent memories:
-          [2] (project) the API deadline is next Tuesday
-          [1] (general) buy milk on Friday
+          [2] (project) the API deadline is next Tuesday (created: 2026-07-15T09:14:02)
+          [1] (general) buy milk on Friday (created: 2026-07-10T08:02:11)
         [AI suggestion - advisory only] You are reviewing your saved notes.
 ```
 

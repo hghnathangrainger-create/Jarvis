@@ -74,6 +74,12 @@ class _FakeMemory:
             rows = [r for r in rows if r.category == cat]
         return rows[:limit]
 
+    def get(self, memory_id: int) -> MemoryRecord | None:
+        for record in self.data:
+            if record.id == memory_id:
+                return record
+        return None
+
 
 @pytest.fixture()
 def memory() -> _FakeMemory:
@@ -208,3 +214,52 @@ def test_listing_shows_category(tool: MemoryTool) -> None:
     tool.run(_request(operation="save", content="note here", category="note"))
     result = tool.run(_request(operation="list"))
     assert "(note)" in result.output
+
+
+# --- Creation timestamp (Phase 70) --------------------------------------------
+
+
+def test_list_output_includes_created_timestamp(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="buy milk"))
+    result = tool.run(_request(operation="list"))
+    record = memory.data[0]
+    expected = record.created_at.isoformat(timespec="seconds")
+    assert f"(created: {expected})" in result.output
+
+
+def test_search_output_includes_created_timestamp(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="Nathan likes Python"))
+    result = tool.run(_request(operation="search", query="python"))
+    record = memory.data[0]
+    expected = record.created_at.isoformat(timespec="seconds")
+    assert f"(created: {expected})" in result.output
+
+
+def test_get_output_includes_created_timestamp(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="ship it"))
+    record = memory.data[0]
+    result = tool.run(_request(operation="get", memory_id=record.id))
+    assert result.success is True
+    expected = record.created_at.isoformat(timespec="seconds")
+    assert f"(created: {expected})" in result.output
+
+
+def test_get_output_is_unknown_operation_free_of_regression(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    """Confirms the 'get' operation's full row shape - id, category,
+    content, and the new timestamp - all still appear together, not
+    just the timestamp in isolation."""
+    tool.run(_request(operation="save", content="ship it", category="project"))
+    record = memory.data[0]
+    result = tool.run(_request(operation="get", memory_id=record.id))
+    assert f"[{record.id}]" in result.output
+    assert "(project)" in result.output
+    assert "ship it" in result.output
+    assert "(created:" in result.output

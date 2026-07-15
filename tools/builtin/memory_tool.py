@@ -124,9 +124,7 @@ class MemoryTool(BaseTool):
             record = self._memory.get(memory_id)
             if record is None:
                 return self.fail(f"No memory found with id {memory_id}.")
-            return self.ok(
-                f"[{record.id}] ({record.category}) {record.content}"
-            )
+            return self.ok(self._format_row(record))
 
         if operation == "list":
             records = self._list_recent(limit=limit, category=category)
@@ -270,5 +268,24 @@ class MemoryTool(BaseTool):
             return f"{header}: none found."
         lines = [f"{header}:"]
         for record in records:
-            lines.append(f"  [{record.id}] ({record.category}) {record.content}")
+            lines.append(f"  {MemoryTool._format_row(record)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_row(record: MemoryRecord) -> str:
+        """Format a single memory record as one readable line.
+
+        Includes the record's real creation time (Phase 70), using the
+        same `isoformat(timespec="seconds")` convention
+        ApprovalHistoryTool/WorkflowHistoryTool already use for their own
+        timestamps - never a new date format.
+
+        Args:
+            record: The memory record to format.
+
+        Returns:
+            A single-line summary of the memory, including when it was
+            created.
+        """
+        created = record.created_at.isoformat(timespec="seconds")
+        return f"[{record.id}] ({record.category}) {record.content} (created: {created})"
