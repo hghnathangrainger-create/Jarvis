@@ -6,7 +6,8 @@ tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
 21, Batch 3 with the Schedules tab; extended Phase 39, Batch 2 with the
 Quarantine tab; extended Phase 65, Batch 2 with an Inbox Source
 Breakdown panel, an enhanced Inbox detail pane, and a Schedules
-Enabled/Disabled Breakdown panel).
+Enabled/Disabled Breakdown panel; extended Phase 66, Batch 2 with a
+Quarantine Summary panel).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
@@ -69,6 +70,7 @@ from dashboard.read_model import (
     MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
+    QuarantineSummary,
     ScheduleRow,
     ScheduleStatusCount,
     StoreReachability,
@@ -191,6 +193,15 @@ QUARANTINE_CAPTION = (
     "use the CLI 'restore file'/'delete file' commands, both of which "
     "still require approval. A row here does not guarantee the file is "
     "still physically in quarantine - it may have already been restored."
+)
+
+#: Read-only wording for the Quarantine Summary panel (Phase 66, Batch
+#: 2): explicitly discloses this is durable *database record* data, not
+#: a live filesystem scan - the same distinction QUARANTINE_CAPTION
+#: already draws for the table above it.
+QUARANTINE_SUMMARY_CAPTION = (
+    "Based on Jarvis's own durable quarantine records - not a live scan "
+    "of .jarvis_trash/'s actual contents."
 )
 
 
@@ -564,6 +575,35 @@ def schedule_enabled_breakdown_line(row: ScheduleStatusCount) -> str:
     """
     label = "enabled" if row.enabled else "disabled"
     return f"{label}: {row.count}"
+
+
+def quarantine_summary_lines(summary: QuarantineSummary) -> list[str]:
+    """Build the small, real-data-only summary lines for the Quarantine
+    Summary panel (Phase 66, Batch 2).
+
+    Every value here traces to a real query (QuarantineStore.count() for
+    the total, the newest already-fetched entry's own timestamp for the
+    latest) - nothing estimated, simulated, or fabricated. Deliberately
+    excludes a "known vs. unknown original path" split and a total-size
+    figure - neither corresponds to real, storeable quarantine data (see
+    dashboard/read_model.py's own QuarantineSummary docstring for why).
+
+    Args:
+        summary: The quarantine summary view model to describe.
+
+    Returns:
+        A short list of plain-text summary lines. The most-recent line
+        shows "—" (never fabricates a timestamp) when no entries exist.
+    """
+    latest = (
+        format_timestamp(summary.latest_quarantined_at)
+        if summary.latest_quarantined_at is not None
+        else "—"
+    )
+    return [
+        f"Total quarantined files: {summary.total_count}",
+        f"Most recently quarantined: {latest}",
+    ]
 
 
 def inbox_detail_text(row: InboxRow) -> str:
@@ -1033,6 +1073,22 @@ class DashboardApp:
         self._notebook.add(frame, text="Quarantine")
 
         ttk.Label(frame, text=QUARANTINE_CAPTION, wraplength=480).pack(anchor="w")
+
+        # --- Summary (Phase 66, Batch 2) ----------------------------------------
+        ttk.Label(
+            frame, text="Summary", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(frame, text=QUARANTINE_SUMMARY_CAPTION, wraplength=480).pack(
+            anchor="w"
+        )
+        self._quarantine_summary_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._quarantine_summary_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._quarantine_summary_frame = ttk.Frame(frame)
+        self._quarantine_summary_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._quarantine_summary_labels: list[ttk.Label] = []
+
         self._quarantine_error_var = tk.StringVar(value="")
         ttk.Label(
             frame, textvariable=self._quarantine_error_var, foreground="red"
@@ -1080,6 +1136,7 @@ class DashboardApp:
         self._refresh_inbox()
         self._refresh_schedule_breakdown()
         self._refresh_schedules()
+        self._refresh_quarantine_summary()
         self._refresh_quarantine()
         self._last_refreshed_var.set(
             f"Last refreshed: {format_timestamp(datetime.now(timezone.utc))}"
@@ -1360,6 +1417,24 @@ class DashboardApp:
             return
         for row in rows:
             tree.insert("", "end", iid=str(row.id), values=schedule_row_to_tree_values(row))
+
+    def _refresh_quarantine_summary(self) -> None:
+        """Refresh the Quarantine Summary panel (Phase 66, Batch 2),
+        isolated from _refresh_quarantine's own error state, mirroring
+        this module's established per-panel isolation convention."""
+        try:
+            summary = self._read_model.get_quarantine_summary()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._quarantine_summary_error_var.set(
+                format_error_state("quarantine summary", exc)
+            )
+            return
+        self._quarantine_summary_error_var.set("")
+        self._quarantine_summary_labels = self._render_label_lines(
+            self._quarantine_summary_frame,
+            self._quarantine_summary_labels,
+            quarantine_summary_lines(summary),
+        )
 
     def _refresh_quarantine(self) -> None:
         try:

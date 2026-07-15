@@ -987,7 +987,7 @@ Gives the dashboard a seventh tab showing what's recorded in quarantine — the 
 
 ### Dashboard Quarantine tab
 
-Read-only, exactly like every other dashboard tab: shows each quarantined file's name, original path, quarantine path, quarantined-at time, and session id (when known), sourced from `DashboardReadModel.get_quarantine_entries()`, which itself reads only `QuarantineStore.list_recent()` — the same durable metadata records `list quarantine`/`show quarantine` and `restore file` already use. A missing/empty state is shown honestly ("No files currently in quarantine.") rather than an error. A row here does not guarantee the file still physically exists in `.jarvis_trash/` — it may have already been restored via the CLI, since a restore never deletes or updates the underlying `QuarantineRecord`.
+Read-only, exactly like every other dashboard tab: shows each quarantined file's name, original path, quarantine path, quarantined-at time, and session id (when known), sourced from `DashboardReadModel.get_quarantine_entries()`, which itself reads only `QuarantineStore.list_recent()` — the same durable metadata records `list quarantine`/`show quarantine` and `restore file` already use. A missing/empty state is shown honestly ("No files currently in quarantine.") rather than an error. A row here does not guarantee the file still physically exists in `.jarvis_trash/` — it may have already been restored via the CLI, since a restore never deletes or updates the underlying `QuarantineRecord`. Extended in Phase 66 with a Summary panel — see Phase 66 below for the current Quarantine tab.
 
 ### What is deliberately NOT included in Phase 39
 
@@ -1271,6 +1271,39 @@ Nothing in Phase 65 adds an archive/delete/clear control for Inbox, a create/ena
 ### What is deliberately NOT included in Phase 65
 
 No Inbox archive/delete/clear control. No schedule create/enable/disable/delete control from the dashboard. No dashboard write action of any kind. No AI-generated summaries or insights. No risk, urgency, importance, or intelligence score. No dashboard search box, no pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, `ApprovalManager`, or `WorkflowEngine` behavior change. No other dashboard tab changed.
+
+---
+
+## Phase 66 — Quarantine Dashboard V1 (complete)
+
+The Quarantine tab was the last of the seven dashboard tabs Phases 62–65 hadn't touched at all — no summary, no panel, just the original table. Phase 66 gives it an honest, real-data-only Summary panel — but deliberately *not* the same fixed-vocabulary breakdown pattern every other tab got, since quarantine records have no real categorical dimension to tally. Delivered in two batches. See `docs/phase_66_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model foundation.** `QuarantineStore` gained `count()` — a true, unbounded total, the one durable store in the project that had been missing this method every other store already has. `dashboard/read_model.py` gained `QuarantineSummary` (`total_count`, `latest_quarantined_at`) and `get_quarantine_summary()`, the latter deriving its latest-timestamp field from `get_quarantine_entries(limit=1)`'s own already-fetched data rather than a second new query shape.
+- **Batch 2 — UI layer, end-to-end verification, documentation, and closure.** The Quarantine tab gained a "Summary" panel (the same destroy-and-rebuild label pattern every other panel already established), explicitly captioned as durable-record data, never a live filesystem scan. Real, temporary-database smoke tests wire a real `DashboardReadModel` (with real quarantine records) into a real `DashboardApp`, confirming the Summary panel and table both render honestly, including the honest empty state on an empty store.
+
+### The upgraded Quarantine tab
+
+```
+Files recorded in Jarvis's quarantine directory (.jarvis_trash/) -
+read-only. Nothing here can be restored, deleted, or cleaned up...
+
+Summary
+Based on Jarvis's own durable quarantine records - not a live scan of
+.jarvis_trash/'s actual contents.
+  Total quarantined files: 2
+  Most recently quarantined: 2026-...
+
+<Name>  <Original Path>  <Quarantine Path>  <Quarantined At>  <Session>
+...
+```
+
+### Safety note: still read-only, still no new authority, and no fabricated breakdown
+
+Nothing in Phase 66 adds a restore/delete/empty-trash/permanent-delete control, a command box, or any interactive element beyond the pre-existing refresh control — re-confirmed by the same structural test that walks every widget in the entire window and finds exactly one `Button` ("Refresh now") anywhere, plus a new Phase 66 test scoping that same proof to the Quarantine tab specifically. `dashboard/read_model.py` and `ui/dashboard_app.py` still import no execution, approval, command-routing, AI, file-tool, restore-tool, delete-tool, or tool-execution component, and neither performs any filesystem inspection or `stat()` call. Deliberately, the Summary panel does **not** include a "known vs. unknown original path" split (`QuarantineRecord.original_path` is never null — every durable row already has a known path) or a total-size figure (no size is ever stored, and computing one live would mean inspecting the filesystem) — reporting this honestly rather than fabricating a breakdown to match the other six tabs.
+
+### What is deliberately NOT included in Phase 66
+
+No restore, delete, empty-trash, or permanent-delete control from the dashboard. No dashboard write action of any kind. No "known vs. unknown original path" breakdown. No total-size figure. No AI-generated summaries or insights. No risk, urgency, importance, or intelligence score. No dashboard search box, no pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, `ApprovalManager`, or `WorkflowEngine` behavior change. No other dashboard tab changed.
 
 ---
 

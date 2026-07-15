@@ -46,6 +46,7 @@ from dashboard.read_model import (
     MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
+    QuarantineSummary,
     ScheduleRow,
     ScheduleStatusCount,
     StoreReachability,
@@ -79,6 +80,7 @@ from ui.dashboard_app import (
     approval_row_to_tree_values,
     overview_summary_lines,
     quarantine_row_to_tree_values,
+    quarantine_summary_lines,
     schedule_enabled_breakdown_line,
     schedule_row_to_tree_values,
     store_reachability_line,
@@ -249,6 +251,9 @@ class _RaisingReadModel:
 
     def get_quarantine_entries(self, limit: int = 50):
         raise RuntimeError("simulated quarantine query failure")
+
+    def get_quarantine_summary(self):
+        raise RuntimeError("simulated quarantine summary query failure")
 
     def get_system_status(self):
         raise RuntimeError("simulated system status query failure")
@@ -646,6 +651,22 @@ def test_quarantine_row_to_tree_values_shows_placeholder_for_no_session_id() -> 
     assert values[4] == "—"
 
 
+def test_quarantine_summary_lines_show_real_count_and_timestamp() -> None:
+    summary = QuarantineSummary(
+        total_count=3, latest_quarantined_at=datetime(2026, 1, 1, 12, 0, 0)
+    )
+    lines = quarantine_summary_lines(summary)
+    assert "Total quarantined files: 3" in lines
+    assert "Most recently quarantined: 2026-01-01 12:00:00 UTC" in lines
+
+
+def test_quarantine_summary_lines_show_honest_empty_state() -> None:
+    summary = QuarantineSummary(total_count=0, latest_quarantined_at=None)
+    lines = quarantine_summary_lines(summary)
+    assert "Total quarantined files: 0" in lines
+    assert "Most recently quarantined: —" in lines
+
+
 def test_overview_summary_lines_contain_only_real_counts() -> None:
     overview = DashboardOverview(
         total_memory_count=7,
@@ -993,6 +1014,10 @@ class TestDashboardAppWithRealTk:
         assert (
             "Could not read schedule enabled/disabled breakdown"
             in app._schedule_breakdown_error_var.get()
+        )
+        assert (
+            "Could not read quarantine summary"
+            in app._quarantine_summary_error_var.get()
         )
 
     def test_one_overview_panel_failure_does_not_blank_another(
@@ -1585,6 +1610,89 @@ class TestDashboardAppWithRealTk:
         assert "restored" in lowered or "restore" in lowered
         assert "deleted" in lowered or "delete" in lowered
         assert "cleaned up" in lowered or "cleanup" in lowered
+
+    def test_quarantine_summary_panel_renders_real_data(self, root: tk.Tk) -> None:
+        read_model, _, _, _, _, _, quarantine = _make_real_stack()
+        quarantine.record_quarantine(
+            original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+        )
+        quarantine.record_quarantine(
+            original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+        )
+        app = _build_app(root, read_model)
+
+        summary_texts = [
+            label.cget("text") for label in app._quarantine_summary_labels
+        ]
+        assert "Total quarantined files: 2" in summary_texts
+        assert any(
+            text.startswith("Most recently quarantined: 20") for text in summary_texts
+        )
+        assert app._quarantine_summary_error_var.get() == ""
+
+    def test_quarantine_summary_panel_shows_honest_empty_state(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        summary_texts = [
+            label.cget("text") for label in app._quarantine_summary_labels
+        ]
+        assert "Total quarantined files: 0" in summary_texts
+        assert "Most recently quarantined: —" in summary_texts
+        assert app._quarantine_summary_error_var.get() == ""
+
+    def test_quarantine_summary_and_table_render_together_honestly(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check: a real DashboardReadModel over
+        a real temporary database with real quarantine records, wired
+        into a real DashboardApp. Confirms the Summary panel and table
+        both render honestly from that real data (Phase 66, Batch 2)."""
+        read_model, _, _, _, _, _, quarantine = _make_real_stack()
+        quarantine.record_quarantine(
+            original_path="/home/nathan/notes.txt",
+            quarantine_path="/home/nathan/.jarvis_trash/notes__a1b2c3d4.txt",
+            session_id=7,
+        )
+        app = _build_app(root, read_model)
+
+        summary_texts = [
+            label.cget("text") for label in app._quarantine_summary_labels
+        ]
+        assert "Total quarantined files: 1" in summary_texts
+
+        children = app._quarantine_tree.get_children()
+        assert len(children) == 1
+        values = app._quarantine_tree.item(children[0], "values")
+        assert values[0] == "notes__a1b2c3d4.txt"
+
+        assert app._quarantine_summary_error_var.get() == ""
+        assert app._quarantine_error_var.get() == ""
+
+    def test_quarantine_tab_no_write_widget_introduced(self, root: tk.Tk) -> None:
+        """Structural, behavioral proof that Batch 1/2's new Summary
+        panel never introduced a button or other write-triggering widget
+        anywhere in the Quarantine tab specifically (Phase 66, Batch 2)
+        - no restore, delete, empty-trash, or permanent-delete control of
+        any kind."""
+        read_model, _, _, _, _, _, quarantine = _make_real_stack()
+        quarantine.record_quarantine(
+            original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
+        )
+        app = _build_app(root, read_model)
+
+        def _collect_buttons(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TButton":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_buttons(child))
+            return found
+
+        quarantine_tab_frame = app._quarantine_tree.master
+        assert _collect_buttons(quarantine_tab_frame) == []
 
     def test_no_widget_has_a_write_or_execute_command_bound(self, root: tk.Tk) -> None:
         """Every ttk.Button's `command` must resolve to one of this
