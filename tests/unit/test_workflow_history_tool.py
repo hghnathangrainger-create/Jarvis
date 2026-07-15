@@ -24,7 +24,10 @@ sqlalchemy = pytest.importorskip("sqlalchemy")
 
 from tools.base_tool import ToolRequest
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
-from workflow.workflow_history_store import WorkflowHistoryRecord
+from workflow.workflow_history_store import (
+    KNOWN_WORKFLOW_STATUSES,
+    WorkflowHistoryRecord,
+)
 
 _CREATED = datetime(2026, 7, 10, 9, 15, 0, tzinfo=timezone.utc)
 
@@ -65,6 +68,26 @@ class _FakeHistoryStore:
         self, workflow_id: str, limit: int = 50
     ) -> list[WorkflowHistoryRecord]:
         return [r for r in self._records if r.workflow_id == workflow_id][:limit]
+
+    def list_recent_workflow_ids(self, limit: int = 10) -> list[str]:
+        """Distinct workflow ids, in first-occurrence order - mirroring
+        this fake's own "records are already newest-first" convention
+        (the same one list_recent() above already relies on)."""
+        seen: list[str] = []
+        for record in self._records:
+            if record.workflow_id not in seen:
+                seen.append(record.workflow_id)
+        return seen[:limit]
+
+    def latest_status_for(
+        self, workflow_id: str
+    ) -> WorkflowHistoryRecord | None:
+        """The first matching record for this workflow_id - "first" being
+        "most recent" under this fake's newest-first convention."""
+        for record in self._records:
+            if record.workflow_id == workflow_id:
+                return record
+        return None
 
 
 def _request(operation: str = "history", **extra: object) -> ToolRequest:
@@ -146,6 +169,117 @@ def test_recent_operation_uses_recent_header() -> None:
     tool = WorkflowHistoryTool(_FakeHistoryStore([_record()]))
     output = tool.run(_request("recent")).output
     assert "Recent workflows" in output
+
+
+# --- Status breakdown in list-operation headers (Phase 73, Batch 2) ----------
+
+
+def test_history_header_counts_distinct_workflows_not_raw_transitions() -> None:
+    """Critical correctness proof: a workflow with multiple transitions
+    must be counted once, by its latest status - never once per
+    transition row, which would double-count a busy workflow."""
+    records = [
+        _record(
+            id=3,
+            workflow_id="wf-busy",
+            status="workflow_completed",
+            step_number=2,
+        ),
+        _record(
+            id=2,
+            workflow_id="wf-busy",
+            status="workflow_step_completed",
+            step_number=1,
+        ),
+        _record(id=1, workflow_id="wf-busy", status="workflow_started"),
+    ]
+    tool = WorkflowHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+    header_line = output.splitlines()[0]
+    # wf-busy has three transition rows but must be tallied exactly once,
+    # under its latest status only.
+    assert "workflow_completed: 1" in header_line
+    assert "workflow_started: 0" in header_line
+    assert "workflow_step_completed: 0" in header_line
+
+
+def test_history_header_shows_honest_zero_for_untouched_statuses() -> None:
+    record = _record(workflow_id="wf-1", status="workflow_started")
+    tool = WorkflowHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("history")).output
+    header_line = output.splitlines()[0]
+    for status in KNOWN_WORKFLOW_STATUSES:
+        if status != "workflow_started":
+            assert f"{status}: 0" in header_line
+
+
+def test_history_header_preserves_known_status_order_not_sorted_by_count() -> None:
+    """Statuses must never be reordered by count - this would visually
+    imply significance the data does not actually carry."""
+    last_status = KNOWN_WORKFLOW_STATUSES[-1]
+    records = [
+        _record(id=i, workflow_id=f"wf-{i}", status=last_status)
+        for i in range(5)
+    ]
+    tool = WorkflowHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+
+    header_line = output.splitlines()[0]
+    breakdown_text = header_line.split("recent activity: ", 1)[1].rstrip("):")
+    rendered_order = [entry.split(":")[0].strip() for entry in breakdown_text.split(",")]
+    assert rendered_order == list(KNOWN_WORKFLOW_STATUSES)
+
+
+def test_history_header_discloses_recent_activity_scope() -> None:
+    record = _record(workflow_id="wf-1", status="workflow_started")
+    tool = WorkflowHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("history")).output
+    header_line = output.splitlines()[0]
+    assert "recent activity" in header_line.lower()
+
+
+def test_recent_header_also_shows_status_breakdown() -> None:
+    record = _record(workflow_id="wf-1", status="workflow_completed")
+    tool = WorkflowHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("recent")).output
+    header_line = output.splitlines()[0]
+    assert "recent activity" in header_line.lower()
+    assert "workflow_completed: 1" in header_line
+
+
+def test_history_rows_still_include_expected_details_alongside_breakdown() -> None:
+    record = _record(workflow_id="wf-1", status="workflow_started")
+    tool = WorkflowHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("history")).output
+    assert "recent activity" in output
+    assert "wf-1" in output
+    assert "workflow_started" in output
+
+
+def test_empty_history_header_is_unchanged_by_batch_2() -> None:
+    """Phase 73, Batch 2 only changes the non-empty header - the empty
+    state must remain exactly as it was before this batch."""
+    tool = WorkflowHistoryTool(_FakeHistoryStore([]))
+    output = tool.run(_request("history")).output
+    assert output == "Workflow history: none found."
+
+
+def test_get_operation_has_no_status_breakdown() -> None:
+    """Single-workflow detail output must be completely unaffected."""
+    record = _record(workflow_id="wf-1", status="workflow_started")
+    tool = WorkflowHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("get", workflow_id="wf-1")).output
+    assert "recent activity" not in output
+    assert "(" not in output.splitlines()[0]
+
+
+def test_breakdown_does_not_mutate_history() -> None:
+    records = [_record(workflow_id="wf-1", status="workflow_started")]
+    store = _FakeHistoryStore(records)
+    tool = WorkflowHistoryTool(store)
+    tool.run(_request("history"))
+    tool.run(_request("recent"))
+    assert store._records == records
 
 
 # --- run(): get ---------------------------------------------------------------

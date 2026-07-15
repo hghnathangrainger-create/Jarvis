@@ -3,7 +3,9 @@ workflow_history_tool.py
 
 A safe, read-only tool that shows durable workflow lifecycle history
 (Durable Workflow Lifecycle Foundation - a prerequisite turn, not a
-numbered phase).
+numbered phase; extended Phase 73, Batch 2 with a real,
+recent-activity-scoped status breakdown in the "history"/"recent"
+list headers).
 
 WorkflowHistoryTool is a GREEN tool. It only reads from a
 WorkflowHistoryStore and never starts, resumes, pauses, or executes
@@ -22,8 +24,14 @@ Supported operations (via the 'operation' input):
 
 from __future__ import annotations
 
+from collections import Counter
+
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
-from workflow.workflow_history_store import WorkflowHistoryRecord, WorkflowHistoryStore
+from workflow.workflow_history_store import (
+    KNOWN_WORKFLOW_STATUSES,
+    WorkflowHistoryRecord,
+    WorkflowHistoryStore,
+)
 
 _DEFAULT_LIMIT = 20
 _RECENT_LIMIT = 10
@@ -112,11 +120,13 @@ class WorkflowHistoryTool(BaseTool):
 
         if operation == "recent":
             records = self._history.list_recent(limit=_RECENT_LIMIT)
-            return self.ok(self._format_many(records, "Recent workflows"))
+            header = self._list_header("Recent workflows", records, _RECENT_LIMIT)
+            return self.ok(self._format_many(records, header))
 
         if operation == "history":
             records = self._history.list_recent(limit=_DEFAULT_LIMIT)
-            return self.ok(self._format_many(records, "Workflow history"))
+            header = self._list_header("Workflow history", records, _DEFAULT_LIMIT)
+            return self.ok(self._format_many(records, header))
 
         return self.fail(
             f"Unknown operation '{operation}'. Use 'history', 'recent', or 'get'."
@@ -143,6 +153,86 @@ class WorkflowHistoryTool(BaseTool):
                 f"No workflow history found for id '{workflow_id.strip()}'."
             )
         return self.ok(self._format_workflow(workflow_id.strip(), records))
+
+    def _list_header(
+        self, base_header: str, records: list[WorkflowHistoryRecord], workflow_id_limit: int
+    ) -> str:
+        """Build a list operation's header, including a real,
+        recent-activity-scoped status breakdown when there is at least
+        one result (Phase 73, Batch 2).
+
+        Only "history"/"recent" (the list operations) ever call this -
+        the single-workflow "get" detail view is completely unaffected.
+        When `records` is empty, the plain `base_header` is returned
+        unchanged, so `_format_many()`'s own existing empty-state
+        message ("{header}: none found.") is preserved exactly as it
+        was before this batch - an empty result means every status's
+        real count is honestly zero anyway, so no breakdown is needed
+        to say so.
+
+        Args:
+            base_header: The plain header text ("Workflow history" or
+                "Recent workflows").
+            records: The already-fetched transition records this list
+                operation is about to render - only used here to decide
+                whether any results exist at all.
+            workflow_id_limit: The maximum number of most-recently-active
+                distinct workflows to consider for the breakdown - passed
+                straight through to list_recent_workflow_ids().
+
+        Returns:
+            The plain header, or the header with a parenthetical,
+            recent-activity-scoped breakdown appended.
+        """
+        if not records:
+            return base_header
+        breakdown = self._workflow_status_breakdown_text(workflow_id_limit)
+        return f"{base_header} (recent activity: {breakdown})"
+
+    def _workflow_status_breakdown_text(self, limit: int) -> str:
+        """Return a real, honest, recent-activity-scoped status
+        breakdown as a single comma-separated text fragment (Phase 73,
+        Batch 2).
+
+        Tallies only the most recently active *distinct* workflows'
+        current status - never raw transition rows, which would
+        double-count a busy workflow with many transitions. Uses only
+        already-existing WorkflowHistoryStore methods:
+        list_recent_workflow_ids() to identify distinct workflow ids,
+        then latest_status_for() once per id to find each one's current
+        status - the exact same methodology
+        dashboard/read_model.py's own get_workflow_status_breakdown()
+        already established and proved (Phase 64, Batch 1).
+
+        Never presented, or claimed, as an all-time total: no all-time
+        per-status aggregation exists for workflows, since a workflow's
+        "status" is its own latest transition, not a fixed column.
+        Every status in KNOWN_WORKFLOW_STATUSES is included, even one
+        matched by none of the considered workflows - an honest zero is
+        reported, never omitted. Statuses are rendered in
+        KNOWN_WORKFLOW_STATUSES's own fixed, declared order - never
+        sorted by count.
+
+        Args:
+            limit: Maximum number of most-recently-active distinct
+                workflows to consider, passed straight through to
+                list_recent_workflow_ids().
+
+        Returns:
+            A single text fragment like "workflow_started: 1,
+            workflow_completed: 2, ...", one entry per known status, in
+            KNOWN_WORKFLOW_STATUSES's own fixed order.
+        """
+        workflow_ids = self._history.list_recent_workflow_ids(limit=limit)
+        latest_statuses = []
+        for workflow_id in workflow_ids:
+            latest = self._history.latest_status_for(workflow_id)
+            if latest is not None:
+                latest_statuses.append(latest.status)
+        tally = Counter(latest_statuses)
+        return ", ".join(
+            f"{status}: {tally.get(status, 0)}" for status in KNOWN_WORKFLOW_STATUSES
+        )
 
     @staticmethod
     def _format_many(
