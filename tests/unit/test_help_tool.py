@@ -78,6 +78,8 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "system health",
         "remember this:",
         "show memories",
+        "show memory categories",
+        "list memory categories",
         "search memories for",
         "update memory",
         "move memory",
@@ -146,6 +148,18 @@ def test_output_documents_the_explicit_webpage_save_command_and_its_distinction(
     assert "summarize webpage <url> and save to inbox" in result.output
     assert "summarise webpage <url> and save to inbox" in result.output
     assert "does not save to the Inbox" in result.output
+
+
+def test_output_documents_memory_categories_command_and_its_alias() -> None:
+    """Phase 71, Batch 2: HelpTool documents the new read-only memory
+    category-breakdown command, both accepted aliases, and is explicit
+    that it shows honest zeros for categories with no memories -
+    proactively closing the exact Phase-58-class gap (a real command
+    missing from _HELP_LINES) before it can occur here."""
+    result = _run(HelpTool())
+    assert "show memory categories" in result.output
+    assert "list memory categories" in result.output
+    assert "honest zeros" in result.output
 
 
 def test_output_does_not_invent_a_nonexistent_command() -> None:

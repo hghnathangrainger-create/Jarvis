@@ -120,6 +120,7 @@ Phase 5 turns Jarvis's basic memory into an organised, searchable, correctable p
 | `remember this as <category>: <text>` | Saves a memory under the given category. Unknown categories safely become `general`. |
 | `show memories` | Lists your most recent memories. |
 | `show memories in <category>` | Lists recent memories in one category. |
+| `show memory categories` / `list memory categories` (Phase 71) | Shows a real, honest count of memories in each known category, including `0` for one with none — always in `KNOWN_CATEGORIES`' own fixed order, never sorted by count. |
 | `search memories for <query>` | Searches all memories by text. |
 | `search memories in <category> for <query>` | Searches within one category. |
 | `show memory <id>` | Shows a single memory by its id. |

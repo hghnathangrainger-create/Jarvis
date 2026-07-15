@@ -2,7 +2,8 @@
 test_memory_cli_end_to_end.py
 
 End-to-end integration tests for the memory commands through the live CLI
-(Phase 5, Batch 2).
+(Phase 5, Batch 2; extended Phase 71, Batch 2 with the read-only
+category-breakdown command).
 
 These drive the real CLI with scripted input, wiring together the real Security
 Manager, Planner, Tool Registry, Tool Executor, MemoryTool, and a real
@@ -12,6 +13,9 @@ in-memory SQLite-backed Memory Manager. They prove the full journeys:
     - "remember this as project: Y" files Y under project, and
       "show memories in project" finds it while a personal listing does not.
     - "search memories for X" and "search memories in <cat> for X" work.
+    - "show memory categories"/"list memory categories" report a real,
+      honest per-category count across multiple saved memories, in
+      KNOWN_CATEGORIES' own fixed order, never sorted by count.
     - Every memory command runs GREEN, with no approval prompt.
 
 These tests use a real database, so they are skipped automatically if
@@ -181,3 +185,72 @@ def test_all_memory_commands_are_green(cli_factory) -> None:
     # Not one of the six commands should have required approval.
     assert "approval required" not in output.lower()
     assert "[NEEDS APPROVAL]" not in output
+
+
+# --- Category breakdown (Phase 71, Batch 2) -----------------------------------
+
+
+def test_show_memory_categories_reports_real_counts_across_categories(
+    cli_factory,
+) -> None:
+    """Full, real, end-to-end path: a real CommandRouter, SecurityManager,
+    ToolExecutor, MemoryTool, and an in-memory-SQLite-backed MemoryManager,
+    driven through the real JarvisCLI - proving the command works with real
+    saved memories across multiple categories, not just in isolation."""
+    from memory.memory_models import KNOWN_CATEGORIES
+
+    output = cli_factory(
+        [
+            "remember this as project: ship the release",
+            "remember this as project: fix the bug",
+            "remember this as personal: buy milk",
+            "show memory categories",
+            "exit",
+        ]
+    )
+    assert "Memory categories:" in output
+    assert "project: 2" in output
+    assert "personal: 1" in output
+    # Honest zeros for every known category that received nothing.
+    for category in KNOWN_CATEGORIES:
+        if category not in ("project", "personal"):
+            assert f"{category}: 0" in output
+
+    # Fixed KNOWN_CATEGORIES order, never sorted by count (project has the
+    # highest count here, but must not be reordered to the front).
+    breakdown_block = output.split("Memory categories:")[-1]
+    rendered_order = [
+        line.strip().split(":")[0]
+        for line in breakdown_block.splitlines()
+        if ":" in line and line.strip().split(":")[0] in KNOWN_CATEGORIES
+    ]
+    assert rendered_order == list(KNOWN_CATEGORIES)
+
+
+def test_list_memory_categories_alias_also_works(cli_factory) -> None:
+    output = cli_factory(
+        [
+            "remember this as preference: prefers dark mode",
+            "list memory categories",
+            "exit",
+        ]
+    )
+    assert "Memory categories:" in output
+    assert "preference: 1" in output
+
+
+def test_memory_categories_command_is_green(cli_factory) -> None:
+    output = cli_factory(["show memory categories", "exit"])
+    assert "approval required" not in output.lower()
+    assert "[NEEDS APPROVAL]" not in output
+
+
+def test_memory_categories_uses_no_ai(cli_factory) -> None:
+    """Structural sanity check: the category breakdown never involves AI -
+    no advisory suggestion marker ever appears for this command."""
+    output = cli_factory(
+        ["remember this: a note", "show memory categories", "exit"]
+    )
+    tail = output.split("Memory categories:")[-1]
+    assert "[AI suggestion" not in tail
+    assert "advisory only" not in tail.lower()

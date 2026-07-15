@@ -105,6 +105,7 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `remember this as <category>: <text>` | Saves a memory under a specific category. | GREEN |
 | `show memories` | Lists recent memories. | GREEN |
 | `show memories in <category>` | Lists memories in one category. | GREEN |
+| `show memory categories` / `list memory categories` | Shows a real, honest count of memories in each known category (`general`, `personal`, `project`, `preference`, `note`) — categories with no memories show `0`, always in that fixed order, never sorted by count. | GREEN |
 | `search memories for <query>` | Searches memory content. | GREEN |
 | `search memories in <category> for <query>` | Searches within one category. | GREEN |
 | `update memory <id>: <new text>` | Replaces a memory's content. | YELLOW |

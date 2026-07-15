@@ -44,6 +44,8 @@ _HELP_LINES: tuple[str, ...] = (
     "Memory:",
     "  remember this: <text> / remember this as <category>: <text> - saves a memory",
     "  show memories / show memories in <category> - lists memories",
+    "  show memory categories / list memory categories - shows a real count of memories "
+    "in each known category, including honest zeros",
     "  search memories for <query> / search memories in <category> for <query> - searches memory",
     "  update memory <id>: <new text> - replaces a memory's content (approval required)",
     "  move memory <id> to <category> - re-categorizes a memory (approval required)",
