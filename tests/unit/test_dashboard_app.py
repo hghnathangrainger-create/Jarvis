@@ -37,6 +37,7 @@ from config.settings import Settings
 from dashboard.read_model import (
     ActivityRow,
     ApprovalRow,
+    ApprovalStatusCount,
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
@@ -46,6 +47,7 @@ from dashboard.read_model import (
     ScheduleRow,
     StoreReachability,
     WorkflowRow,
+    WorkflowStatusCount,
     WorkflowTransitionRow,
 )
 from inbox.inbox_store import InboxStore
@@ -62,6 +64,8 @@ from ui.dashboard_app import (
     OVERVIEW_HEADER,
     WINDOW_TITLE,
     activity_row_to_tree_values,
+    approval_detail_text,
+    approval_status_breakdown_line,
     format_error_state,
     format_timestamp,
     memory_category_breakdown_line,
@@ -74,6 +78,7 @@ from ui.dashboard_app import (
     store_reachability_line,
     system_status_lines,
     workflow_row_to_tree_values,
+    workflow_status_breakdown_line,
     workflow_transition_row_to_tree_values,
 )
 
@@ -251,6 +256,12 @@ class _RaisingReadModel:
     def get_memory_category_breakdown(self):
         raise RuntimeError("simulated memory category breakdown query failure")
 
+    def get_approval_status_breakdown(self):
+        raise RuntimeError("simulated approval status breakdown query failure")
+
+    def get_workflow_status_breakdown(self, limit: int = 10):
+        raise RuntimeError("simulated workflow status breakdown query failure")
+
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
 
@@ -324,6 +335,68 @@ def test_memory_detail_text_never_truncates_full_content() -> None:
     assert long_content in memory_detail_text(row)
 
 
+def test_approval_status_breakdown_line_formats_real_count() -> None:
+    row = ApprovalStatusCount(status="approved", count=3)
+    assert approval_status_breakdown_line(row) == "approved: 3"
+
+
+def test_approval_status_breakdown_line_formats_honest_zero() -> None:
+    row = ApprovalStatusCount(status="expired", count=0)
+    assert approval_status_breakdown_line(row) == "expired: 0"
+
+
+def test_workflow_status_breakdown_line_formats_real_count() -> None:
+    row = WorkflowStatusCount(status="workflow_completed", count=2)
+    assert workflow_status_breakdown_line(row) == "workflow_completed: 2"
+
+
+def test_workflow_status_breakdown_line_formats_honest_zero() -> None:
+    row = WorkflowStatusCount(status="workflow_stopped", count=0)
+    assert workflow_status_breakdown_line(row) == "workflow_stopped: 0"
+
+
+def test_approval_detail_text_includes_all_real_fields() -> None:
+    row = ApprovalRow(
+        request_id="req-1",
+        action="delete file",
+        security_tier="yellow",
+        status="approved",
+        created_at=datetime(2026, 1, 1, 0, 0, 0),
+        decided_at=datetime(2026, 1, 1, 0, 5, 0),
+        decided_by="user",
+        reason="Deleting a file changes state and should be confirmed.",
+        decision_reason="looks safe",
+    )
+    text = approval_detail_text(row)
+    assert "Request ID: req-1" in text
+    assert "Action: delete file" in text
+    assert "Tier: yellow" in text
+    assert "Status: approved" in text
+    assert "Reason: Deleting a file changes state and should be confirmed." in text
+    assert "Decision reason: looks safe" in text
+    assert "2026-01-01 00:00:00 UTC" in text
+    assert "2026-01-01 00:05:00 UTC" in text
+    assert "user" in text
+
+
+def test_approval_detail_text_shows_placeholder_for_missing_decision_reason() -> None:
+    row = ApprovalRow(
+        request_id="req-1",
+        action="delete file",
+        security_tier="yellow",
+        status="pending",
+        created_at=datetime(2026, 1, 1, 0, 0, 0),
+        decided_at=None,
+        decided_by=None,
+        reason="r",
+        decision_reason=None,
+    )
+    text = approval_detail_text(row)
+    assert "Decision reason: —" in text
+    assert "Decided: —" in text
+    assert "Decided by: —" in text
+
+
 def test_approval_row_to_tree_values_shows_placeholder_for_undecided() -> None:
     row = ApprovalRow(
         request_id="req-1",
@@ -391,7 +464,24 @@ def test_workflow_transition_row_to_tree_values_shows_tool_name() -> None:
         "1/2",
         "memory",
         "2026-01-01 00:00:00 UTC",
+        "—",
     )
+
+
+def test_workflow_transition_row_to_tree_values_shows_approval_request_id_when_present() -> (
+    None
+):
+    row = WorkflowTransitionRow(
+        status="workflow_step_waiting",
+        step_number=1,
+        step_total=2,
+        tool_name="file_delete",
+        detail=None,
+        created_at=datetime(2026, 1, 1, 0, 0, 0),
+        approval_request_id="req-1",
+    )
+    values = workflow_transition_row_to_tree_values(row)
+    assert values[-1] == "req-1"
 
 
 def test_schedule_row_to_tree_values_maps_real_fields() -> None:
@@ -794,6 +884,14 @@ class TestDashboardAppWithRealTk:
             "Could not read memory category breakdown"
             in app._memory_breakdown_error_var.get()
         )
+        assert (
+            "Could not read approval status breakdown"
+            in app._approval_breakdown_error_var.get()
+        )
+        assert (
+            "Could not read workflow status breakdown"
+            in app._workflow_breakdown_error_var.get()
+        )
 
     def test_one_overview_panel_failure_does_not_blank_another(
         self, root: tk.Tk
@@ -904,6 +1002,165 @@ class TestDashboardAppWithRealTk:
         for category in KNOWN_CATEGORIES:
             assert f"{category}: 0" in breakdown_texts
         assert app._memory_breakdown_error_var.get() == ""
+
+    def test_approval_status_breakdown_renders_all_known_statuses(
+        self, root: tk.Tk
+    ) -> None:
+        from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+        read_model, _, approvals, _, _, _, _ = _make_real_stack()
+        approvals.record_request(
+            request_id="req-1", action="a", reason="r", security_tier="yellow"
+        )
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._approval_breakdown_labels
+        ]
+        assert len(breakdown_texts) == len(KNOWN_APPROVAL_STATUSES)
+        assert "pending: 1" in breakdown_texts
+
+    def test_approval_status_breakdown_empty_store_shows_every_status_at_zero(
+        self, root: tk.Tk
+    ) -> None:
+        from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._approval_breakdown_labels
+        ]
+        for status in KNOWN_APPROVAL_STATUSES:
+            assert f"{status}: 0" in breakdown_texts
+        assert app._approval_breakdown_error_var.get() == ""
+
+    def test_approval_status_breakdown_order_not_sorted_by_count(
+        self, root: tk.Tk
+    ) -> None:
+        from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+        read_model, _, approvals, _, _, _, _ = _make_real_stack()
+        for i in range(5):
+            approvals.record_request(
+                request_id=f"req-{i}", action="a", reason="r", security_tier="yellow"
+            )
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._approval_breakdown_labels
+        ]
+        rendered_statuses = [text.split(":")[0] for text in breakdown_texts]
+        assert rendered_statuses == list(KNOWN_APPROVAL_STATUSES)
+
+    def test_approval_detail_placeholder_before_selection(self, root: tk.Tk) -> None:
+        from ui.dashboard_app import APPROVAL_DETAIL_PLACEHOLDER
+
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+        assert app._approval_detail_var.get() == APPROVAL_DETAIL_PLACEHOLDER
+
+    def test_approval_row_selection_populates_detail_pane(self, root: tk.Tk) -> None:
+        read_model, _, approvals, _, _, _, _ = _make_real_stack()
+        approvals.record_request(
+            request_id="req-1",
+            action="delete file",
+            reason="Deleting a file changes state and should be confirmed.",
+            security_tier="yellow",
+        )
+        app = _build_app(root, read_model)
+        app._approval_tree.selection_set("req-1")
+        app._on_approval_row_selected(None)
+        detail = app._approval_detail_var.get()
+        assert "Request ID: req-1" in detail
+        assert (
+            "Reason: Deleting a file changes state and should be confirmed."
+            in detail
+        )
+
+    def test_workflow_status_breakdown_renders_all_known_statuses(
+        self, root: tk.Tk
+    ) -> None:
+        from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+        read_model, _, _, workflows, _, _, _ = _make_real_stack()
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._workflow_breakdown_labels
+        ]
+        assert len(breakdown_texts) == len(KNOWN_WORKFLOW_STATUSES)
+        assert "workflow_started: 1" in breakdown_texts
+
+    def test_workflow_status_breakdown_empty_store_shows_every_status_at_zero(
+        self, root: tk.Tk
+    ) -> None:
+        from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._workflow_breakdown_labels
+        ]
+        for status in KNOWN_WORKFLOW_STATUSES:
+            assert f"{status}: 0" in breakdown_texts
+        assert app._workflow_breakdown_error_var.get() == ""
+
+    def test_workflow_status_breakdown_order_not_sorted_by_count(
+        self, root: tk.Tk
+    ) -> None:
+        from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+        read_model, _, _, workflows, _, _, _ = _make_real_stack()
+        last_status = KNOWN_WORKFLOW_STATUSES[-1]
+        for i in range(5):
+            workflows.record_transition(workflow_id=f"wf-{i}", status=last_status)
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._workflow_breakdown_labels
+        ]
+        rendered_statuses = [text.split(":")[0] for text in breakdown_texts]
+        assert rendered_statuses == list(KNOWN_WORKFLOW_STATUSES)
+
+    def test_workflow_status_breakdown_discloses_recent_activity_scope(
+        self, root: tk.Tk
+    ) -> None:
+        from ui.dashboard_app import WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE
+
+        lowered = WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE.lower()
+        assert "not an all-time total" in lowered
+        assert "most recently active" in lowered
+
+    def test_workflow_transitions_display_approval_request_id_when_present(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, _, _, workflows, _, _, _ = _make_real_stack()
+        workflows.record_transition(
+            workflow_id="wf-1",
+            status="workflow_step_waiting",
+            approval_request_id="req-1",
+        )
+        app = _build_app(root, read_model)
+        app._workflow_tree.selection_set("wf-1")
+        app._on_workflow_row_selected(None)
+        children = app._transitions_tree.get_children()
+        values = app._transitions_tree.item(children[0], "values")
+        assert values[-1] == "req-1"
+
+    def test_workflow_transitions_show_placeholder_when_no_approval_request_id(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, _, _, workflows, _, _, _ = _make_real_stack()
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        app = _build_app(root, read_model)
+        app._workflow_tree.selection_set("wf-1")
+        app._on_workflow_row_selected(None)
+        children = app._transitions_tree.get_children()
+        values = app._transitions_tree.item(children[0], "values")
+        assert values[-1] == "—"
 
     def test_workflow_selection_loads_transitions(self, root: tk.Tk) -> None:
         read_model, _, _, workflows, _, _, _ = _make_real_stack()

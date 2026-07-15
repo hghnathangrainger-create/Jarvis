@@ -58,6 +58,7 @@ from tkinter import ttk
 from dashboard.read_model import (
     ActivityRow,
     ApprovalRow,
+    ApprovalStatusCount,
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
@@ -68,6 +69,7 @@ from dashboard.read_model import (
     ScheduleRow,
     StoreReachability,
     WorkflowRow,
+    WorkflowStatusCount,
     WorkflowTransitionRow,
 )
 
@@ -124,6 +126,25 @@ WORKFLOW_HISTORY_CAPTION = (
     "after a restart."
 )
 MEMORY_DETAIL_PLACEHOLDER = "Select a memory above to see its full content."
+
+#: Read-only wording for the Approval History detail pane (Phase 64,
+#: Batch 2): mirrors MEMORY_DETAIL_PLACEHOLDER's own established
+#: convention.
+APPROVAL_DETAIL_PLACEHOLDER = (
+    "Select an approval request above to see its full recorded detail."
+)
+
+#: Honest scope disclosure for the Workflow History Status Breakdown
+#: panel (Phase 64, Batch 2): this tallies only the most recently
+#: active workflows already shown in the table above - never an
+#: all-time total across every workflow ever recorded, since no
+#: all-time per-status aggregation exists for workflows (see
+#: dashboard/read_model.py's own get_workflow_status_breakdown()
+#: docstring for why).
+WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE = (
+    "Based on the most recently active workflows shown in the table "
+    "above - not an all-time total across every workflow ever recorded."
+)
 
 #: Read-only wording for the Memories tab (Phase 63): a durable copy of
 #: what Jarvis was explicitly asked to remember - never created, edited,
@@ -242,18 +263,29 @@ def workflow_row_to_tree_values(row: WorkflowRow) -> tuple[str, str, str, str]:
 
 def workflow_transition_row_to_tree_values(
     row: WorkflowTransitionRow,
-) -> tuple[str, str, str, str]:
-    """Map a WorkflowTransitionRow to the exact tuple shown in the drill-down Treeview."""
+) -> tuple[str, str, str, str, str]:
+    """Map a WorkflowTransitionRow to the exact tuple shown in the
+    drill-down Treeview.
+
+    The fifth value, approval_request_id, is "—" for any transition
+    with none recorded (every transition except a
+    "workflow_step_waiting" row) - never fabricated or guessed (Phase
+    64, Batch 2).
+    """
     if row.step_number is not None and row.step_total is not None:
         step = f"{row.step_number}/{row.step_total}"
     else:
         step = "—"
     tool_name = row.tool_name if row.tool_name else "—"
+    approval_request_id = (
+        row.approval_request_id if row.approval_request_id else "—"
+    )
     return (
         row.status,
         step,
         tool_name,
         format_timestamp(row.created_at),
+        approval_request_id,
     )
 
 
@@ -422,6 +454,74 @@ def memory_detail_text(row: MemoryRow) -> str:
     return (
         f"ID: {row.id}  |  Category: {row.category}  |  "
         f"Created: {format_timestamp(row.created_at)}\n\n{row.full_content}"
+    )
+
+
+def approval_status_breakdown_line(row: ApprovalStatusCount) -> str:
+    """Format one ApprovalStatusCount as a single honest status line
+    (Phase 64, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    exactly what ApprovalHistoryStore.count_by_status() returned - a
+    true, unbounded, all-time total - including an honest zero for a
+    status with no matching entries.
+
+    Args:
+        row: The approval status count view model to format.
+
+    Returns:
+        A single plain-text line naming the status and its real count.
+    """
+    return f"{row.status}: {row.count}"
+
+
+def workflow_status_breakdown_line(row: WorkflowStatusCount) -> str:
+    """Format one WorkflowStatusCount as a single honest status line
+    (Phase 64, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    a tally of the most recently active workflows already displayed in
+    the table above - never an all-time total (see
+    WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE) - including an honest zero for
+    a status matched by none of them.
+
+    Args:
+        row: The workflow status count view model to format.
+
+    Returns:
+        A single plain-text line naming the status and its real count.
+    """
+    return f"{row.status}: {row.count}"
+
+
+def approval_detail_text(row: ApprovalRow) -> str:
+    """Build the selected-approval detail text (Phase 64, Batch 2).
+
+    Uses only fields already present on the already-fetched ApprovalRow
+    - never a new query, never a fabricated field. This is the Approval
+    History tab's first selection-based detail view; previously the
+    tab had no drill-down of any kind.
+
+    Args:
+        row: The selected approval history row to describe.
+
+    Returns:
+        A short, multi-line, plain-text description covering the
+        request id, action, tier, status, reason, decision reason (if
+        present), and both timestamps.
+    """
+    decided_at = format_timestamp(row.decided_at) if row.decided_at else "—"
+    decided_by = row.decided_by if row.decided_by else "—"
+    decision_reason = row.decision_reason if row.decision_reason else "—"
+    return (
+        f"Request ID: {row.request_id}\n"
+        f"Action: {row.action}\n"
+        f"Tier: {row.security_tier}\n"
+        f"Status: {row.status}\n"
+        f"Reason: {row.reason}\n"
+        f"Decision reason: {decision_reason}\n"
+        f"Created: {format_timestamp(row.created_at)}\n"
+        f"Decided: {decided_at}  |  Decided by: {decided_by}"
     )
 
 
@@ -655,6 +755,19 @@ class DashboardApp:
         ttk.Label(frame, text=APPROVAL_HISTORY_CAPTION, wraplength=480).pack(
             anchor="w"
         )
+
+        # --- Status Breakdown (Phase 64, Batch 2) ------------------------------
+        ttk.Label(
+            frame, text="Status Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._approval_breakdown_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._approval_breakdown_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._approval_breakdown_frame = ttk.Frame(frame)
+        self._approval_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._approval_breakdown_labels: list[ttk.Label] = []
+
         self._approval_error_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self._approval_error_var, foreground="red").pack(
             anchor="w"
@@ -682,7 +795,17 @@ class DashboardApp:
         for column, heading in zip(columns, headings):
             tree.heading(column, text=heading)
         tree.pack(fill="both", expand=True)
+        tree.bind("<<TreeviewSelect>>", self._on_approval_row_selected)
         self._approval_tree = tree
+        self._approval_rows_by_id: dict[str, ApprovalRow] = {}
+
+        self._approval_detail_var = tk.StringVar(value=APPROVAL_DETAIL_PLACEHOLDER)
+        ttk.Label(
+            frame,
+            textvariable=self._approval_detail_var,
+            wraplength=480,
+            justify="left",
+        ).pack(fill="x", anchor="w")
 
     def _build_workflow_history_tab(self) -> None:
         frame = ttk.Frame(self._notebook, padding=(8, 8))
@@ -691,6 +814,22 @@ class DashboardApp:
         ttk.Label(frame, text=WORKFLOW_HISTORY_CAPTION, wraplength=480).pack(
             anchor="w"
         )
+
+        # --- Status Breakdown (Phase 64, Batch 2) ------------------------------
+        ttk.Label(
+            frame, text="Status Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            frame, text=WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE, wraplength=480
+        ).pack(anchor="w")
+        self._workflow_breakdown_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._workflow_breakdown_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._workflow_breakdown_frame = ttk.Frame(frame)
+        self._workflow_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._workflow_breakdown_labels: list[ttk.Label] = []
+
         self._workflow_error_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self._workflow_error_var, foreground="red").pack(
             anchor="w"
@@ -708,8 +847,20 @@ class DashboardApp:
         ttk.Label(frame, text="Recorded transitions for the selected workflow:").pack(
             anchor="w"
         )
-        transition_columns = ("status", "step", "tool_name", "created_at")
-        transition_headings = ("Status", "Step", "Tool", "Recorded At")
+        transition_columns = (
+            "status",
+            "step",
+            "tool_name",
+            "created_at",
+            "approval_request_id",
+        )
+        transition_headings = (
+            "Status",
+            "Step",
+            "Tool",
+            "Recorded At",
+            "Approval Request ID",
+        )
         transitions_tree = ttk.Treeview(
             frame, columns=transition_columns, show="headings"
         )
@@ -824,7 +975,9 @@ class DashboardApp:
         self._refresh_overview()
         self._refresh_memory_breakdown()
         self._refresh_memories()
+        self._refresh_approval_breakdown()
         self._refresh_approval_history()
+        self._refresh_workflow_breakdown()
         self._refresh_workflow_history()
         self._refresh_inbox()
         self._refresh_schedules()
@@ -942,6 +1095,25 @@ class DashboardApp:
             tree.insert("", "end", iid=iid, values=memory_row_to_tree_values(row))
             self._memory_rows_by_id[iid] = row
 
+    def _refresh_approval_breakdown(self) -> None:
+        """Refresh the Approval History Status Breakdown panel (Phase
+        64, Batch 2), isolated from _refresh_approval_history's own
+        error state, mirroring this module's established per-panel
+        isolation convention."""
+        try:
+            rows = self._read_model.get_approval_status_breakdown()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._approval_breakdown_error_var.set(
+                format_error_state("approval status breakdown", exc)
+            )
+            return
+        self._approval_breakdown_error_var.set("")
+        self._approval_breakdown_labels = self._render_label_lines(
+            self._approval_breakdown_frame,
+            self._approval_breakdown_labels,
+            [approval_status_breakdown_line(row) for row in rows],
+        )
+
     def _refresh_approval_history(self) -> None:
         try:
             rows = self._read_model.get_recent_approvals()
@@ -951,11 +1123,34 @@ class DashboardApp:
         self._approval_error_var.set("")
         tree = self._approval_tree
         tree.delete(*tree.get_children())
+        self._approval_rows_by_id.clear()
         if not rows:
             tree.insert("", "end", values=(_APPROVAL_EMPTY_STATE,) + ("",) * 6)
             return
         for row in rows:
-            tree.insert("", "end", values=approval_row_to_tree_values(row))
+            iid = row.request_id
+            tree.insert("", "end", iid=iid, values=approval_row_to_tree_values(row))
+            self._approval_rows_by_id[iid] = row
+
+    def _refresh_workflow_breakdown(self) -> None:
+        """Refresh the Workflow History Status Breakdown panel (Phase
+        64, Batch 2), isolated from _refresh_workflow_history's own
+        error state. Honestly scoped to the most recently active
+        workflows only - see WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE.
+        """
+        try:
+            rows = self._read_model.get_workflow_status_breakdown()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._workflow_breakdown_error_var.set(
+                format_error_state("workflow status breakdown", exc)
+            )
+            return
+        self._workflow_breakdown_error_var.set("")
+        self._workflow_breakdown_labels = self._render_label_lines(
+            self._workflow_breakdown_frame,
+            self._workflow_breakdown_labels,
+            [workflow_status_breakdown_line(row) for row in rows],
+        )
 
     def _refresh_workflow_history(self) -> None:
         try:
@@ -980,7 +1175,7 @@ class DashboardApp:
         tree = self._transitions_tree
         tree.delete(*tree.get_children())
         if self._selected_workflow_id is None:
-            tree.insert("", "end", values=(_TRANSITIONS_EMPTY_STATE, "", "", ""))
+            tree.insert("", "end", values=(_TRANSITIONS_EMPTY_STATE, "", "", "", ""))
             return
         try:
             transitions = self._read_model.get_workflow_transitions(
@@ -990,7 +1185,7 @@ class DashboardApp:
             self._workflow_error_var.set(format_error_state("workflow transitions", exc))
             return
         if not transitions:
-            tree.insert("", "end", values=(_TRANSITIONS_EMPTY_STATE, "", "", ""))
+            tree.insert("", "end", values=(_TRANSITIONS_EMPTY_STATE, "", "", "", ""))
             return
         for transition in transitions:
             tree.insert(
@@ -1084,6 +1279,23 @@ class DashboardApp:
         if row is None:
             return
         self._memory_detail_var.set(memory_detail_text(row))
+
+    def _on_approval_row_selected(self, _event: object) -> None:
+        """Populate the detail pane with one approval request's full
+        recorded detail (Phase 64, Batch 2).
+
+        Selecting a row only reads already-loaded local state (the same
+        ApprovalRow already fetched by the last
+        _refresh_approval_history() call) - it never triggers a new
+        database query, a tool call, or any external action.
+        """
+        selection = self._approval_tree.selection()
+        if not selection:
+            return
+        row = self._approval_rows_by_id.get(selection[0])
+        if row is None:
+            return
+        self._approval_detail_var.set(approval_detail_text(row))
 
     def _on_workflow_row_selected(self, _event: object) -> None:
         """Select a workflow to drill into its recorded transitions."""
