@@ -147,18 +147,49 @@ def test_update_changes_content(memory: _FakeMemory) -> None:
     assert memory.get(mid).content == "new content"
 
 
+# --- Update confirmation detail (Phase 79) ------------------------------------
+
+
+def test_update_confirmation_includes_id_category_old_and_new_content(
+    memory: _FakeMemory,
+) -> None:
+    mid = memory.add("old content", category="project")
+    tool = MemoryUpdateTool(memory)
+    result = tool.run(_update_request(memory_id=mid, content="new content"))
+    assert result.output == (
+        f"Updated memory [{mid}] (project) old content -> new content"
+    )
+
+
+def test_update_confirmation_reflects_record_fetched_before_mutation(
+    memory: _FakeMemory,
+) -> None:
+    """The success message must show the real, pre-mutation old content -
+    not an empty or generic placeholder - proving the record was read
+    before update_content() overwrote it."""
+    mid = memory.add("distinctive old value", category="personal")
+    tool = MemoryUpdateTool(memory)
+    result = tool.run(_update_request(memory_id=mid, content="distinctive new value"))
+    assert "distinctive old value" in result.output
+    assert "distinctive new value" in result.output
+    assert "personal" in result.output
+    assert str(mid) in result.output
+
+
 def test_update_unknown_id_fails(memory: _FakeMemory) -> None:
     tool = MemoryUpdateTool(memory)
     result = tool.run(_update_request(memory_id=999, content="x"))
     assert result.success is False
-    assert "no memory found" in result.error.lower()
+    assert result.error == "No memory found with id 999."
 
 
 def test_update_missing_id_fails(memory: _FakeMemory) -> None:
     tool = MemoryUpdateTool(memory)
     result = tool.run(_update_request(content="x"))
     assert result.success is False
-    assert "memory_id" in result.error.lower()
+    assert result.error == (
+        "Updating a memory requires a valid numeric 'memory_id'."
+    )
 
 
 def test_update_empty_content_fails(memory: _FakeMemory) -> None:
@@ -166,6 +197,7 @@ def test_update_empty_content_fails(memory: _FakeMemory) -> None:
     tool = MemoryUpdateTool(memory)
     result = tool.run(_update_request(memory_id=mid, content="   "))
     assert result.success is False
+    assert result.error == "Updating a memory requires non-empty 'content'."
     assert memory.get(mid).content == "keep"
 
 
@@ -191,12 +223,51 @@ def test_move_unknown_category_normalizes(memory: _FakeMemory) -> None:
     assert memory.get(mid).category == "general"
 
 
+# --- Move confirmation detail (Phase 79) --------------------------------------
+
+
+def test_move_confirmation_includes_id_old_and_new_category(
+    memory: _FakeMemory,
+) -> None:
+    mid = memory.add("note", category="general")
+    tool = MemoryUpdateTool(memory)
+    result = tool.run(
+        _update_request(operation="move", memory_id=mid, category="project")
+    )
+    assert result.output == f"Moved memory [{mid}] from 'general' to 'project'."
+
+
+def test_move_confirmation_reflects_record_fetched_before_mutation(
+    memory: _FakeMemory,
+) -> None:
+    """The success message must show the real, pre-mutation old category -
+    not an empty or generic placeholder - proving the record was read
+    before move_category() overwrote it."""
+    mid = memory.add("note", category="personal")
+    tool = MemoryUpdateTool(memory)
+    result = tool.run(
+        _update_request(operation="move", memory_id=mid, category="preference")
+    )
+    assert "personal" in result.output
+    assert "preference" in result.output
+    assert str(mid) in result.output
+
+
 def test_move_missing_category_fails(memory: _FakeMemory) -> None:
     mid = memory.add("note")
     tool = MemoryUpdateTool(memory)
     result = tool.run(_update_request(operation="move", memory_id=mid))
     assert result.success is False
-    assert "category" in result.error.lower()
+    assert result.error == "Moving a memory requires a non-empty 'category'."
+
+
+def test_move_unknown_id_fails(memory: _FakeMemory) -> None:
+    tool = MemoryUpdateTool(memory)
+    result = tool.run(
+        _update_request(operation="move", memory_id=999, category="project")
+    )
+    assert result.success is False
+    assert result.error == "No memory found with id 999."
 
 
 # --- Forget ------------------------------------------------------------------

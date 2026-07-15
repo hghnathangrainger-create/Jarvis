@@ -1,7 +1,10 @@
 """
 memory_update_tool.py
 
-A guarded tool that updates an existing memory (Phase 5, Batch 3).
+A guarded tool that updates an existing memory (Phase 5, Batch 3;
+extended Phase 79 so both success confirmations identify what actually
+changed - the old and new content for "update", and the old and new
+category for "move").
 
 MemoryUpdateTool is a YELLOW tool. It changes a stored memory, so its action is
 classified YELLOW and it runs only after explicit approval through the normal
@@ -113,12 +116,16 @@ class MemoryUpdateTool(BaseTool):
             memory_id: The id of the memory to update.
 
         Returns:
-            A ToolResult describing the outcome.
+            A ToolResult whose success output identifies the memory's id,
+            category, old content, and new content (Phase 79).
         """
         content = request.input_data.get("content")
         if not isinstance(content, str) or not content.strip():
             return self.fail("Updating a memory requires non-empty 'content'.")
 
+        # Fetched before update_content() - the old content is overwritten
+        # afterward, matching MemoryForgetTool's own fetch-before-mutate order.
+        before = self._memory.get(memory_id)
         record = self._memory.update_content(memory_id, content)
         if record is None:
             return self.fail(f"No memory found with id {memory_id}.")
@@ -126,7 +133,10 @@ class MemoryUpdateTool(BaseTool):
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Updated memory {record.id}: {record.content}",
+            output=(
+                f"Updated memory [{record.id}] ({record.category}) "
+                f"{before.content} -> {record.content}"
+            ),
             metadata={
                 "operation": "update",
                 "memory_id": str(record.id),
@@ -142,12 +152,16 @@ class MemoryUpdateTool(BaseTool):
             memory_id: The id of the memory to move.
 
         Returns:
-            A ToolResult describing the outcome.
+            A ToolResult whose success output identifies the memory's id,
+            old category, and new category (Phase 79).
         """
         category = request.input_data.get("category")
         if not isinstance(category, str) or not category.strip():
             return self.fail("Moving a memory requires a non-empty 'category'.")
 
+        # Fetched before move_category() - the old category is overwritten
+        # afterward, matching MemoryForgetTool's own fetch-before-mutate order.
+        before = self._memory.get(memory_id)
         record = self._memory.move_category(memory_id, category)
         if record is None:
             return self.fail(f"No memory found with id {memory_id}.")
@@ -155,7 +169,10 @@ class MemoryUpdateTool(BaseTool):
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Moved memory {record.id} to '{record.category}'.",
+            output=(
+                f"Moved memory [{record.id}] from '{before.category}' "
+                f"to '{record.category}'."
+            ),
             metadata={
                 "operation": "move",
                 "memory_id": str(record.id),
