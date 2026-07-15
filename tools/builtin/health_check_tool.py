@@ -71,6 +71,16 @@ never a new store):
       73, Batch 1), never a new store method, never an invented or
       partial status list.
 
+Batch 2 (Phase 80) check (reusing main.py's already-built
+WorkflowHistoryStore instance - never a new database connection, never
+a new store):
+    - Workflow history: calls the already-injected
+      WorkflowHistoryStore.count_distinct_workflows() - a new, narrow,
+      read-only COUNT(DISTINCT workflow_id) method added because no
+      already-fetched true total existed (list_recent_workflow_ids()
+      is clamped to 50). Counts distinct workflows, never raw
+      transition rows.
+
 dashboard.py is never invoked and DashboardReadModel is never
 constructed - it is a wholly separate process with its own independent
 database connection; the shared SQLite file's existence is already
@@ -96,6 +106,7 @@ from scheduling.schedule_store import ScheduleStore
 from security.security_manager import SecurityManager
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.registry import ToolRegistry
+from workflow.workflow_history_store import WorkflowHistoryStore
 
 #: The deliberately minimal set of foundational tools checked for
 #: presence in the registry - not an exhaustive roster (see module
@@ -120,6 +131,7 @@ class HealthCheckTool(BaseTool):
         security_manager: SecurityManager,
         memory_manager: MemoryManager,
         approval_history_store: ApprovalHistoryStore,
+        workflow_history_store: WorkflowHistoryStore,
     ) -> None:
         """Initialise the tool with already-built dependencies only.
 
@@ -152,6 +164,9 @@ class HealthCheckTool(BaseTool):
                 ApprovalHistoryStore (Phase 80, Batch 1). Only
                 count_by_status() is ever called, once per status in
                 KNOWN_APPROVAL_STATUSES.
+            workflow_history_store: The already-constructed
+                WorkflowHistoryStore (Phase 80, Batch 2). Only
+                count_distinct_workflows() is ever called.
         """
         self._registry = registry
         self._settings = settings
@@ -161,6 +176,7 @@ class HealthCheckTool(BaseTool):
         self._security_manager = security_manager
         self._memory_manager = memory_manager
         self._approval_history_store = approval_history_store
+        self._workflow_history_store = workflow_history_store
 
     @property
     def name(self) -> str:
@@ -220,6 +236,7 @@ class HealthCheckTool(BaseTool):
             f"  Quarantine store: {self._quarantine_status()}",
             f"  Memory store: {self._memory_status()}",
             f"  Approval history store: {self._approval_history_status()}",
+            f"  Workflow history store: {self._workflow_history_status()}",
             f"  Security Manager: {self._security_manager_status()}",
         ]
         return self.ok("\n".join(lines))
@@ -362,6 +379,24 @@ class HealthCheckTool(BaseTool):
         except Exception as exc:  # noqa: BLE001 - a health check must never crash
             return f"NOT reachable ({exc})"
         return f"reachable ({count} entr{'y' if count == 1 else 'ies'} recorded)"
+
+    def _workflow_history_status(self) -> str:
+        """Report whether the already-injected WorkflowHistoryStore is
+        reachable (Phase 80, Batch 2).
+
+        Calls only count_distinct_workflows() - a true, unbounded COUNT
+        of distinct workflow ids, never raw transition rows and never
+        the bounded/clamped list_recent_workflow_ids(). No row is ever
+        hydrated, and nothing is ever created, started, or resumed.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            count = self._workflow_history_store.count_distinct_workflows()
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return f"reachable ({count} workflow{'' if count == 1 else 's'} recorded)"
 
     def _security_manager_status(self) -> str:
         """Report whether the already-injected SecurityManager correctly

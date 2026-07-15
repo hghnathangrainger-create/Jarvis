@@ -13,9 +13,10 @@ Responsibilities:
       workflow_stopped).
     - Query history: most recent transitions across all workflows, the
       full transition history for one workflow, that workflow's latest
-      (i.e. current) status, or the ids of the most recently active
+      (i.e. current) status, the ids of the most recently active
       distinct workflows (Phase 19, for the dashboard's "recent
-      workflows" view).
+      workflows" view), or a true, unbounded total count of distinct
+      workflows (Phase 80, Batch 2, for HealthCheckTool).
 
 Does NOT:
     - Store tool_input, resolved step input, or a serialised Plan
@@ -299,6 +300,27 @@ class WorkflowHistoryStore:
                 .all()
             )
             return [row.workflow_id for row in rows]
+
+    def count_distinct_workflows(self) -> int:
+        """Return the true, unbounded total number of distinct workflows.
+
+        A plain COUNT(DISTINCT workflow_id) - unlike
+        list_recent_workflow_ids(), this is never clamped to
+        _MAX_LIMIT, so it always reports the real total, mirroring
+        ApprovalHistoryStore.count_by_status()'s own established
+        "true, unbounded COUNT" convention (Phase 80, Batch 2). It
+        counts distinct workflows, never raw transition rows - a
+        workflow with many step transitions counts once, exactly like
+        list_recent_workflow_ids()'s own existing distinct-workflow
+        semantics.
+
+        Returns:
+            The total count of distinct workflow_id values recorded.
+        """
+        with session_scope(self._session_factory) as db:
+            return db.query(
+                func.count(func.distinct(WorkflowHistoryEntry.workflow_id))
+            ).scalar()
 
     @staticmethod
     def _clamp_limit(value: int) -> int:

@@ -339,3 +339,76 @@ def test_list_recent_workflow_ids_does_not_alter_existing_methods(
     assert len(store.list_recent()) == 2
     assert len(store.list_for_workflow("wf-1")) == 2
     assert store.latest_status_for("wf-1").status == "workflow_completed"
+
+
+# --- count_distinct_workflows (Phase 80, Batch 2) -----------------------------
+
+
+def test_count_distinct_workflows_returns_zero_for_empty_store(
+    store: WorkflowHistoryStore,
+) -> None:
+    assert store.count_distinct_workflows() == 0
+
+
+def test_count_distinct_workflows_returns_one_for_one_workflow_one_transition(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    assert store.count_distinct_workflows() == 1
+
+
+def test_count_distinct_workflows_returns_one_for_one_workflow_many_transitions(
+    store: WorkflowHistoryStore,
+) -> None:
+    """Counts distinct workflows, never raw transition rows - a workflow
+    with many step transitions must still count as exactly one."""
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    for step in range(1, 11):
+        store.record_transition(
+            workflow_id="wf-1",
+            status="workflow_step_started",
+            step_number=step,
+            step_total=10,
+        )
+    store.record_transition(workflow_id="wf-1", status="workflow_completed")
+    assert store.count_distinct_workflows() == 1
+
+
+def test_count_distinct_workflows_counts_multiple_distinct_workflows(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    store.record_transition(workflow_id="wf-2", status="workflow_started")
+    store.record_transition(workflow_id="wf-2", status="workflow_completed")
+    store.record_transition(workflow_id="wf-3", status="workflow_started")
+    store.record_transition(workflow_id="wf-3", status="workflow_step_started")
+    store.record_transition(workflow_id="wf-3", status="workflow_completed")
+    store.record_transition(workflow_id="wf-4", status="workflow_started")
+    assert store.count_distinct_workflows() == 4
+
+
+def test_count_distinct_workflows_is_a_true_unbounded_total_beyond_clamp(
+    store: WorkflowHistoryStore,
+) -> None:
+    """Unlike list_recent_workflow_ids() (clamped to 50),
+    count_distinct_workflows() must report the real, true total even
+    when it exceeds that clamp."""
+    for n in range(60):
+        store.record_transition(workflow_id=f"wf-{n}", status="workflow_started")
+
+    assert len(store.list_recent_workflow_ids(limit=1000)) == 50
+    assert store.count_distinct_workflows() == 60
+
+
+def test_count_distinct_workflows_does_not_mutate_or_alter_existing_methods(
+    store: WorkflowHistoryStore,
+) -> None:
+    store.record_transition(workflow_id="wf-1", status="workflow_started")
+    store.record_transition(workflow_id="wf-1", status="workflow_completed")
+
+    store.count_distinct_workflows()
+    store.count_distinct_workflows()
+
+    assert len(store.list_recent()) == 2
+    assert len(store.list_for_workflow("wf-1")) == 2
+    assert store.latest_status_for("wf-1").status == "workflow_completed"

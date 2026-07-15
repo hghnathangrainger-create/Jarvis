@@ -60,6 +60,7 @@ from storage.database import (
 from tools.base_tool import ToolRequest
 from tools.builtin.health_check_tool import HealthCheckTool
 from tools.registry import ToolRegistry
+from workflow.workflow_history_store import WorkflowHistoryStore
 
 _REAL_API_KEY = "sk-ant-super-secret-value-do-not-leak-1234567890"
 
@@ -125,6 +126,11 @@ class _FakeApprovalHistoryStore:
         return 0
 
 
+class _FakeWorkflowHistoryStore:
+    def count_distinct_workflows(self) -> int:
+        return 0
+
+
 def _fake_tool(*, database_path: Path, registry: ToolRegistry | None = None) -> HealthCheckTool:
     """A HealthCheckTool wired with fake stores - for tests that only
     care about the Batch 1 checks, secrets, or action_for()/security
@@ -138,20 +144,27 @@ def _fake_tool(*, database_path: Path, registry: ToolRegistry | None = None) -> 
         SecurityManager(),
         _FakeMemoryManager(),
         _FakeApprovalHistoryStore(),
+        _FakeWorkflowHistoryStore(),
     )
 
 
 def _real_stores(
     tmp_path: Path,
 ) -> tuple[
-    InboxStore, ScheduleStore, QuarantineStore, MemoryManager, ApprovalHistoryStore, Path
+    InboxStore,
+    ScheduleStore,
+    QuarantineStore,
+    MemoryManager,
+    ApprovalHistoryStore,
+    WorkflowHistoryStore,
+    Path,
 ]:
     """Real InboxStore/ScheduleStore/QuarantineStore/MemoryManager/
-    ApprovalHistoryStore instances backed by a real, isolated,
-    initialized temp SQLite database - the same shape main.py's own
-    build_orchestrator() uses. Never a fake/mock database, so the
-    "never mutates" tests are genuinely convincing, not just
-    structurally asserted."""
+    ApprovalHistoryStore/WorkflowHistoryStore instances backed by a
+    real, isolated, initialized temp SQLite database - the same shape
+    main.py's own build_orchestrator() uses. Never a fake/mock
+    database, so the "never mutates" tests are genuinely convincing,
+    not just structurally asserted."""
     db_path = tmp_path / "health_check_test.db"
     settings = _settings(database_path=db_path)
     engine = create_database_engine(settings)
@@ -163,6 +176,7 @@ def _real_stores(
         QuarantineStore(session_factory),
         MemoryManager(EpisodicMemoryStore(session_factory)),
         ApprovalHistoryStore(session_factory),
+        WorkflowHistoryStore(session_factory),
         db_path,
     )
 
@@ -262,7 +276,7 @@ def test_logging_check_never_attaches_a_handler(
 
 
 def test_reports_inbox_reachable(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -272,13 +286,14 @@ def test_reports_inbox_reachable(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Inbox store: reachable (0 entries recorded)" in result.output
 
 
 def test_reports_schedule_reachable(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -288,13 +303,14 @@ def test_reports_schedule_reachable(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Schedule store: reachable (0 schedules recorded)" in result.output
 
 
 def test_reports_quarantine_reachable(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -304,13 +320,14 @@ def test_reports_quarantine_reachable(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Quarantine store: reachable (0 files recorded)" in result.output
 
 
 def test_reports_quarantine_reachable_with_singular_count(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     quarantine.record_quarantine(
         original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
     )
@@ -323,13 +340,14 @@ def test_reports_quarantine_reachable_with_singular_count(tmp_path: Path) -> Non
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Quarantine store: reachable (1 file recorded)" in result.output
 
 
 def test_reports_quarantine_reachable_with_plural_count(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     quarantine.record_quarantine(
         original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
     )
@@ -345,13 +363,14 @@ def test_reports_quarantine_reachable_with_plural_count(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Quarantine store: reachable (2 files recorded)" in result.output
 
 
 def test_reports_security_manager_self_classification_green(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -361,6 +380,7 @@ def test_reports_security_manager_self_classification_green(tmp_path: Path) -> N
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert (
@@ -374,7 +394,7 @@ def test_store_checks_use_injected_objects_not_new_instances(tmp_path: Path) -> 
     not a coincidentally-similar new instance - by adding a row through
     the injected inbox store directly and confirming the health check's
     count reflects it."""
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     inbox.append(
         source_type="web_search_summary",
         source_query="test query",
@@ -391,13 +411,14 @@ def test_store_checks_use_injected_objects_not_new_instances(tmp_path: Path) -> 
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Inbox store: reachable (1 entry recorded)" in result.output
 
 
 def test_store_reachability_checks_never_mutate_inbox(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     before = inbox.count()
     tool = HealthCheckTool(
         _populated_registry(),
@@ -408,6 +429,7 @@ def test_store_reachability_checks_never_mutate_inbox(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     _run(tool)
@@ -415,7 +437,7 @@ def test_store_reachability_checks_never_mutate_inbox(tmp_path: Path) -> None:
 
 
 def test_store_reachability_checks_never_mutate_schedules(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     before = schedule.count()
     tool = HealthCheckTool(
         _populated_registry(),
@@ -426,6 +448,7 @@ def test_store_reachability_checks_never_mutate_schedules(tmp_path: Path) -> Non
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     _run(tool)
@@ -433,7 +456,7 @@ def test_store_reachability_checks_never_mutate_schedules(tmp_path: Path) -> Non
 
 
 def test_store_reachability_checks_never_mutate_quarantine(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     before = quarantine.list_recent()
     tool = HealthCheckTool(
         _populated_registry(),
@@ -444,6 +467,7 @@ def test_store_reachability_checks_never_mutate_quarantine(tmp_path: Path) -> No
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     _run(tool)
@@ -454,7 +478,7 @@ def test_store_checks_never_create_a_second_database_file(tmp_path: Path) -> Non
     """After constructing the real stores (which does create the one
     expected database file), running the health check repeatedly must
     never create any additional file in the same directory."""
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     files_before = set(tmp_path.iterdir())
     tool = HealthCheckTool(
         _populated_registry(),
@@ -465,6 +489,7 @@ def test_store_checks_never_create_a_second_database_file(tmp_path: Path) -> Non
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     files_after = set(tmp_path.iterdir())
@@ -488,6 +513,7 @@ def test_reports_not_reachable_when_store_raises(tmp_path: Path) -> None:
         SecurityManager(),
         _FakeMemoryManager(),
         _FakeApprovalHistoryStore(),
+        _FakeWorkflowHistoryStore(),
     )
     result = _run(tool)
     assert result.success is True
@@ -498,7 +524,7 @@ def test_reports_not_reachable_when_store_raises(tmp_path: Path) -> None:
 
 
 def test_reports_memory_reachable(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -508,13 +534,14 @@ def test_reports_memory_reachable(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Memory store: reachable (0 memories recorded)" in result.output
 
 
 def test_reports_memory_reachable_with_singular_count(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     memory.save(content="buy milk")
     tool = HealthCheckTool(
         _populated_registry(),
@@ -525,13 +552,14 @@ def test_reports_memory_reachable_with_singular_count(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Memory store: reachable (1 memory recorded)" in result.output
 
 
 def test_reports_memory_reachable_with_plural_count(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     memory.save(content="buy milk")
     memory.save(content="walk the dog")
     tool = HealthCheckTool(
@@ -543,13 +571,14 @@ def test_reports_memory_reachable_with_plural_count(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Memory store: reachable (2 memories recorded)" in result.output
 
 
 def test_reports_approval_history_reachable(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -559,13 +588,14 @@ def test_reports_approval_history_reachable(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Approval history store: reachable (0 entries recorded)" in result.output
 
 
 def test_reports_approval_history_reachable_with_singular_count(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     approval_history.record_request(
         request_id="r1", action="send email", reason="because", security_tier="yellow"
     )
@@ -578,6 +608,7 @@ def test_reports_approval_history_reachable_with_singular_count(tmp_path: Path) 
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Approval history store: reachable (1 entry recorded)" in result.output
@@ -588,7 +619,7 @@ def test_reports_approval_history_uses_full_known_status_set(tmp_path: Path) -> 
     KNOWN_APPROVAL_STATUSES (pending, approved, declined, expired) -
     not just an invented or partial subset such as only
     "approved"/"declined"."""
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     approval_history.record_request(
         request_id="pending-1", action="a1", reason="because", security_tier="yellow"
     )
@@ -625,6 +656,7 @@ def test_reports_approval_history_uses_full_known_status_set(tmp_path: Path) -> 
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Approval history store: reachable (4 entries recorded)" in result.output
@@ -644,6 +676,7 @@ def test_reports_not_reachable_when_memory_store_raises(tmp_path: Path) -> None:
         SecurityManager(),
         _RaisingMemoryManager(),
         _FakeApprovalHistoryStore(),
+        _FakeWorkflowHistoryStore(),
     )
     result = _run(tool)
     assert result.success is True
@@ -664,6 +697,7 @@ def test_reports_not_reachable_when_approval_history_store_raises(tmp_path: Path
         SecurityManager(),
         _FakeMemoryManager(),
         _RaisingApprovalHistoryStore(),
+        _FakeWorkflowHistoryStore(),
     )
     result = _run(tool)
     assert result.success is True
@@ -671,7 +705,7 @@ def test_reports_not_reachable_when_approval_history_store_raises(tmp_path: Path
 
 
 def test_store_reachability_checks_never_mutate_memory(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     memory.save(content="buy milk")
     before = memory.count()
     tool = HealthCheckTool(
@@ -683,6 +717,7 @@ def test_store_reachability_checks_never_mutate_memory(tmp_path: Path) -> None:
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     _run(tool)
@@ -690,7 +725,7 @@ def test_store_reachability_checks_never_mutate_memory(tmp_path: Path) -> None:
 
 
 def test_store_reachability_checks_never_mutate_approval_history(tmp_path: Path) -> None:
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     approval_history.record_request(
         request_id="r1", action="send email", reason="because", security_tier="yellow"
     )
@@ -704,6 +739,7 @@ def test_store_reachability_checks_never_mutate_approval_history(tmp_path: Path)
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     _run(tool)
     _run(tool)
@@ -716,7 +752,7 @@ def test_existing_inbox_schedule_quarantine_lines_unaffected_by_new_checks(
     """Regression: adding Memory/Approval History checks must not change
     the wording, order, or values of the pre-existing Inbox/Schedule/
     Quarantine lines."""
-    inbox, schedule, quarantine, memory, approval_history, db_path = _real_stores(tmp_path)
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = _real_stores(tmp_path)
     tool = HealthCheckTool(
         _populated_registry(),
         _settings(database_path=db_path),
@@ -726,11 +762,210 @@ def test_existing_inbox_schedule_quarantine_lines_unaffected_by_new_checks(
         SecurityManager(),
         memory,
         approval_history,
+        workflow_history,
     )
     result = _run(tool)
     assert "Inbox store: reachable (0 entries recorded)" in result.output
     assert "Schedule store: reachable (0 schedules recorded)" in result.output
     assert "Quarantine store: reachable (0 files recorded)" in result.output
+
+
+# --- Phase 80, Batch 2: Workflow History store reachability -----------------
+
+
+def test_reports_workflow_history_reachable(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Workflow history store: reachable (0 workflows recorded)" in result.output
+
+
+def test_reports_workflow_history_reachable_with_singular_count(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    workflow_history.record_transition(workflow_id="wf-1", status="workflow_started")
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Workflow history store: reachable (1 workflow recorded)" in result.output
+
+
+def test_reports_workflow_history_reachable_with_plural_count(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    workflow_history.record_transition(workflow_id="wf-1", status="workflow_started")
+    workflow_history.record_transition(workflow_id="wf-2", status="workflow_started")
+    workflow_history.record_transition(workflow_id="wf-2", status="workflow_completed")
+    workflow_history.record_transition(workflow_id="wf-3", status="workflow_started")
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Workflow history store: reachable (3 workflows recorded)" in result.output
+
+
+def test_workflow_history_count_reflects_distinct_workflows_not_raw_rows(
+    tmp_path: Path,
+) -> None:
+    """A single workflow with many transitions must still count as one
+    workflow, never one per transition row."""
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    workflow_history.record_transition(workflow_id="wf-busy", status="workflow_started")
+    for step in range(1, 6):
+        workflow_history.record_transition(
+            workflow_id="wf-busy",
+            status="workflow_step_started",
+            step_number=step,
+            step_total=5,
+        )
+    workflow_history.record_transition(workflow_id="wf-busy", status="workflow_completed")
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Workflow history store: reachable (1 workflow recorded)" in result.output
+
+
+def test_workflow_history_count_is_not_bounded_by_recent_workflow_clamp(
+    tmp_path: Path,
+) -> None:
+    """The health-check total must remain accurate even beyond
+    list_recent_workflow_ids()'s own 50-item clamp - proving
+    count_distinct_workflows() is used, not that bounded method."""
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    for n in range(60):
+        workflow_history.record_transition(workflow_id=f"wf-{n}", status="workflow_started")
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Workflow history store: reachable (60 workflows recorded)" in result.output
+
+
+def test_reports_not_reachable_when_workflow_history_store_raises(tmp_path: Path) -> None:
+    class _RaisingWorkflowHistoryStore:
+        def count_distinct_workflows(self) -> int:
+            raise RuntimeError("simulated database failure")
+
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=tmp_path / "x.db"),
+        _FakeInboxStore(),
+        _FakeScheduleStore(),
+        _FakeQuarantineStore(),
+        SecurityManager(),
+        _FakeMemoryManager(),
+        _FakeApprovalHistoryStore(),
+        _RaisingWorkflowHistoryStore(),
+    )
+    result = _run(tool)
+    assert result.success is True
+    assert "Workflow history store: NOT reachable" in result.output
+
+
+def test_store_reachability_checks_never_mutate_workflow_history(tmp_path: Path) -> None:
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    workflow_history.record_transition(workflow_id="wf-1", status="workflow_started")
+    before = workflow_history.count_distinct_workflows()
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    _run(tool)
+    _run(tool)
+    assert workflow_history.count_distinct_workflows() == before == 1
+
+
+def test_batch1_and_batch2_lines_unaffected_by_workflow_history_check(
+    tmp_path: Path,
+) -> None:
+    """Regression: adding the Workflow History check must not change
+    the wording, order, or values of the pre-existing Inbox/Schedule/
+    Quarantine/Memory/Approval History lines."""
+    inbox, schedule, quarantine, memory, approval_history, workflow_history, db_path = (
+        _real_stores(tmp_path)
+    )
+    memory.save(content="buy milk")
+    approval_history.record_request(
+        request_id="r1", action="send email", reason="because", security_tier="yellow"
+    )
+    tool = HealthCheckTool(
+        _populated_registry(),
+        _settings(database_path=db_path),
+        inbox,
+        schedule,
+        quarantine,
+        SecurityManager(),
+        memory,
+        approval_history,
+        workflow_history,
+    )
+    result = _run(tool)
+    assert "Inbox store: reachable (0 entries recorded)" in result.output
+    assert "Schedule store: reachable (0 schedules recorded)" in result.output
+    assert "Quarantine store: reachable (0 files recorded)" in result.output
+    assert "Memory store: reachable (1 memory recorded)" in result.output
+    assert "Approval history store: reachable (1 entry recorded)" in result.output
 
 
 # --- no secrets --------------------------------------------------------------
@@ -876,6 +1111,7 @@ def test_never_constructs_a_new_store_or_security_manager_itself() -> None:
         "SecurityManager",
         "MemoryManager",
         "ApprovalHistoryStore",
+        "WorkflowHistoryStore",
         "create_database_engine",
         "create_session_factory",
         "initialize_database",
