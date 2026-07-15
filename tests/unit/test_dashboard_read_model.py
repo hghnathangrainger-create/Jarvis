@@ -222,6 +222,97 @@ def test_recent_memories_empty_store_returns_empty_list(rm) -> None:
     assert read_model.get_recent_memories() == []
 
 
+# --- get_memory_category_breakdown (Phase 63, Batch 1) -----------------------
+
+
+def test_memory_category_breakdown_includes_all_known_categories(rm) -> None:
+    from memory.memory_models import KNOWN_CATEGORIES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_memory_category_breakdown()
+
+    assert [row.category for row in breakdown] == list(KNOWN_CATEGORIES)
+
+
+def test_memory_category_breakdown_reports_real_counts(rm) -> None:
+    read_model, memory, *_ = rm
+    memory.save("a", category="project")
+    memory.save("b", category="project")
+    memory.save("c", category="general")
+
+    breakdown = {row.category: row.count for row in read_model.get_memory_category_breakdown()}
+
+    assert breakdown["project"] == 2
+    assert breakdown["general"] == 1
+
+
+def test_memory_category_breakdown_includes_zero_count_categories_honestly(
+    rm,
+) -> None:
+    read_model, memory, *_ = rm
+    memory.save("only a general memory", category="general")
+
+    breakdown = {row.category: row.count for row in read_model.get_memory_category_breakdown()}
+
+    assert breakdown["personal"] == 0
+    assert breakdown["project"] == 0
+    assert breakdown["preference"] == 0
+    assert breakdown["note"] == 0
+
+
+def test_memory_category_breakdown_total_matches_real_memory_total(rm) -> None:
+    read_model, memory, *_ = rm
+    memory.save("a", category="project")
+    memory.save("b", category="personal")
+    memory.save("c", category="general")
+    memory.save("d", category="note")
+    memory.save("e", category="preference")
+
+    breakdown = read_model.get_memory_category_breakdown()
+    assert sum(row.count for row in breakdown) == memory.count()
+
+
+def test_memory_category_breakdown_preserves_known_category_order_not_sorted_by_count(
+    rm,
+) -> None:
+    """Categories must never be reordered by count - this would visually
+    imply a ranking/importance the data does not actually carry."""
+    from memory.memory_models import KNOWN_CATEGORIES
+
+    read_model, memory, *_ = rm
+    # Give the LAST known category the highest count, to prove sorting
+    # by count is never applied.
+    for _ in range(10):
+        memory.save("x", category=KNOWN_CATEGORIES[-1])
+
+    breakdown = read_model.get_memory_category_breakdown()
+    assert [row.category for row in breakdown] == list(KNOWN_CATEGORIES)
+
+
+def test_memory_category_breakdown_empty_store_still_lists_every_category(
+    rm,
+) -> None:
+    from memory.memory_models import KNOWN_CATEGORIES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_memory_category_breakdown()
+
+    assert len(breakdown) == len(KNOWN_CATEGORIES)
+    assert all(row.count == 0 for row in breakdown)
+
+
+def test_memory_category_breakdown_does_not_mutate_memory_state(rm) -> None:
+    read_model, memory, *_ = rm
+    memory.save("a", category="project")
+    before = memory.count()
+
+    read_model.get_memory_category_breakdown()
+
+    assert memory.count() == before
+
+
 # --- get_recent_approvals -----------------------------------------------------
 
 

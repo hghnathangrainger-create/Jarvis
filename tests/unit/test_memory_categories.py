@@ -135,3 +135,45 @@ def test_count_by_category(store) -> None:
     assert store.count_by_category("general") == 1
     # Unknown category normalises to general for counting.
     assert store.count_by_category("banana") == 1
+
+
+# --- MemoryManager.count_by_category() (Phase 63, Batch 1) -------------------
+
+
+def test_memory_manager_count_by_category_passes_through_to_store(store) -> None:
+    """MemoryManager.count_by_category() is a thin passthrough to
+    EpisodicMemoryStore.count_by_category() - this proves the manager
+    layer forwards the real count unchanged, mirroring count()'s own
+    already-established passthrough pattern."""
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    store.save(content="a", category="project")
+    store.save(content="b", category="project")
+    store.save(content="c", category="general")
+
+    assert manager.count_by_category("project") == 2
+    assert manager.count_by_category("general") == 1
+
+
+def test_memory_manager_count_by_category_zero_for_unused_category(store) -> None:
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    store.save(content="a", category="general")
+
+    assert manager.count_by_category("personal") == 0
+
+
+def test_memory_manager_count_by_category_normalizes_unknown_category(
+    store,
+) -> None:
+    """An unknown category normalises to "general" for counting - the
+    same fallback behaviour normalize_category() already guarantees
+    everywhere else in this module."""
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    store.save(content="a", category="general")
+
+    assert manager.count_by_category("banana") == 1

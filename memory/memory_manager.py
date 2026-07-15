@@ -134,6 +134,23 @@ class MemoryManager:
         """
         return self._store.count()
 
+    def count_by_category(self, category: str) -> int:
+        """Return the number of stored memories in a single category.
+
+        A thin passthrough to EpisodicMemoryStore.count_by_category()
+        (Phase 63, Batch 1), mirroring count()'s own pattern exactly -
+        this method holds no logic of its own beyond delegating.
+
+        Args:
+            category: The category to count. Normalised by the store
+                before counting, so an unknown or blank value counts
+                the "general" category.
+
+        Returns:
+            The number of memories in the (normalised) category.
+        """
+        return self._store.count_by_category(category)
+
     def get(self, memory_id: int) -> MemoryRecord | None:
         """Return a single memory by id, or None if it does not exist.
 

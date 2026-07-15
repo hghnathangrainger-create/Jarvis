@@ -57,6 +57,11 @@ Does NOT:
       get_recent_activity() only ever recombines rows this class's own
       existing get_recent_*() methods already return, using each row's
       own real, already-stored timestamp.
+    - Sort, rank, or score categories by memory count (Phase 63, Batch
+      1): get_memory_category_breakdown() always returns categories in
+      memory.memory_models.KNOWN_CATEGORIES's own fixed, declared order
+      - never reordered by count - so the display can never imply a
+      category is more "important" than another.
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -73,6 +78,7 @@ from approval.approval_history_store import ApprovalHistoryStore
 from config.settings import Settings
 from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
+from memory.memory_models import KNOWN_CATEGORIES
 from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from scheduling.scheduled_summary_runner import SCHEDULED_SOURCE_TYPE
@@ -141,6 +147,30 @@ class MemoryRow:
     preview: str
     full_content: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCategoryCount:
+    """One known memory category's real, current count (Phase 63, Batch
+    1).
+
+    Produced only by calling MemoryManager.count_by_category() - never a
+    fabricated, estimated, or inferred value, and never a ranking:
+    get_memory_category_breakdown() always returns these in
+    memory.memory_models.KNOWN_CATEGORIES's own fixed order, never
+    sorted by count, so nothing here implies one category is more
+    important than another.
+
+    Attributes:
+        category: The known category name (one of
+            memory.memory_models.KNOWN_CATEGORIES).
+        count: The real, current number of memories stored in this
+            category - zero is a valid, honestly-reported value, never
+            omitted.
+    """
+
+    category: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +628,32 @@ class DashboardReadModel:
             )
             for record in records
         ]
+
+    def get_memory_category_breakdown(self) -> tuple[MemoryCategoryCount, ...]:
+        """Return a real, per-category memory count for every known
+        category (Phase 63, Batch 1).
+
+        Each count comes from one call to
+        MemoryManager.count_by_category() - never a fabricated,
+        estimated, or inferred value. Every category in
+        memory.memory_models.KNOWN_CATEGORIES is included, even one with
+        zero memories - an honest zero is reported, never omitted, so
+        the breakdown can never look shorter than the real number of
+        known categories. Categories are returned in KNOWN_CATEGORIES's
+        own fixed, declared order - never sorted by count - so nothing
+        here implies one category is more important than another.
+
+        Returns:
+            A tuple of MemoryCategoryCount, one per known category, in
+            KNOWN_CATEGORIES's own fixed order.
+        """
+        return tuple(
+            MemoryCategoryCount(
+                category=category,
+                count=self._memory.count_by_category(category),
+            )
+            for category in KNOWN_CATEGORIES
+        )
 
     def get_recent_approvals(self, limit: int = 20) -> list[ApprovalRow]:
         """Return the most recent approval history entries as ApprovalRows.
