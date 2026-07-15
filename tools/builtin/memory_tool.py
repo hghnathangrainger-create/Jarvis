@@ -17,7 +17,11 @@ Supported operations (via the 'operation' input):
                     shown, using MemoryManager.count()/count_by_category() -
                     both already-existing methods, never a new query.
     - "search":     return memories matching the 'query' input, optionally
-                    filtered by category.
+                    filtered by category. Discloses an honest, exact
+                    truncation notice (Phase 75, Batch 2) when more matches
+                    exist than are shown, using MemoryManager.count_matching()
+                    - a new, narrow COUNT query mirroring search()'s own
+                    filter semantics exactly.
     - "save":       store the 'content' text the user explicitly asked to
                     remember, under an optional 'category' (defaulting to
                     "general").
@@ -168,7 +172,7 @@ class MemoryTool(BaseTool):
                     f"Memories in '{category.strip().lower()}' "
                     f"matching '{query.strip()}'"
                 )
-            return self.ok(self._format(records, header))
+            return self.ok(self._format_search(records, header, query, category))
 
         return self.fail(
             f"Unknown operation '{operation}'. Use 'list', 'search', 'save', "
@@ -353,6 +357,65 @@ class MemoryTool(BaseTool):
             formatted += (
                 f"\n\n[showing {shown} of {total} memories{scope}; "
                 "more memories exist]"
+            )
+        return formatted
+
+    def _format_search(
+        self,
+        records: list[MemoryRecord],
+        header: str,
+        query: str,
+        category: str | None,
+    ) -> str:
+        """Format the "search" operation's output, including an honest
+        truncation notice when more matches exist than are shown
+        (Phase 75, Batch 2).
+
+        Reuses the existing, shared _format() for the header and rows
+        completely unchanged - this method only appends a trailing
+        notice. "list" (which uses its own separate _format_list()
+        method) is entirely unaffected by this method, and vice versa.
+
+        The real total comes from one call to
+        MemoryManager.count_matching() (Phase 75, Batch 2) - a true,
+        exact COUNT query mirroring search()'s own filter semantics,
+        never a fetch-and-count in Python, never estimated, never
+        AI-derived. The notice deliberately never says "increase
+        'limit'" or similar, since no user-facing CLI syntax exists to
+        do that today - it states the honest fact only.
+
+        Args:
+            records: The already-fetched matching records this search
+                is about to render.
+            header: The plain header text (already built by the
+                caller) - unchanged from before this batch.
+            query: The search query that was used - passed through to
+                count_matching() so its real total reflects the exact
+                same filter search() itself already applied.
+            category: The category filter that was applied, if any -
+                used both to pick the matching real total and to name
+                the category in the notice text.
+
+        Returns:
+            The same formatted text _format() would already produce,
+            with an honest "[showing N of M matches...; more matches
+            exist]" notice appended only when the real total is
+            greater than the number of records actually shown. The
+            empty-result case ("{header}: none found.") is returned
+            completely unchanged.
+        """
+        formatted = self._format(records, header)
+        if not records:
+            return formatted
+
+        shown = len(records)
+        total = self._memory.count_matching(query, category=category)
+        scope = f" in category '{category.strip().lower()}'" if category else ""
+
+        if total > shown:
+            formatted += (
+                f"\n\n[showing {shown} of {total} matches{scope}; "
+                "more matches exist]"
             )
         return formatted
 

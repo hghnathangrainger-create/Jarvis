@@ -81,6 +81,16 @@ class _FakeMemory:
         cat = normalize_category(category)
         return sum(1 for record in self.data if record.category == cat)
 
+    def count_matching(self, query: str, *, category: str | None = None) -> int:
+        term = query.strip()
+        if not term:
+            return 0
+        rows = [r for r in self.data if term.lower() in r.content.lower()]
+        if category is not None:
+            cat = normalize_category(category)
+            rows = [r for r in rows if r.category == cat]
+        return len(rows)
+
     def get(self, memory_id: int) -> MemoryRecord | None:
         for record in self.data:
             if record.id == memory_id:
@@ -300,11 +310,16 @@ def test_list_truncation_does_not_mutate_memories(
     assert memory.data == before
 
 
-def test_save_get_categories_search_unaffected_by_list_notice(
+def test_save_get_categories_unaffected_by_list_notice(
     tool: MemoryTool, memory: _FakeMemory
 ) -> None:
-    """Batch 1 only touches the "list" operation - "save", "get",
-    "categories", and "search" must all be completely unaffected."""
+    """Batch 1 only touches the "list" operation - "save", "get", and
+    "categories" must all be completely unaffected. ("search" was also
+    covered here originally, back when Batch 1 alone had shipped and
+    search had no truncation notice of its own yet - Phase 75, Batch 2
+    intentionally gave search its own honest notice, so search's own
+    behavior is now covered separately, in the "Search truncation
+    honesty" section below, rather than asserted absent here.)"""
     for i in range(5):
         tool.run(_request(operation="save", content=f"memory {i}"))
     record_id = memory.data[0].id
@@ -312,12 +327,100 @@ def test_save_get_categories_search_unaffected_by_list_notice(
     save_result = tool.run(_request(operation="save", content="new one"))
     get_result = tool.run(_request(operation="get", memory_id=record_id))
     categories_result = tool.run(_request(operation="categories"))
-    search_result = tool.run(_request(operation="search", query="memory", limit=2))
 
     assert "showing" not in save_result.output.lower()
     assert "showing" not in get_result.output.lower()
     assert "showing" not in categories_result.output.lower()
-    assert "showing" not in search_result.output.lower()
+
+
+# --- Search truncation honesty (Phase 75, Batch 2) -----------------------------
+
+
+def test_search_shows_exact_notice_when_more_matches_exist(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory match {i}"))
+    result = tool.run(_request(operation="search", query="match", limit=3))
+    assert "[showing 3 of 5 matches; more matches exist]" in result.output
+
+
+def test_search_category_filtered_notice_uses_category_specific_total(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(4):
+        tool.run(
+            _request(operation="save", content=f"p{i} api", category="project")
+        )
+    tool.run(_request(operation="save", content="g0 api", category="general"))
+    result = tool.run(
+        _request(operation="search", query="api", category="project", limit=2)
+    )
+    assert (
+        "[showing 2 of 4 matches in category 'project'; more matches exist]"
+        in result.output
+    )
+    # The notice must never use the global match total (5), only the
+    # category-specific one (4).
+    assert "of 5 matches" not in result.output
+
+
+def test_search_no_notice_when_all_matches_fit(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="only one match"))
+    result = tool.run(_request(operation="search", query="match", limit=10))
+    assert "showing" not in result.output.lower()
+
+
+def test_search_no_notice_when_shown_equals_total(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(3):
+        tool.run(_request(operation="save", content=f"memory match {i}"))
+    result = tool.run(_request(operation="search", query="match", limit=3))
+    assert "showing" not in result.output.lower()
+
+
+def test_search_empty_result_unchanged_by_batch_2(tool: MemoryTool) -> None:
+    result = tool.run(_request(operation="search", query="nothing matches this"))
+    assert result.output == "Memories matching 'nothing matches this': none found."
+    assert "showing" not in result.output.lower()
+
+
+def test_search_notice_does_not_change_row_content_category_or_order(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="alpha match", category="project"))
+    tool.run(_request(operation="save", content="beta match", category="personal"))
+    tool.run(_request(operation="save", content="gamma match", category="general"))
+    result = tool.run(_request(operation="search", query="match", limit=2))
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert lines[0] == "Memories matching 'match':"
+    assert "gamma match" in lines[1] and "(general)" in lines[1]
+    assert "beta match" in lines[2] and "(personal)" in lines[2]
+    assert lines[-1] == "[showing 2 of 3 matches; more matches exist]"
+
+
+def test_search_truncation_does_not_mutate_memories(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory match {i}"))
+    before = list(memory.data)
+    tool.run(_request(operation="search", query="match", limit=2))
+    assert memory.data == before
+
+
+def test_list_behavior_still_works_after_search_truncation_added(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    """Regression guard: Batch 2 must not disturb Batch 1's own list
+    truncation behavior."""
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory {i}"))
+    result = tool.run(_request(operation="list", limit=3))
+    assert "[showing 3 of 5 memories; more memories exist]" in result.output
 
 
 # --- Creation timestamp (Phase 70) --------------------------------------------

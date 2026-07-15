@@ -7,6 +7,9 @@ Responsibilities:
     - Save a memory entry to the existing episodic_memories table.
     - List the most recent memory entries.
     - Search memory entries by a simple case-insensitive text match.
+    - Report a true, exact total count of memories matching a search
+      query (count_matching(), Phase 75, Batch 2), mirroring search()'s
+      own filter semantics via a COUNT query - never fetching rows.
 
 Does NOT:
     - Decide whether a memory should be stored (see memory_manager.py for the
@@ -202,6 +205,46 @@ class EpisodicMemoryStore:
                 .filter(EpisodicMemory.category == safe_category)
                 .count()
             )
+
+    def count_matching(self, query: str, *, category: str | None = None) -> int:
+        """Return the true, exact number of memories matching a search
+        query (Phase 75, Batch 2).
+
+        Mirrors search()'s own filtering semantics exactly - the same
+        case-insensitive substring match against content, the same
+        optional category filter - but issues a COUNT query instead of
+        fetching and counting rows in Python, and never applies a
+        limit. This exists solely so callers (MemoryTool) can disclose
+        an honest, exact "N of M matches" truncation notice, without
+        ever fetching more rows than search()'s own limit already
+        returns.
+
+        Args:
+            query: The text to search for within memory content - the
+                same case-insensitive substring match search() uses.
+            category: Optional category to further filter matches by,
+                identical to search()'s own category filter.
+
+        Returns:
+            The true, exact count of matching memories. An empty or
+            whitespace-only query returns 0, mirroring search()'s own
+            empty-query behaviour (which returns an empty list, never
+            an unfiltered count of everything).
+        """
+        term = query.strip()
+        if not term:
+            return 0
+
+        pattern = f"%{term}%"
+        with session_scope(self._session_factory) as db:
+            db_query = db.query(EpisodicMemory).filter(
+                EpisodicMemory.content.ilike(pattern)
+            )
+            if category is not None:
+                db_query = db_query.filter(
+                    EpisodicMemory.category == normalize_category(category)
+                )
+            return db_query.count()
 
     def get_by_id(self, memory_id: int) -> MemoryRecord | None:
         """Return a single memory by its id, or None if it does not exist.

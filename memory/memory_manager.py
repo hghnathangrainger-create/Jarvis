@@ -151,6 +151,27 @@ class MemoryManager:
         """
         return self._store.count_by_category(category)
 
+    def count_matching(self, query: str, *, category: str | None = None) -> int:
+        """Return the true, exact number of memories matching a search query.
+
+        A thin passthrough to EpisodicMemoryStore.count_matching()
+        (Phase 75, Batch 2), mirroring count()'s/count_by_category()'s
+        own pattern exactly - this method holds no logic of its own
+        beyond delegating.
+
+        Args:
+            query: The text to search for within memory content - the
+                same case-insensitive substring match search() uses.
+            category: Optional category to further filter matches by,
+                identical to search()'s own category filter.
+
+        Returns:
+            The true, exact count of matching memories. An empty or
+            whitespace-only query returns 0, mirroring search()'s own
+            empty-query behaviour.
+        """
+        return self._store.count_matching(query, category=category)
+
     def get(self, memory_id: int) -> MemoryRecord | None:
         """Return a single memory by id, or None if it does not exist.
 

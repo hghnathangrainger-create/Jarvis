@@ -74,6 +74,89 @@ def test_every_record_has_a_category(store) -> None:
     assert record.category == "general"
 
 
+# --- count_matching() (Phase 75, Batch 2) -------------------------------------
+
+
+def test_count_matching_returns_real_total(store) -> None:
+    store.save(content="Nathan likes Python")
+    store.save(content="Python is great")
+    store.save(content="the sky is blue")
+    assert store.count_matching("python") == 2
+
+
+def test_count_matching_mirrors_search_semantics_exactly(store) -> None:
+    """count_matching() must count exactly the same rows search() would
+    return if it had no limit - same case-insensitive substring match,
+    same filter shape."""
+    for i in range(30):
+        store.save(content=f"memory match {i}")
+    store.save(content="unrelated entry")
+
+    unbounded = store.search("match", limit=1000)
+    assert store.count_matching("match") == len(unbounded) == 30
+
+
+def test_count_matching_is_category_specific(store) -> None:
+    store.save(content="api deadline", category="project")
+    store.save(content="api notes", category="project")
+    store.save(content="api reminder", category="personal")
+    assert store.count_matching("api") == 3
+    assert store.count_matching("api", category="project") == 2
+    assert store.count_matching("api", category="personal") == 1
+
+
+def test_count_matching_empty_query_mirrors_search_behavior(store) -> None:
+    store.save(content="anything")
+    assert store.count_matching("") == 0
+    assert store.count_matching("   ") == 0
+    # search() also returns nothing for an empty/blank query - the two
+    # must stay consistent with each other.
+    assert store.search("") == []
+    assert store.search("   ") == []
+
+
+def test_count_matching_zero_when_nothing_matches(store) -> None:
+    store.save(content="hello world")
+    assert store.count_matching("nonexistent") == 0
+
+
+def test_count_matching_does_not_mutate_or_fetch_rows(store) -> None:
+    store.save(content="a match")
+    store.save(content="another match")
+    before = store.list_recent()
+    store.count_matching("match")
+    after = store.list_recent()
+    assert before == after
+
+
+# --- MemoryManager.count_matching() (Phase 75, Batch 2) -----------------------
+
+
+def test_memory_manager_count_matching_passes_through_to_store(store) -> None:
+    """MemoryManager.count_matching() is a thin passthrough to
+    EpisodicMemoryStore.count_matching() - this proves the manager
+    layer adds no logic of its own beyond delegating, mirroring
+    count_by_category()'s own established precedent."""
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    manager.save(content="api deadline", category="project")
+    manager.save(content="api notes", category="project")
+    manager.save(content="unrelated", category="personal")
+
+    assert manager.count_matching("api") == 2
+    assert manager.count_matching("api", category="project") == 2
+    assert manager.count_matching("api", category="personal") == 0
+
+
+def test_memory_manager_count_matching_empty_query_returns_zero(store) -> None:
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    manager.save(content="anything")
+    assert manager.count_matching("") == 0
+
+
 # --- Backward compatibility: an old database without the category column -----
 
 

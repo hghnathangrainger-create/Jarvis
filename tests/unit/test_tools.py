@@ -72,6 +72,12 @@ class _FakeMemory:
     def count(self) -> int:
         return len(self._data)
 
+    def count_matching(self, query: str, *, category: str | None = None) -> int:
+        term = query.strip().lower()
+        if not term:
+            return 0
+        return sum(1 for r in self._data if term in r.content.lower())
+
 
 class _RedTool(BaseTool):
     """A tool whose action classifies RED; its run must never be reached."""
