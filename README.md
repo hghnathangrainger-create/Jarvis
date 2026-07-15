@@ -598,7 +598,7 @@ Jarvis's first durable output: a saved copy of an AI-generated result that used 
 | Result count | How many search results the summary was based on, if known. |
 | Created at | When the entry was saved (UTC). |
 
-The Inbox tab shows these newest-first, with a truncated preview and the full saved body on row selection — the same pattern the Memories tab already established.
+The Inbox tab shows these newest-first, with a truncated preview and the full saved body on row selection — the same pattern the Memories tab already established. Extended in Phase 65 with a Source Breakdown panel and a richer selected-entry detail pane — see Phase 65 below for the current Inbox tab.
 
 ### Safety note: a saved summary, not a new authority
 
@@ -645,7 +645,7 @@ A third independent process, alongside `main.py`/the CLI and `dashboard.py` — 
 |---|---|
 | ID, Name, Query, Time Of Day, Enabled, Last Run At, Created At | Every configured schedule, in the same stable, oldest-first order `ScheduleStore` itself uses. |
 
-Read-only, like every other tab: there is no create, edit, delete, enable, disable, or run-now control anywhere on it, and no "next due" countdown is computed or shown — only `scheduler.py`'s own poll cycle decides whether a schedule is currently due.
+Read-only, like every other tab: there is no create, edit, delete, enable, disable, or run-now control anywhere on it, and no "next due" countdown is computed or shown — only `scheduler.py`'s own poll cycle decides whether a schedule is currently due. Extended in Phase 65 with an Enabled/Disabled Breakdown panel — see Phase 65 below for the current Schedules tab.
 
 ### Safety note: one hard-coded action, gated the same way every write already is
 
@@ -1217,6 +1217,60 @@ Nothing in Phase 64 adds an approve/deny/resume/run/cancel control, a command bo
 ### What is deliberately NOT included in Phase 64
 
 No approve/deny control, no workflow resume/run/cancel control, no dashboard write action of any kind. No AI-generated summaries or insights. No risk, urgency, importance, or intelligence score. No dashboard search box, no pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, `ApprovalManager`, or `WorkflowEngine` behavior change. No other dashboard tab changed.
+
+---
+
+## Phase 65 — Inbox & Schedules Dashboard V1 (complete)
+
+The Inbox and Schedules tabs were the two remaining "table-only" tabs after Phases 62–64 upgraded Overview, Memories, Approval History, and Workflow History. Phase 65 gives both the same honest, real-data-only treatment: a breakdown panel on each, and a richer Inbox detail pane — still read-only, still no new dependency, and needing zero new store methods (an even lighter foundation than Phase 64's, which needed one). Delivered in three batches. See `docs/phase_65_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model foundation.** `inbox/inbox_store.py` gained a fixed `KNOWN_INBOX_SOURCE_TYPES` tuple naming all three real producers (`web_search_summary`, `scheduled_web_search_summary`, `webpage_summary`). An already-fetched-but-dropped field was restored: `InboxRow` gained `source_type`, populated from the same query the read model already ran, never a new one. `dashboard/read_model.py` gained `get_inbox_source_type_breakdown()` (a true, all-time count per source type, reusing `InboxStore.count_since()` — a method that already existed since Phase 22 — rather than adding a new store method) and `get_schedule_enabled_breakdown()` (a tally of `get_schedules()`'s own already-fetched result — no new store method at all, since `ScheduleStore.list_all()` already returns every configured schedule).
+- **Batch 2 — UI layer.** The Inbox tab gained a "Source Breakdown" panel (the same destroy-and-rebuild label pattern Phases 62–64 already established) and an enhanced detail pane: selecting an entry now shows its source type, source query, creation time, and included result count alongside its full saved body. The Schedules tab gained an "Enabled/Disabled Breakdown" panel; no detail pane was added there, since its table already shows every schedule field.
+- **Batch 3 — End-to-end verification, documentation, and closure.** Real, temporary-database smoke tests wire a real `DashboardReadModel` (with real inbox entries across multiple source types, and real schedules covering both enabled and disabled states) into a real `DashboardApp`, confirming both tabs' breakdown panels, tables, and (for Inbox) detail pane all render honestly, including honest zero/missing-field states. `docs/user_guide.md` updated; this section added; the Phase 20/21 sections' own Inbox/Schedules tab descriptions corrected with forward references, rather than left silently stale.
+
+### The upgraded Inbox tab
+
+```
+Saved advisory summaries - durable copies of what Jarvis already showed
+you once. Read-only: nothing here can be re-run, edited, or sent
+anywhere.
+
+Source Breakdown
+  web_search_summary: 2
+  scheduled_web_search_summary: 1
+  webpage_summary: 0
+
+<Created At>  <Query>  <Preview>
+...
+
+Source type: web_search_summary
+Source query: jarvis ai news
+Created: 2026-...
+Included count: 3
+
+[AI web search summary] A synthesis.
+```
+
+### The upgraded Schedules tab
+
+```
+Configured daily web-search-summary schedules - read-only...
+
+Enabled/Disabled Breakdown
+  enabled: 2
+  disabled: 1
+
+<ID>  <Name>  <Query>  <Time Of Day>  <Enabled>  <Last Run At>  <Created At>
+...
+```
+
+### Safety note: still read-only, still no new authority
+
+Nothing in Phase 65 adds an archive/delete/clear control for Inbox, a create/enable/disable/delete control for Schedules, a command box, or any interactive element beyond the pre-existing refresh control — re-confirmed by the same structural test that walks every widget in the entire window and finds exactly one `Button` ("Refresh now") anywhere, plus a new Phase 65 test scoping that same proof to just these two tabs specifically. `dashboard/read_model.py` and `ui/dashboard_app.py` still import no execution, approval, command-routing, AI, or tool-execution component. Both breakdown panels are real, current, all-time counts — never a score, a ranking, or an AI-generated insight.
+
+### What is deliberately NOT included in Phase 65
+
+No Inbox archive/delete/clear control. No schedule create/enable/disable/delete control from the dashboard. No dashboard write action of any kind. No AI-generated summaries or insights. No risk, urgency, importance, or intelligence score. No dashboard search box, no pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, `ApprovalManager`, or `WorkflowEngine` behavior change. No other dashboard tab changed.
 
 ---
 

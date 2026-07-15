@@ -1847,3 +1847,143 @@ class TestDashboardAppWithRealTk:
         workflow_tab_frame = app._workflow_tree.master
         assert _collect_buttons(approval_tab_frame) == []
         assert _collect_buttons(workflow_tab_frame) == []
+
+    def test_inbox_renders_all_panels_honestly_with_real_data(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check: a real DashboardReadModel over
+        a real temporary database with real inbox entries across
+        multiple source types, wired into a real DashboardApp. Confirms
+        the Source Breakdown, table, and selected-row detail pane
+        (including its honest missing-field states) all render honestly
+        from that real data (Phase 65, Batch 3)."""
+        from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+        read_model, _, _, _, inbox, _, _ = _make_real_stack()
+        inbox.append(
+            source_type="web_search_summary",
+            source_query="jarvis news",
+            body="[AI web search summary] A synthesis.",
+            included_count=3,
+        )
+        inbox.append(
+            source_type="scheduled_web_search_summary",
+            source_query="daily digest",
+            body="[AI web search summary] A scheduled synthesis.",
+        )
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._inbox_breakdown_labels
+        ]
+        assert len(breakdown_texts) == len(KNOWN_INBOX_SOURCE_TYPES)
+        assert "web_search_summary: 1" in breakdown_texts
+        assert "scheduled_web_search_summary: 1" in breakdown_texts
+        assert "webpage_summary: 0" in breakdown_texts
+
+        children = app._inbox_tree.get_children()
+        assert len(children) == 2
+
+        with_count_iid = next(
+            iid
+            for iid, row in app._inbox_rows_by_id.items()
+            if row.source_query == "jarvis news"
+        )
+        app._inbox_tree.selection_set(with_count_iid)
+        app._on_inbox_row_selected(None)
+        detail_with_count = app._inbox_detail_var.get()
+        assert "Source type: web_search_summary" in detail_with_count
+        assert "Source query: jarvis news" in detail_with_count
+        assert "Included count: 3" in detail_with_count
+        assert "[AI web search summary] A synthesis." in detail_with_count
+
+        without_count_iid = next(
+            iid
+            for iid, row in app._inbox_rows_by_id.items()
+            if row.source_query == "daily digest"
+        )
+        app._inbox_tree.selection_set(without_count_iid)
+        app._on_inbox_row_selected(None)
+        detail_without_count = app._inbox_detail_var.get()
+        assert "Source type: scheduled_web_search_summary" in detail_without_count
+        assert "Included count: —" in detail_without_count
+
+        assert app._inbox_error_var.get() == ""
+        assert app._inbox_breakdown_error_var.get() == ""
+
+    def test_schedules_renders_all_panels_honestly_with_real_data(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check across the Schedules tab: the
+        Enabled/Disabled Breakdown and table both render honestly from
+        real, seeded schedule data covering both enabled and disabled
+        schedules (Phase 65, Batch 3)."""
+        read_model, _, _, _, _, schedules, _ = _make_real_stack()
+        schedules.create(query="morning news", time_of_day="08:00", name="Morning")
+        to_disable = schedules.create(query="evening news", time_of_day="18:00")
+        schedules.disable(to_disable.id)
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._schedule_breakdown_labels
+        ]
+        assert "enabled: 1" in breakdown_texts
+        assert "disabled: 1" in breakdown_texts
+
+        children = app._schedules_tree.get_children()
+        assert len(children) == 2
+        enabled_values = {
+            app._schedules_tree.item(c, "values")[1]: app._schedules_tree.item(
+                c, "values"
+            )[4]
+            for c in children
+        }
+        assert enabled_values["Morning"] == "Yes"
+        assert enabled_values["—"] == "No"
+
+        assert app._schedules_error_var.get() == ""
+        assert app._schedule_breakdown_error_var.get() == ""
+
+    def test_schedules_breakdown_honest_zero_states_on_empty_store(
+        self, root: tk.Tk
+    ) -> None:
+        """The Schedules Enabled/Disabled Breakdown must show honest
+        zeros for both states, and the table its own empty-state
+        message, when no schedules are configured at all (Phase 65,
+        Batch 3)."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._schedule_breakdown_labels
+        ]
+        assert "enabled: 0" in breakdown_texts
+        assert "disabled: 0" in breakdown_texts
+        assert (
+            app._schedules_tree.item(app._schedules_tree.get_children()[0], "values")[0]
+            == "No schedules configured yet."
+        )
+
+    def test_inbox_and_schedules_no_write_widget_introduced(
+        self, root: tk.Tk
+    ) -> None:
+        """Structural, behavioral proof that Batch 1/2's new panels never
+        introduced a button or other write-triggering widget anywhere in
+        the Inbox or Schedules tabs specifically (Phase 65, Batch 3)."""
+        read_model, _, _, _, inbox, schedules, _ = _make_real_stack()
+        inbox.append(source_type="web_search_summary", source_query="q", body="b")
+        schedules.create(query="q", time_of_day="08:00")
+        app = _build_app(root, read_model)
+
+        def _collect_buttons(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TButton":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_buttons(child))
+            return found
+
+        inbox_tab_frame = app._inbox_tree.master
+        schedules_tab_frame = app._schedules_tree.master
+        assert _collect_buttons(inbox_tab_frame) == []
+        assert _collect_buttons(schedules_tab_frame) == []
