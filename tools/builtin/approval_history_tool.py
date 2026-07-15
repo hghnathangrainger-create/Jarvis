@@ -1,7 +1,9 @@
 """
 approval_history_tool.py
 
-A safe, read-only tool that shows durable approval history (Phase 6, Batch 1).
+A safe, read-only tool that shows durable approval history (Phase 6, Batch 1;
+extended Phase 73, Batch 1 with a real, all-time status breakdown in the
+default "history" operation's header).
 
 ApprovalHistoryTool is a GREEN tool. It only reads from an ApprovalHistoryStore
 and never approves, declines, creates, or executes anything. It has no
@@ -20,6 +22,7 @@ Supported operations (via the 'operation' input):
 from __future__ import annotations
 
 from approval.approval_history_store import (
+    KNOWN_APPROVAL_STATUSES,
     ApprovalHistoryRecord,
     ApprovalHistoryStore,
 )
@@ -133,7 +136,7 @@ class ApprovalHistoryTool(BaseTool):
 
         if operation == "history":
             records = self._history.list_recent(limit=_DEFAULT_LIMIT)
-            return self.ok(self._format_many(records, "Approval history"))
+            return self.ok(self._format_history(records))
 
         return self.fail(
             f"Unknown operation '{operation}'. Use 'history', 'recent', "
@@ -178,6 +181,47 @@ class ApprovalHistoryTool(BaseTool):
         if not records:
             return f"{header}: none found."
         lines = [f"{header}:"]
+        for record in records:
+            lines.append(ApprovalHistoryTool._format_entry(record))
+        return "\n".join(lines)
+
+    def _format_history(self, records: list[ApprovalHistoryRecord]) -> str:
+        """Format the default, unfiltered "history" operation's listing,
+        including a real, all-time status breakdown in the header
+        (Phase 73, Batch 1).
+
+        Each count comes from one call to
+        ApprovalHistoryStore.count_by_status() - a true, unbounded,
+        all-time total, never a fabricated, estimated, or inferred
+        value, and never AI-derived. Every status in
+        KNOWN_APPROVAL_STATUSES is included, even one with zero
+        entries - an honest zero is reported, never omitted. Statuses
+        are rendered in KNOWN_APPROVAL_STATUSES's own fixed, declared
+        order - never sorted by count - so nothing here implies one
+        status is more significant than another, mirroring the
+        dashboard's own established Status Breakdown panel (Phase 64)
+        exactly. Only this default operation's header changes - the
+        "recent"/"approved"/"declined" operations' own headers, and
+        every row's own format, are unaffected.
+
+        Args:
+            records: The already-fetched history records to list below
+                the header (the same list "history" already returns -
+                this method never issues a second listing query).
+
+        Returns:
+            A formatted, multi-line string. The empty-state message is
+            unchanged from before this batch: "Approval history: none
+            found." with no breakdown, since an empty result set means
+            every status's real count is honestly zero anyway.
+        """
+        if not records:
+            return "Approval history: none found."
+        breakdown = ", ".join(
+            f"{status}: {self._history.count_by_status(status)}"
+            for status in KNOWN_APPROVAL_STATUSES
+        )
+        lines = [f"Approval history ({breakdown}):"]
         for record in records:
             lines.append(ApprovalHistoryTool._format_entry(record))
         return "\n".join(lines)

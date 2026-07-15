@@ -172,7 +172,7 @@ Phase 6 makes approval decisions durable: every approval request and its eventua
 Example output for `show approval history`:
 
 ```
-jarvis> [OK] Approval history:
+jarvis> [OK] Approval history (pending: 1, approved: 1, declined: 0, expired: 0):
         [a1b2c3d4-...] APPROVED - update memory 3: corrected address
             tier: yellow | created: 2026-07-04T10:22:00 | decided: 2026-07-04T10:23:05 by user | reason: looks right
         [e5f6g7h8-...] PENDING - forget memory 9

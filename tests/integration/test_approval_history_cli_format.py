@@ -200,11 +200,16 @@ def _create_file_command(tmp_path: Path, filename: str, content: str) -> str:
 def test_show_approval_history_prints_ok_status(
     engine: object, tmp_path: Path
 ) -> None:
+    """Phase 73, Batch 1 added a real, all-time status breakdown to this
+    header - previously a bare "Approval history:", now "Approval
+    history (pending: 0, approved: 1, declined: 0, expired: 0):" for
+    this test's own single-approved-action scenario. Updated here as an
+    intentional, approved consequence of that change, not a regression."""
     system = _System(engine)
     io = system.cli(
         [_create_file_command(tmp_path, "a.txt", "x"), "y", "show approval history"]
     )
-    assert "[OK] Approval history:" in io.transcript
+    assert "[OK] Approval history (pending: 0, approved: 1, declined: 0, expired: 0):" in io.transcript
 
 
 def test_show_recent_approvals_prints_ok_status(

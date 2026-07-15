@@ -29,7 +29,10 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from approval.approval_history_store import ApprovalHistoryRecord
+from approval.approval_history_store import (
+    KNOWN_APPROVAL_STATUSES,
+    ApprovalHistoryRecord,
+)
 from tools.base_tool import ToolRequest
 from tools.builtin.approval_history_tool import ApprovalHistoryTool
 
@@ -74,6 +77,9 @@ class _FakeHistoryStore:
         self, status: str, limit: int = 20
     ) -> list[ApprovalHistoryRecord]:
         return [r for r in self._records if r.status == status][:limit]
+
+    def count_by_status(self, status: str) -> int:
+        return sum(1 for r in self._records if r.status == status)
 
     def get(self, request_id: str) -> ApprovalHistoryRecord | None:
         for r in self._records:
@@ -214,6 +220,117 @@ def test_empty_declined_reports_none_found_with_correct_header() -> None:
     tool = ApprovalHistoryTool(_FakeHistoryStore([approved_only]))
     output = tool.run(_request("declined")).output
     assert "Declined actions: none found." == output
+
+
+# --- Status breakdown in the default "history" header (Phase 73, Batch 1) ----
+
+
+def test_history_header_shows_real_counts_for_every_known_status() -> None:
+    records = [
+        _record(request_id="r1", status="pending"),
+        _record(request_id="r2", status="pending"),
+        _record(request_id="r3", status="approved", decided_at=_DECIDED, decided_by="user"),
+        _record(request_id="r4", status="approved", decided_at=_DECIDED, decided_by="user"),
+        _record(request_id="r5", status="approved", decided_at=_DECIDED, decided_by="user"),
+        _record(request_id="r6", status="approved", decided_at=_DECIDED, decided_by="user"),
+        _record(request_id="r7", status="approved", decided_at=_DECIDED, decided_by="user"),
+        _record(
+            request_id="r8",
+            status="declined",
+            decided_at=_DECIDED,
+            decided_by="user",
+            decision_reason="not now",
+        ),
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+    assert "Approval history (pending: 2, approved: 5, declined: 1, expired: 0):" in output
+
+
+def test_history_header_shows_honest_zero_for_untouched_statuses() -> None:
+    records = [_record(request_id="r1", status="pending")]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+    assert "approved: 0" in output
+    assert "declined: 0" in output
+    assert "expired: 0" in output
+
+
+def test_history_header_preserves_known_status_order_not_sorted_by_count() -> None:
+    """Statuses must never be reordered by count - this would visually
+    imply significance the data does not actually carry."""
+    last_status = KNOWN_APPROVAL_STATUSES[-1]
+    records = [
+        _record(request_id=f"r{i}", status=last_status) for i in range(5)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+
+    header_line = output.splitlines()[0]
+    breakdown_text = header_line.split("(", 1)[1].rstrip("):")
+    rendered_order = [entry.split(":")[0].strip() for entry in breakdown_text.split(",")]
+    assert rendered_order == list(KNOWN_APPROVAL_STATUSES)
+
+
+def test_history_rows_still_include_expected_details_alongside_breakdown() -> None:
+    record = _record(status="pending")
+    tool = ApprovalHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("history")).output
+    assert "Approval history (" in output
+    assert "[req-abc-123]" in output
+    assert "PENDING" in output
+    assert "tier: yellow" in output
+
+
+def test_history_breakdown_does_not_mutate_or_requery_beyond_counts() -> None:
+    """The breakdown must come from count_by_status() only - the same
+    already-fetched `records` list is still what gets rendered below the
+    header, never a second listing query."""
+    records = [_record(request_id="r1", status="pending")]
+    store = _FakeHistoryStore(records)
+    tool = ApprovalHistoryTool(store)
+    tool.run(_request("history"))
+    tool.run(_request("history"))
+    assert store._records == records
+
+
+def test_recent_header_has_no_status_breakdown() -> None:
+    records = [_record(request_id="r1", status="pending")]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("recent")).output
+    assert output.startswith("Recent approvals:")
+    assert "(" not in output.splitlines()[0]
+
+
+def test_approved_header_has_no_status_breakdown() -> None:
+    records = [_record(request_id="r1", status="approved", decided_at=_DECIDED, decided_by="user")]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert output.startswith("Approved actions:")
+    assert "(" not in output.splitlines()[0]
+
+
+def test_declined_header_has_no_status_breakdown() -> None:
+    records = [
+        _record(
+            request_id="r1",
+            status="declined",
+            decided_at=_DECIDED,
+            decided_by="user",
+            decision_reason="not now",
+        )
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("declined")).output
+    assert output.startswith("Declined actions:")
+    assert "(" not in output.splitlines()[0]
+
+
+def test_get_operation_unaffected_by_history_breakdown() -> None:
+    record = _record(status="approved", decided_at=_DECIDED, decided_by="user")
+    tool = ApprovalHistoryTool(_FakeHistoryStore([record]))
+    output = tool.run(_request("get", request_id="req-abc-123")).output
+    assert "(" not in output.splitlines()[0]
 
 
 # --- get: single-entry lookup (unchanged from Batch 1, re-verified here) ---
