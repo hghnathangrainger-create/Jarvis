@@ -222,6 +222,173 @@ def test_empty_declined_reports_none_found_with_correct_header() -> None:
     assert "Declined actions: none found." == output
 
 
+# --- Filtered-view truncation honesty: approved/declined (Phase 76) ---------
+
+
+def test_approved_footer_appears_with_exact_shown_and_total_when_truncated() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(25)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "[showing 20 of 25 approved actions; more approved actions exist]" in output
+
+
+def test_declined_footer_appears_with_exact_shown_and_total_when_truncated() -> None:
+    records = [
+        _record(
+            request_id=f"d{i}",
+            status="declined",
+            decided_at=_DECIDED,
+            decided_by="user",
+            decision_reason="not now",
+        )
+        for i in range(21)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("declined")).output
+    assert "[showing 20 of 21 declined actions; more declined actions exist]" in output
+
+
+def test_no_footer_when_approved_results_all_fit() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(3)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "[showing" not in output
+
+
+def test_no_footer_when_declined_results_all_fit() -> None:
+    records = [
+        _record(request_id=f"d{i}", status="declined", decided_at=_DECIDED, decided_by="user")
+        for i in range(3)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("declined")).output
+    assert "[showing" not in output
+
+
+def test_no_footer_when_approved_total_equals_shown() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(20)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "[showing" not in output
+
+
+def test_no_footer_when_declined_total_equals_shown() -> None:
+    records = [
+        _record(request_id=f"d{i}", status="declined", decided_at=_DECIDED, decided_by="user")
+        for i in range(20)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("declined")).output
+    assert "[showing" not in output
+
+
+def test_empty_approved_reports_none_found_with_no_footer() -> None:
+    declined_only = _record(status="declined", decided_at=_DECIDED, decided_by="user")
+    tool = ApprovalHistoryTool(_FakeHistoryStore([declined_only]))
+    output = tool.run(_request("approved")).output
+    assert output == "Approved actions: none found."
+
+
+def test_approved_footer_uses_only_approved_count_not_declined() -> None:
+    """The approved view's total must come from count_by_status("approved")
+    only - a large declined count sitting in the same store must never
+    leak into the approved footer's total."""
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(22)
+    ] + [
+        _record(request_id=f"d{i}", status="declined", decided_at=_DECIDED, decided_by="user")
+        for i in range(50)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "[showing 20 of 22 approved actions; more approved actions exist]" in output
+    assert "50" not in output
+    assert "declined" not in output.lower()
+
+
+def test_declined_footer_uses_only_declined_count_not_approved() -> None:
+    records = [
+        _record(request_id=f"d{i}", status="declined", decided_at=_DECIDED, decided_by="user")
+        for i in range(23)
+    ] + [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(50)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("declined")).output
+    assert "[showing 20 of 23 declined actions; more declined actions exist]" in output
+    assert "50" not in output
+    assert "approved actions" not in output
+
+
+def test_filtered_footer_wording_never_mentions_a_limit_flag() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(25)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "increase" not in output.lower()
+    assert "limit" not in output.lower()
+
+
+def test_filtered_footer_does_not_mutate_or_requery_beyond_count() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(25)
+    ]
+    store = _FakeHistoryStore(records)
+    tool = ApprovalHistoryTool(store)
+    tool.run(_request("approved"))
+    tool.run(_request("approved"))
+    assert store._records == records
+
+
+def test_filtered_footer_preserves_row_details_and_order() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(25)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("approved")).output
+    assert "[a0]" in output
+    assert "[a19]" in output
+    assert "[a20]" not in output  # only the first 20 (the store's own limit) are rows
+    assert output.index("[a0]") < output.index("[a19]")
+
+
+def test_recent_view_is_unaffected_by_filtered_truncation_footer() -> None:
+    """Phase 76 only touches "approved"/"declined" - "recent" keeps its
+    Phase 73 behavior exactly, including its own pre-existing silent
+    truncation at _RECENT_LIMIT, which is unchanged and out of scope."""
+    records = [_record(request_id=f"r{i}", status="pending") for i in range(15)]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("recent")).output
+    assert "[showing" not in output
+    assert output.startswith("Recent approvals:")
+
+
+def test_default_history_view_is_unaffected_by_filtered_truncation_footer() -> None:
+    records = [
+        _record(request_id=f"a{i}", status="approved", decided_at=_DECIDED, decided_by="user")
+        for i in range(25)
+    ]
+    tool = ApprovalHistoryTool(_FakeHistoryStore(records))
+    output = tool.run(_request("history")).output
+    assert "[showing" not in output
+    assert "Approval history (" in output
+
+
 # --- Status breakdown in the default "history" header (Phase 73, Batch 1) ----
 
 

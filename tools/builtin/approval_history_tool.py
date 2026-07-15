@@ -3,7 +3,8 @@ approval_history_tool.py
 
 A safe, read-only tool that shows durable approval history (Phase 6, Batch 1;
 extended Phase 73, Batch 1 with a real, all-time status breakdown in the
-default "history" operation's header).
+default "history" operation's header; extended Phase 76 with an honest
+truncation footer on the "approved"/"declined" filtered views).
 
 ApprovalHistoryTool is a GREEN tool. It only reads from an ApprovalHistoryStore
 and never approves, declines, creates, or executes anything. It has no
@@ -126,13 +127,17 @@ class ApprovalHistoryTool(BaseTool):
             records = self._history.list_by_status(
                 "approved", limit=_DEFAULT_LIMIT
             )
-            return self.ok(self._format_many(records, "Approved actions"))
+            return self.ok(
+                self._format_filtered(records, "Approved actions", "approved")
+            )
 
         if operation == "declined":
             records = self._history.list_by_status(
                 "declined", limit=_DEFAULT_LIMIT
             )
-            return self.ok(self._format_many(records, "Declined actions"))
+            return self.ok(
+                self._format_filtered(records, "Declined actions", "declined")
+            )
 
         if operation == "history":
             records = self._history.list_recent(limit=_DEFAULT_LIMIT)
@@ -183,6 +188,52 @@ class ApprovalHistoryTool(BaseTool):
         lines = [f"{header}:"]
         for record in records:
             lines.append(ApprovalHistoryTool._format_entry(record))
+        return "\n".join(lines)
+
+    def _format_filtered(
+        self, records: list[ApprovalHistoryRecord], header: str, status: str
+    ) -> str:
+        """Format a single-status filtered listing ("approved"/"declined"),
+        with an honest truncation footer when more of that exact status
+        exist than are shown (Phase 76).
+
+        This never shows a cross-status breakdown - only the one status
+        this view is already filtered to, via one call to
+        ApprovalHistoryStore.count_by_status(status). That keeps the
+        header/footer scope identical to the rows actually displayed,
+        unlike the default "history" operation's own all-status
+        breakdown (Phase 73, Batch 1), which intentionally covers every
+        status because it is itself unfiltered.
+
+        Args:
+            records: The already-fetched, single-status records to list
+                (the same list the caller already fetched - this method
+                never issues a second listing query).
+            header: The header text, e.g. "Approved actions".
+            status: The exact status these records are filtered to, used
+                only to look up that status's own real total.
+
+        Returns:
+            A formatted, multi-line string. The empty-state message is
+            unchanged: "{header}: none found." with no footer, since an
+            empty result set means the real total is honestly zero
+            anyway. When more records exist than are shown, a trailing
+            "[showing N of M ...; more ... exist]" line is appended,
+            using neutral wording - never "increase 'limit'", since no
+            user-facing CLI syntax exists to raise this limit.
+        """
+        if not records:
+            return f"{header}: none found."
+        lines = [f"{header}:"]
+        for record in records:
+            lines.append(ApprovalHistoryTool._format_entry(record))
+        shown = len(records)
+        total = self._history.count_by_status(status)
+        if total > shown:
+            label = header.lower()
+            lines.append(
+                f"\n[showing {shown} of {total} {label}; more {label} exist]"
+            )
         return "\n".join(lines)
 
     def _format_history(self, records: list[ApprovalHistoryRecord]) -> str:
