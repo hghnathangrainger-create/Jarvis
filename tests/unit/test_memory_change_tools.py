@@ -210,6 +210,42 @@ def test_forget_removes_memory(memory: _FakeMemory) -> None:
     assert memory.get(mid) is None
 
 
+# --- Forget confirmation detail (Phase 78, Batch 1) --------------------------
+
+
+def test_forget_confirmation_includes_id_category_and_content(
+    memory: _FakeMemory,
+) -> None:
+    mid = memory.add("buy milk", category="project")
+    tool = MemoryForgetTool(memory)
+    result = tool.run(_forget_request(memory_id=mid))
+    assert result.success is True
+    assert result.output == f"Forgot memory [{mid}] (project) buy milk."
+
+
+def test_forget_confirmation_uses_default_category_when_none_given(
+    memory: _FakeMemory,
+) -> None:
+    mid = memory.add("no category given")
+    tool = MemoryForgetTool(memory)
+    result = tool.run(_forget_request(memory_id=mid))
+    assert result.output == f"Forgot memory [{mid}] (general) no category given."
+
+
+def test_forget_confirmation_reflects_the_record_fetched_before_deletion(
+    memory: _FakeMemory,
+) -> None:
+    """The success message must come from the real, fetched record - not
+    an empty or generic placeholder - proving the record was read before
+    forget() removed it."""
+    mid = memory.add("distinctive content xyz", category="personal")
+    tool = MemoryForgetTool(memory)
+    result = tool.run(_forget_request(memory_id=mid))
+    assert "distinctive content xyz" in result.output
+    assert "personal" in result.output
+    assert str(mid) in result.output
+
+
 def test_forget_unknown_id_fails(memory: _FakeMemory) -> None:
     tool = MemoryForgetTool(memory)
     result = tool.run(_forget_request(memory_id=999))

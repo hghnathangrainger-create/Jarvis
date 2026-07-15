@@ -1,7 +1,9 @@
 """
 memory_forget_tool.py
 
-A guarded tool that forgets a single memory by id (Phase 5, Batch 3).
+A guarded tool that forgets a single memory by id (Phase 5, Batch 3;
+extended Phase 78, Batch 1 so the success confirmation identifies the
+forgotten memory's id, category, and content).
 
 MemoryForgetTool is a YELLOW tool. Forgetting removes a stored memory, so its
 action is classified YELLOW and it runs only after explicit approval through the
@@ -83,8 +85,10 @@ class MemoryForgetTool(BaseTool):
                 memory_id: the id of the memory to forget (required).
 
         Returns:
-            A successful ToolResult when the memory is forgotten, or a failed
-            result if the id is missing or unknown.
+            A successful ToolResult when the memory is forgotten, whose
+            output identifies the forgotten memory's id, category, and
+            content (Phase 78, Batch 1), or a failed result if the id is
+            missing or unknown.
         """
         memory_id = self._parse_id(request.input_data.get("memory_id"))
         if request.input_data.get("all") is True:
@@ -99,6 +103,8 @@ class MemoryForgetTool(BaseTool):
                 "Forgetting a memory requires a valid numeric 'memory_id'."
             )
 
+        # Fetched before forget() - the record no longer exists afterward.
+        record = self._memory.get(memory_id)
         forgotten = self._memory.forget(memory_id)
         if not forgotten:
             return self.fail(f"No memory found with id {memory_id}.")
@@ -106,7 +112,7 @@ class MemoryForgetTool(BaseTool):
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Forgot memory {memory_id}.",
+            output=f"Forgot memory [{record.id}] ({record.category}) {record.content}.",
             metadata={"operation": "forget", "memory_id": str(memory_id)},
         )
 
