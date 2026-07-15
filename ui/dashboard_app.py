@@ -62,6 +62,7 @@ from dashboard.read_model import (
     DashboardReadModel,
     DashboardSystemStatus,
     InboxRow,
+    MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
@@ -123,6 +124,16 @@ WORKFLOW_HISTORY_CAPTION = (
     "after a restart."
 )
 MEMORY_DETAIL_PLACEHOLDER = "Select a memory above to see its full content."
+
+#: Read-only wording for the Memories tab (Phase 63): a durable copy of
+#: what Jarvis was explicitly asked to remember - never created, edited,
+#: deleted, moved to another category, or AI-summarized from here.
+MEMORIES_CAPTION = (
+    "Durable memories Jarvis was explicitly asked to remember - "
+    "read-only. Nothing here can be created, edited, deleted, "
+    "re-categorized, or AI-summarized; use the CLI memory commands, "
+    "each of which still requires approval for any change."
+)
 
 #: Read-only wording for the Inbox tab (Phase 20): a saved entry is a
 #: durable copy of something already shown once - never a live queue,
@@ -375,6 +386,45 @@ def activity_row_to_tree_values(row: ActivityRow) -> tuple[str, str, str]:
     return (format_timestamp(row.created_at), row.domain, row.summary)
 
 
+def memory_category_breakdown_line(row: MemoryCategoryCount) -> str:
+    """Format one MemoryCategoryCount as a single honest status line
+    (Phase 63, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    exactly what MemoryManager.count_by_category() returned, including
+    an honest zero for a category with no memories.
+
+    Args:
+        row: The memory category count view model to format.
+
+    Returns:
+        A single plain-text line naming the category and its real count.
+    """
+    return f"{row.category}: {row.count}"
+
+
+def memory_detail_text(row: MemoryRow) -> str:
+    """Build the enhanced selected-memory detail text (Phase 63, Batch 2).
+
+    Uses only fields already present on the already-fetched MemoryRow -
+    never a new query, never a fabricated field. Replaces the previous
+    content-only detail pane with one that also shows the memory's id,
+    category, and creation time, for a clearer, more identifiable detail
+    view.
+
+    Args:
+        row: The selected memory row to describe.
+
+    Returns:
+        A short, multi-line, plain-text description followed by the
+        memory's full, untruncated content.
+    """
+    return (
+        f"ID: {row.id}  |  Category: {row.category}  |  "
+        f"Created: {format_timestamp(row.created_at)}\n\n{row.full_content}"
+    )
+
+
 class DashboardApp:
     """The tkinter/ttk read-only dashboard window.
 
@@ -548,6 +598,20 @@ class DashboardApp:
     def _build_memories_tab(self) -> None:
         frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Memories")
+
+        ttk.Label(frame, text=MEMORIES_CAPTION, wraplength=480).pack(anchor="w")
+
+        # --- Category Breakdown (Phase 63, Batch 2) ---------------------------
+        ttk.Label(
+            frame, text="Category Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._memory_breakdown_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._memory_breakdown_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._memory_breakdown_frame = ttk.Frame(frame)
+        self._memory_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._memory_breakdown_labels: list[ttk.Label] = []
 
         controls = ttk.Frame(frame)
         controls.pack(fill="x")
@@ -758,6 +822,7 @@ class DashboardApp:
         button press or a periodic timer tick.
         """
         self._refresh_overview()
+        self._refresh_memory_breakdown()
         self._refresh_memories()
         self._refresh_approval_history()
         self._refresh_workflow_history()
@@ -834,6 +899,28 @@ class DashboardApp:
             return
         for row in rows:
             tree.insert("", "end", values=activity_row_to_tree_values(row))
+
+    def _refresh_memory_breakdown(self) -> None:
+        """Refresh the Category Breakdown panel (Phase 63, Batch 2).
+
+        Isolated from _refresh_memories's own error state - a failure
+        reading the breakdown never blanks the memory list, and vice
+        versa, mirroring this module's established per-panel isolation
+        convention.
+        """
+        try:
+            rows = self._read_model.get_memory_category_breakdown()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._memory_breakdown_error_var.set(
+                format_error_state("memory category breakdown", exc)
+            )
+            return
+        self._memory_breakdown_error_var.set("")
+        self._memory_breakdown_labels = self._render_label_lines(
+            self._memory_breakdown_frame,
+            self._memory_breakdown_labels,
+            [memory_category_breakdown_line(row) for row in rows],
+        )
 
     def _refresh_memories(self) -> None:
         try:
@@ -981,10 +1068,14 @@ class DashboardApp:
         self._refresh_memories()
 
     def _on_memory_row_selected(self, _event: object) -> None:
-        """Populate the detail pane with one memory's full content.
+        """Populate the detail pane with one memory's id, category,
+        creation time, and full content (Phase 63, Batch 2: enhanced
+        from content-only).
 
-        Selecting a row only reads already-loaded local state - it never
-        triggers a database query, a tool call, or any external action.
+        Selecting a row only reads already-loaded local state (the same
+        MemoryRow already fetched by the last _refresh_memories() call)
+        - it never triggers a new database query, a tool call, or any
+        external action.
         """
         selection = self._memory_tree.selection()
         if not selection:
@@ -992,7 +1083,7 @@ class DashboardApp:
         row = self._memory_rows_by_id.get(selection[0])
         if row is None:
             return
-        self._memory_detail_var.set(row.full_content)
+        self._memory_detail_var.set(memory_detail_text(row))
 
     def _on_workflow_row_selected(self, _event: object) -> None:
         """Select a workflow to drill into its recorded transitions."""

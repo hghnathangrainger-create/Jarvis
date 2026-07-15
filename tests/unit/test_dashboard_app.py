@@ -40,6 +40,7 @@ from dashboard.read_model import (
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
+    MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
@@ -63,6 +64,8 @@ from ui.dashboard_app import (
     activity_row_to_tree_values,
     format_error_state,
     format_timestamp,
+    memory_category_breakdown_line,
+    memory_detail_text,
     memory_row_to_tree_values,
     approval_row_to_tree_values,
     overview_summary_lines,
@@ -245,6 +248,9 @@ class _RaisingReadModel:
     def get_recent_activity(self, limit: int = 20):
         raise RuntimeError("simulated recent activity query failure")
 
+    def get_memory_category_breakdown(self):
+        raise RuntimeError("simulated memory category breakdown query failure")
+
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
 
@@ -277,6 +283,45 @@ def test_memory_row_to_tree_values_maps_real_fields() -> None:
     )
     values = memory_row_to_tree_values(row)
     assert values == ("3", "project", "short preview", "2026-01-01 00:00:00 UTC")
+
+
+def test_memory_category_breakdown_line_formats_real_count() -> None:
+    row = MemoryCategoryCount(category="project", count=3)
+    assert memory_category_breakdown_line(row) == "project: 3"
+
+
+def test_memory_category_breakdown_line_formats_honest_zero() -> None:
+    row = MemoryCategoryCount(category="personal", count=0)
+    assert memory_category_breakdown_line(row) == "personal: 0"
+
+
+def test_memory_detail_text_includes_id_category_created_at_and_full_content() -> (
+    None
+):
+    row = MemoryRow(
+        id=7,
+        category="project",
+        preview="buy milk",
+        full_content="buy milk",
+        created_at=datetime(2026, 1, 1, 12, 0, 0),
+    )
+    text = memory_detail_text(row)
+    assert "ID: 7" in text
+    assert "Category: project" in text
+    assert "2026-01-01 12:00:00 UTC" in text
+    assert "buy milk" in text
+
+
+def test_memory_detail_text_never_truncates_full_content() -> None:
+    long_content = "z" * 500
+    row = MemoryRow(
+        id=1,
+        category="general",
+        preview=long_content[:120] + "...",
+        full_content=long_content,
+        created_at=datetime(2026, 1, 1),
+    )
+    assert long_content in memory_detail_text(row)
 
 
 def test_approval_row_to_tree_values_shows_placeholder_for_undecided() -> None:
@@ -745,6 +790,10 @@ class TestDashboardAppWithRealTk:
             "Could not read store reachability" in app._reachability_error_var.get()
         )
         assert "Could not read recent activity" in app._activity_error_var.get()
+        assert (
+            "Could not read memory category breakdown"
+            in app._memory_breakdown_error_var.get()
+        )
 
     def test_one_overview_panel_failure_does_not_blank_another(
         self, root: tk.Tk
@@ -779,6 +828,10 @@ class TestDashboardAppWithRealTk:
     def test_memory_selection_populates_detail_pane_with_full_content(
         self, root: tk.Tk
     ) -> None:
+        """Phase 63, Batch 2: the detail pane now shows id/category/
+        created_at alongside the full content (previously content-only)
+        - this still proves the full, untruncated content is present,
+        never cut short the way the tree's own preview column is."""
         read_model, memory, _, _, _, _, _ = _make_real_stack()
         long_content = "z" * 200
         memory.save(long_content)
@@ -786,7 +839,71 @@ class TestDashboardAppWithRealTk:
         iid = app._memory_tree.get_children()[0]
         app._memory_tree.selection_set(iid)
         app._on_memory_row_selected(None)
-        assert app._memory_detail_var.get() == long_content
+        assert long_content in app._memory_detail_var.get()
+
+    def test_memories_tab_caption_discloses_read_only_and_no_write_actions(
+        self, root: tk.Tk
+    ) -> None:
+        from ui.dashboard_app import MEMORIES_CAPTION
+
+        lowered = MEMORIES_CAPTION.lower()
+        assert "read-only" in lowered
+        assert "created" in lowered or "create" in lowered
+        assert "edited" in lowered or "edit" in lowered
+        assert "deleted" in lowered or "delete" in lowered
+        assert "summarized" in lowered or "summarize" in lowered
+
+    def test_memory_category_breakdown_renders_all_known_categories(
+        self, root: tk.Tk
+    ) -> None:
+        from memory.memory_models import KNOWN_CATEGORIES
+
+        read_model, memory, _, _, _, _, _ = _make_real_stack()
+        memory.save("a project note", category="project")
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._memory_breakdown_labels
+        ]
+        assert len(breakdown_texts) == len(KNOWN_CATEGORIES)
+        assert "project: 1" in breakdown_texts
+        # Every other known category is shown too, honestly at zero.
+        for category in KNOWN_CATEGORIES:
+            if category != "project":
+                assert f"{category}: 0" in breakdown_texts
+
+    def test_memory_category_breakdown_order_matches_known_categories_not_sorted_by_count(
+        self, root: tk.Tk
+    ) -> None:
+        from memory.memory_models import KNOWN_CATEGORIES
+
+        read_model, memory, _, _, _, _, _ = _make_real_stack()
+        # Give the LAST known category the highest count, to prove the
+        # rendered order is never resorted by count.
+        for _ in range(5):
+            memory.save("x", category=KNOWN_CATEGORIES[-1])
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._memory_breakdown_labels
+        ]
+        rendered_categories = [text.split(":")[0] for text in breakdown_texts]
+        assert rendered_categories == list(KNOWN_CATEGORIES)
+
+    def test_memory_category_breakdown_empty_store_shows_every_category_at_zero(
+        self, root: tk.Tk
+    ) -> None:
+        from memory.memory_models import KNOWN_CATEGORIES
+
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._memory_breakdown_labels
+        ]
+        for category in KNOWN_CATEGORIES:
+            assert f"{category}: 0" in breakdown_texts
+        assert app._memory_breakdown_error_var.get() == ""
 
     def test_workflow_selection_loads_transitions(self, root: tk.Tk) -> None:
         read_model, _, _, workflows, _, _, _ = _make_real_stack()

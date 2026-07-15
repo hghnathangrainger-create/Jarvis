@@ -1111,6 +1111,47 @@ No command box, no approve/deny/run/restore/delete/enable/disable control, no da
 
 ---
 
+## Phase 63 — Visible Jarvis Memories Tab V1 (complete)
+
+The Memories tab was the one dashboard tab Phase 62 didn't touch — no caption, no summary, just a category filter and a flat table. Phase 63 gives it the same honest, real-data-only treatment: a disclosure caption matching every other tab's own convention, a Category Breakdown panel, and a richer selected-memory detail pane — still read-only, still no new dependency. Delivered in two batches. See `docs/phase_63_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model foundation.** `MemoryManager` gained `count_by_category()`, a thin passthrough to `EpisodicMemoryStore.count_by_category()` — a real store method that already existed but was never exposed above the store layer. `dashboard/read_model.py` gained `MemoryCategoryCount` and `get_memory_category_breakdown()`, iterating `memory.memory_models.KNOWN_CATEGORIES` in its own fixed, declared order — including an honest zero for a category with no memories, and never sorted by count, so the breakdown can never imply one category matters more than another.
+- **Batch 2 — UI layer and closure.** `ui/dashboard_app.py`'s Memories tab gained a read-only caption, a Category Breakdown panel (reusing the same destroy-and-rebuild label pattern Phase 62's Overview panels already established, with its own isolated error state), and an enhanced detail pane: selecting a memory now shows its id, category, and creation time alongside its full content, still using only fields already present on the already-fetched `MemoryRow` — never a second query.
+
+### The upgraded Memories tab
+
+```
+Durable memories Jarvis was explicitly asked to remember - read-only.
+Nothing here can be created, edited, deleted, re-categorized, or
+AI-summarized; use the CLI memory commands, each of which still
+requires approval for any change.
+
+Category Breakdown
+  general: 4
+  personal: 0
+  project: 2
+  preference: 0
+  note: 1
+
+Category: [All ▾]
+
+<ID>  <Category>  <Preview>              <Created At>
+...
+
+ID: 7  |  Category: project  |  Created: 2026-...
+<full memory content>
+```
+
+### Safety note: still read-only, still no new authority
+
+Nothing in Phase 63 adds a create/edit/delete/re-categorize control, a search box, or any interactive element beyond the pre-existing category filter — re-confirmed by the same structural test that walks every widget in the entire window and finds exactly one `Button` ("Refresh now") anywhere. `dashboard/read_model.py` and `ui/dashboard_app.py` still import no execution, approval, command-routing, AI, or tool-execution component. The Category Breakdown is a real, current count per category — never a score, a ranking, or an AI-generated insight.
+
+### What is deliberately NOT included in Phase 63
+
+No memory create/edit/delete/re-categorize control from the dashboard. No AI-generated memory summaries or insights. No importance, relevance, or priority score. No dashboard search box (the CLI's `search memories for <query>` already covers this; a dashboard equivalent remains a distinct, separately-evaluated future decision). No pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, `SecurityManager`, or approval behavior change. No other dashboard tab changed.
+
+---
+
 ## Example Session
 
 ```
