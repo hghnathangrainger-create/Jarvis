@@ -9,8 +9,9 @@ Responsibilities:
     - Update a history row to "expired" when its approval window elapses
       unanswered (Phase 6, Batch 3), via record_timeout - never via
       record_decision, so a timeout is never mistaken for a decline.
-    - Query history: most recent, most recent N, filtered by status, or a
-      single entry by request id.
+    - Query history: most recent, most recent N, filtered by status, a
+      single entry by request id, or a true, unbounded total count for
+      one status (count_by_status, Phase 64, Batch 1).
 
 Does NOT:
     - Store a tool_name or tool_input anywhere. The underlying table has no
@@ -41,6 +42,18 @@ from storage.database import session_scope
 from storage.models import ApprovalHistoryEntry
 
 _MAX_LIMIT = 50
+
+#: The fixed, known approval history statuses (Phase 64, Batch 1) - the
+#: exact vocabulary record_request()/record_decision()/record_timeout()
+#: ever assign. Used by the dashboard's status breakdown to report an
+#: honest count for every known status, including one with zero
+#: entries, in a fixed, declared order - never sorted by count.
+KNOWN_APPROVAL_STATUSES: tuple[str, ...] = (
+    "pending",
+    "approved",
+    "declined",
+    "expired",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +285,29 @@ class ApprovalHistoryStore:
                 .all()
             )
             return [self._to_record(row) for row in rows]
+
+    def count_by_status(self, status: str) -> int:
+        """Return the total number of history entries with the given status.
+
+        A plain, unbounded COUNT - unlike list_by_status(), this is
+        never clamped to _MAX_LIMIT, so it always reports the real,
+        true total (Phase 64, Batch 1).
+
+        Args:
+            status: One of "pending", "approved", "declined", "expired"
+                (see KNOWN_APPROVAL_STATUSES). An unrecognised status
+                simply counts zero matching rows - this method performs
+                no normalisation or validation of its own.
+
+        Returns:
+            The total count of history entries with that exact status.
+        """
+        with session_scope(self._session_factory) as db:
+            return (
+                db.query(ApprovalHistoryEntry)
+                .filter(ApprovalHistoryEntry.status == status)
+                .count()
+            )
 
     def get(self, request_id: str) -> ApprovalHistoryRecord | None:
         """Return a single history entry by its request id.

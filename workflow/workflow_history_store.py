@@ -51,6 +51,22 @@ from storage.models import WorkflowHistoryEntry
 
 _MAX_LIMIT = 50
 
+#: The fixed, known workflow lifecycle transition names (Phase 64,
+#: Batch 1) - WorkflowEngine's own seven existing event names, exactly
+#: as named in this module's own docstring above. Used by the
+#: dashboard's status breakdown to report an honest count for every
+#: known status, including one with zero entries, in a fixed, declared
+#: order - never sorted by count.
+KNOWN_WORKFLOW_STATUSES: tuple[str, ...] = (
+    "workflow_started",
+    "workflow_step_started",
+    "workflow_step_completed",
+    "workflow_step_waiting",
+    "workflow_step_failed",
+    "workflow_completed",
+    "workflow_stopped",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class WorkflowHistoryRecord:

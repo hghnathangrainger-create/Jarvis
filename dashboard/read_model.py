@@ -62,6 +62,18 @@ Does NOT:
       memory.memory_models.KNOWN_CATEGORIES's own fixed, declared order
       - never reordered by count - so the display can never imply a
       category is more "important" than another.
+    - Sort, rank, or score approval/workflow statuses by their own
+      counts (Phase 64, Batch 1): get_approval_status_breakdown() and
+      get_workflow_status_breakdown() always return statuses in
+      KNOWN_APPROVAL_STATUSES's/KNOWN_WORKFLOW_STATUSES's own fixed,
+      declared order - never reordered by count. The approval breakdown
+      is a true, unbounded, all-time total per status
+      (ApprovalHistoryStore.count_by_status()); the workflow breakdown
+      is honestly scoped to only the most recently active workflows
+      already returned by get_recent_workflows() - it is never
+      presented, or claimed, as an all-time total, since no all-time
+      per-status aggregation exists for workflows (a workflow's
+      "status" is its own latest transition, not a fixed column).
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -69,12 +81,16 @@ the UI never imports a store directly.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from approval.approval_history_store import ApprovalHistoryStore
+from approval.approval_history_store import (
+    KNOWN_APPROVAL_STATUSES,
+    ApprovalHistoryStore,
+)
 from config.settings import Settings
 from inbox.inbox_store import InboxStore
 from memory.memory_manager import MemoryManager
@@ -82,7 +98,10 @@ from memory.memory_models import KNOWN_CATEGORIES
 from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from scheduling.scheduled_summary_runner import SCHEDULED_SOURCE_TYPE
-from workflow.workflow_history_store import WorkflowHistoryStore
+from workflow.workflow_history_store import (
+    KNOWN_WORKFLOW_STATUSES,
+    WorkflowHistoryStore,
+)
 
 #: Maximum length of a memory content preview shown in list views. Full,
 #: untruncated content is still carried on MemoryRow.full_content, for an
@@ -196,6 +215,14 @@ class ApprovalRow:
         decided_at: UTC-in-substance timestamp the request was decided or
             timed out, or None while its history row is still "pending".
         decided_by: Who or what decided it ("user", "timeout"), or None.
+        reason: The human-readable explanation of why approval was
+            needed, exactly as recorded at request time (Phase 64,
+            Batch 1). Defaults to "" only for backward compatibility
+            with call sites predating this field - get_recent_approvals()
+            always populates it from the real, already-fetched record.
+        decision_reason: An optional explanation supplied with the
+            decision, or None if none was given or the request is still
+            "pending" (Phase 64, Batch 1).
     """
 
     request_id: str
@@ -205,6 +232,31 @@ class ApprovalRow:
     created_at: datetime
     decided_at: datetime | None
     decided_by: str | None
+    reason: str = ""
+    decision_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalStatusCount:
+    """One known approval-history status's real, all-time count (Phase
+    64, Batch 1).
+
+    Produced only by calling ApprovalHistoryStore.count_by_status() -
+    never a fabricated, estimated, or inferred value, and never a
+    ranking: get_approval_status_breakdown() always returns these in
+    approval.approval_history_store.KNOWN_APPROVAL_STATUSES's own fixed
+    order, never sorted by count, so nothing here implies one status is
+    more significant than another.
+
+    Attributes:
+        status: The known status name (one of KNOWN_APPROVAL_STATUSES).
+        count: The real, current, all-time number of approval history
+            entries with this exact status - zero is a valid, honestly
+            reported value, never omitted.
+    """
+
+    status: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +278,12 @@ class WorkflowTransitionRow:
         tool_name: The step's tool name, or None.
         detail: Optional short, content-free human-readable text.
         created_at: UTC-in-substance timestamp of this transition.
+        approval_request_id: The correlated approval request id, set
+            only for a "workflow_step_waiting" row (Phase 64, Batch 1) -
+            None otherwise. Defaults to None only for backward
+            compatibility with call sites predating this field;
+            get_workflow_transitions() always populates it from the
+            real, already-fetched record.
     """
 
     status: str
@@ -234,6 +292,34 @@ class WorkflowTransitionRow:
     tool_name: str | None
     detail: str | None
     created_at: datetime
+    approval_request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowStatusCount:
+    """One known workflow lifecycle status's count among the most
+    recently active workflows (Phase 64, Batch 1).
+
+    Honestly scoped: this is a tally of get_recent_workflows()'s own
+    already-fetched WorkflowRow.latest_status values - never an
+    all-time total across every workflow ever, since no all-time
+    per-status aggregation exists for workflows (a workflow's "status"
+    is its own latest transition, not a fixed column that could be
+    counted directly). get_workflow_status_breakdown() always returns
+    these in workflow.workflow_history_store.KNOWN_WORKFLOW_STATUSES's
+    own fixed order, never sorted by count.
+
+    Attributes:
+        status: The known lifecycle transition name (one of
+            KNOWN_WORKFLOW_STATUSES).
+        count: How many of the most recently active workflows
+            (get_recent_workflows()'s own result) currently have this
+            status as their latest recorded transition - zero is a
+            valid, honestly reported value, never omitted.
+    """
+
+    status: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,9 +760,36 @@ class DashboardReadModel:
                 created_at=record.created_at,
                 decided_at=record.decided_at,
                 decided_by=record.decided_by,
+                reason=record.reason,
+                decision_reason=record.decision_reason,
             )
             for record in records
         ]
+
+    def get_approval_status_breakdown(self) -> tuple[ApprovalStatusCount, ...]:
+        """Return a real, all-time approval-history count for every
+        known status (Phase 64, Batch 1).
+
+        Each count comes from one call to
+        ApprovalHistoryStore.count_by_status() - a true, unbounded
+        total, never a fabricated, estimated, or inferred value. Every
+        status in KNOWN_APPROVAL_STATUSES is included, even one with
+        zero entries - an honest zero is reported, never omitted.
+        Statuses are returned in KNOWN_APPROVAL_STATUSES's own fixed,
+        declared order - never sorted by count - so nothing here
+        implies one status is more significant than another.
+
+        Returns:
+            A tuple of ApprovalStatusCount, one per known status, in
+            KNOWN_APPROVAL_STATUSES's own fixed order.
+        """
+        return tuple(
+            ApprovalStatusCount(
+                status=status,
+                count=self._approvals.count_by_status(status),
+            )
+            for status in KNOWN_APPROVAL_STATUSES
+        )
 
     def get_recent_workflows(self, limit: int = 10) -> list[WorkflowRow]:
         """Return the most recently active distinct workflows as WorkflowRows.
@@ -710,6 +823,44 @@ class DashboardReadModel:
             )
         return rows
 
+    def get_workflow_status_breakdown(
+        self, limit: int = 10
+    ) -> tuple[WorkflowStatusCount, ...]:
+        """Return a count, per known lifecycle status, of the most
+        recently active workflows' current status (Phase 64, Batch 1).
+
+        Honestly scoped to recent activity, never presented as an
+        all-time total: this tallies get_recent_workflows()'s own
+        already-fetched WorkflowRow.latest_status values - the exact
+        same "most recently active" data the Workflow History tab
+        already shows, never a new or wider query. No all-time
+        per-status total exists for workflows, since a workflow's
+        "status" is its own latest transition, not a fixed column that
+        could be counted directly the way an approval's status can.
+
+        Every status in KNOWN_WORKFLOW_STATUSES is included, even one
+        with zero matches among the recently active workflows
+        considered - an honest zero is reported, never omitted.
+        Statuses are returned in KNOWN_WORKFLOW_STATUSES's own fixed,
+        declared order - never sorted by count.
+
+        Args:
+            limit: Maximum number of most-recently-active workflows to
+                consider - passed straight through to
+                get_recent_workflows(). Defaults to the same value
+                get_recent_workflows() itself defaults to.
+
+        Returns:
+            A tuple of WorkflowStatusCount, one per known status, in
+            KNOWN_WORKFLOW_STATUSES's own fixed order.
+        """
+        recent = self.get_recent_workflows(limit=limit)
+        tally = Counter(row.latest_status for row in recent)
+        return tuple(
+            WorkflowStatusCount(status=status, count=tally.get(status, 0))
+            for status in KNOWN_WORKFLOW_STATUSES
+        )
+
     def get_workflow_transitions(
         self, workflow_id: str, limit: int = 50
     ) -> list[WorkflowTransitionRow]:
@@ -732,6 +883,7 @@ class DashboardReadModel:
                 tool_name=record.tool_name,
                 detail=record.detail,
                 created_at=record.created_at,
+                approval_request_id=record.approval_request_id,
             )
             for record in records
         ]

@@ -298,6 +298,62 @@ def test_list_by_status_unknown_status_matches_nothing(
     assert store.list_by_status("not-a-real-status") == []
 
 
+# --- count_by_status (Phase 64, Batch 1) --------------------------------------
+
+
+def test_count_by_status_returns_real_count(store: ApprovalHistoryStore) -> None:
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    store.record_request(
+        request_id="req-2", action="b", reason="r", security_tier="yellow"
+    )
+    store.record_decision(
+        request_id="req-1",
+        approved=True,
+        decided_by="user",
+        decided_at=datetime.now(timezone.utc),
+    )
+    assert store.count_by_status("approved") == 1
+    assert store.count_by_status("pending") == 1
+
+
+def test_count_by_status_returns_zero_for_unused_status(
+    store: ApprovalHistoryStore,
+) -> None:
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    assert store.count_by_status("declined") == 0
+    assert store.count_by_status("expired") == 0
+
+
+def test_count_by_status_is_a_true_unbounded_total(
+    store: ApprovalHistoryStore,
+) -> None:
+    """Unlike list_by_status(), count_by_status() is never clamped to
+    _MAX_LIMIT - it always reports the real total, even above 50."""
+    for i in range(55):
+        store.record_request(
+            request_id=f"req-{i}", action="a", reason="r", security_tier="yellow"
+        )
+    assert store.count_by_status("pending") == 55
+
+
+def test_count_by_status_does_not_mutate_any_row(
+    store: ApprovalHistoryStore,
+) -> None:
+    store.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    before = store.get("req-1")
+
+    store.count_by_status("pending")
+
+    after = store.get("req-1")
+    assert before == after
+
+
 # --- get ---------------------------------------------------------------------
 
 

@@ -362,6 +362,137 @@ def test_recent_approvals_empty_store_returns_empty_list(rm) -> None:
     assert read_model.get_recent_approvals() == []
 
 
+def test_approval_row_reason_maps_from_real_record(rm) -> None:
+    read_model, _, approvals, _, _, _, _ = rm
+    approvals.record_request(
+        request_id="req-1",
+        action="forget memory",
+        reason="Forgetting a memory removes it and must be confirmed.",
+        security_tier="yellow",
+    )
+
+    row = read_model.get_recent_approvals()[0]
+    assert row.reason == "Forgetting a memory removes it and must be confirmed."
+
+
+def test_approval_row_decision_reason_is_none_while_pending(rm) -> None:
+    read_model, _, approvals, _, _, _, _ = rm
+    approvals.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+
+    row = read_model.get_recent_approvals()[0]
+    assert row.decision_reason is None
+
+
+def test_approval_row_decision_reason_maps_from_real_decision(rm) -> None:
+    from datetime import datetime, timezone
+
+    read_model, _, approvals, _, _, _, _ = rm
+    approvals.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    approvals.record_decision(
+        request_id="req-1",
+        approved=True,
+        decided_by="user",
+        decided_at=datetime.now(timezone.utc),
+        reason="looks safe",
+    )
+
+    row = read_model.get_recent_approvals()[0]
+    assert row.decision_reason == "looks safe"
+
+
+# --- get_approval_status_breakdown (Phase 64, Batch 1) -----------------------
+
+
+def test_approval_status_breakdown_includes_all_known_statuses(rm) -> None:
+    from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_approval_status_breakdown()
+
+    assert [row.status for row in breakdown] == list(KNOWN_APPROVAL_STATUSES)
+
+
+def test_approval_status_breakdown_reports_real_counts(rm) -> None:
+    from datetime import datetime, timezone
+
+    read_model, _, approvals, _, _, _, _ = rm
+    approvals.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    approvals.record_request(
+        request_id="req-2", action="b", reason="r", security_tier="yellow"
+    )
+    approvals.record_decision(
+        request_id="req-1",
+        approved=True,
+        decided_by="user",
+        decided_at=datetime.now(timezone.utc),
+    )
+
+    breakdown = {row.status: row.count for row in read_model.get_approval_status_breakdown()}
+    assert breakdown["approved"] == 1
+    assert breakdown["pending"] == 1
+    assert breakdown["declined"] == 0
+    assert breakdown["expired"] == 0
+
+
+def test_approval_status_breakdown_empty_store_shows_every_status_at_zero(
+    rm,
+) -> None:
+    from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_approval_status_breakdown()
+
+    assert len(breakdown) == len(KNOWN_APPROVAL_STATUSES)
+    assert all(row.count == 0 for row in breakdown)
+
+
+def test_approval_status_breakdown_preserves_known_order_not_sorted_by_count(
+    rm,
+) -> None:
+    """Statuses must never be reordered by count - this would visually
+    imply significance the data does not actually carry."""
+    from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+    read_model, _, approvals, _, _, _, _ = rm
+    # Give the LAST known status the highest count, to prove sorting by
+    # count is never applied.
+    last_status = KNOWN_APPROVAL_STATUSES[-1]
+    for i in range(5):
+        approvals.record_request(
+            request_id=f"req-{i}", action="a", reason="r", security_tier="yellow"
+        )
+        if last_status == "expired":
+            from datetime import datetime, timezone
+
+            approvals.record_timeout(
+                request_id=f"req-{i}", timed_out_at=datetime.now(timezone.utc)
+            )
+
+    breakdown = read_model.get_approval_status_breakdown()
+    assert [row.status for row in breakdown] == list(KNOWN_APPROVAL_STATUSES)
+
+
+def test_approval_status_breakdown_does_not_mutate_state(rm) -> None:
+    read_model, _, approvals, _, _, _, _ = rm
+    approvals.record_request(
+        request_id="req-1", action="a", reason="r", security_tier="yellow"
+    )
+    before = approvals.get("req-1")
+
+    read_model.get_approval_status_breakdown()
+
+    after = approvals.get("req-1")
+    assert before == after
+
+
 # --- get_recent_workflows / get_workflow_transitions --------------------------
 
 
@@ -431,6 +562,117 @@ def test_workflow_transitions_unknown_id_returns_empty_list(rm) -> None:
 def test_recent_workflows_empty_store_returns_empty_list(rm) -> None:
     read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_workflows() == []
+
+
+def test_workflow_transition_row_approval_request_id_maps_when_present(rm) -> None:
+    read_model, _, _, workflows, _, _, _ = rm
+    workflows.record_transition(
+        workflow_id="wf-1",
+        status="workflow_step_waiting",
+        approval_request_id="req-1",
+    )
+
+    row = read_model.get_workflow_transitions("wf-1")[0]
+    assert row.approval_request_id == "req-1"
+
+
+def test_workflow_transition_row_approval_request_id_is_none_when_absent(rm) -> None:
+    read_model, _, _, workflows, _, _, _ = rm
+    workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+
+    row = read_model.get_workflow_transitions("wf-1")[0]
+    assert row.approval_request_id is None
+
+
+# --- get_workflow_status_breakdown (Phase 64, Batch 1) ------------------------
+
+
+def test_workflow_status_breakdown_includes_all_known_statuses(rm) -> None:
+    from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_workflow_status_breakdown()
+
+    assert [row.status for row in breakdown] == list(KNOWN_WORKFLOW_STATUSES)
+
+
+def test_workflow_status_breakdown_reports_real_counts_among_recent_workflows(
+    rm,
+) -> None:
+    read_model, _, _, workflows, _, _, _ = rm
+    workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+    workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
+    workflows.record_transition(workflow_id="wf-2", status="workflow_started")
+
+    breakdown = {
+        row.status: row.count for row in read_model.get_workflow_status_breakdown()
+    }
+    assert breakdown["workflow_completed"] == 1
+    assert breakdown["workflow_started"] == 1
+    assert breakdown["workflow_stopped"] == 0
+
+
+def test_workflow_status_breakdown_empty_store_shows_every_status_at_zero(
+    rm,
+) -> None:
+    from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_workflow_status_breakdown()
+
+    assert len(breakdown) == len(KNOWN_WORKFLOW_STATUSES)
+    assert all(row.count == 0 for row in breakdown)
+
+
+def test_workflow_status_breakdown_preserves_known_order_not_sorted_by_count(
+    rm,
+) -> None:
+    from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+    read_model, _, _, workflows, _, _, _ = rm
+    # Give the LAST known status the highest count, to prove sorting by
+    # count is never applied.
+    last_status = KNOWN_WORKFLOW_STATUSES[-1]
+    for i in range(5):
+        workflows.record_transition(workflow_id=f"wf-{i}", status=last_status)
+
+    breakdown = read_model.get_workflow_status_breakdown()
+    assert [row.status for row in breakdown] == list(KNOWN_WORKFLOW_STATUSES)
+
+
+def test_workflow_status_breakdown_is_scoped_to_recently_active_workflows_only(
+    rm,
+) -> None:
+    """Honestly scoped: only the workflows get_recent_workflows(limit=...)
+    would itself return are tallied - this is never an all-time total
+    across every workflow ever recorded."""
+    read_model, _, _, workflows, _, _, _ = rm
+    for i in range(15):
+        workflows.record_transition(workflow_id=f"wf-{i}", status="workflow_started")
+
+    breakdown_default = {
+        row.status: row.count for row in read_model.get_workflow_status_breakdown()
+    }
+    breakdown_limit_3 = {
+        row.status: row.count
+        for row in read_model.get_workflow_status_breakdown(limit=3)
+    }
+    # Default limit mirrors get_recent_workflows()'s own default (10).
+    assert breakdown_default["workflow_started"] == 10
+    assert breakdown_limit_3["workflow_started"] == 3
+
+
+def test_workflow_status_breakdown_does_not_mutate_state(rm) -> None:
+    read_model, _, _, workflows, _, _, _ = rm
+    workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+    before = workflows.latest_status_for("wf-1")
+
+    read_model.get_workflow_status_breakdown()
+
+    after = workflows.latest_status_for("wf-1")
+    assert before == after
 
 
 # --- get_overview --------------------------------------------------------------
