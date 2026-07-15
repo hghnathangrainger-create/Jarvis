@@ -1,8 +1,9 @@
 """
 test_memory_command_routing.py
 
-Unit tests for routing the six memory commands through the orchestrator
-(Phase 5, Batch 2).
+Unit tests for routing the memory commands through the orchestrator
+(Phase 5, Batch 2; extended Phase 71, Batch 1 with the read-only
+category-breakdown command).
 
 These confirm that each command shape maps to the correct memory-tool input
 (operation, category, query), that an unknown category is left for the tool to
@@ -81,6 +82,10 @@ class _FakeMemory:
             rows = [r for r in rows if r.category == cat]
         return rows[:limit]
 
+    def count_by_category(self, category: str) -> int:
+        cat = normalize_category(category)
+        return sum(1 for record in self.data if record.category == cat)
+
 
 @pytest.fixture()
 def memory() -> _FakeMemory:
@@ -150,6 +155,25 @@ def test_search_memories_in_category_routes_to_filtered_search() -> None:
     }
 
 
+def test_show_memory_categories_routes_to_categories() -> None:
+    result = CommandRouter._build_memory_input("show memory categories")
+    assert result == {"operation": "categories"}
+
+
+def test_list_memory_categories_routes_to_categories() -> None:
+    result = CommandRouter._build_memory_input("list memory categories")
+    assert result == {"operation": "categories"}
+
+
+def test_show_memory_id_still_routes_to_get_not_categories() -> None:
+    """Phase 71, Batch 1 regression guard: "show memory categories" must
+    not accidentally swallow the pre-existing "show memory <id>" shape,
+    or vice versa - both start with "show memory", so the categories
+    check must be specific to the word "categor" appearing too."""
+    result = CommandRouter._build_memory_input("show memory 3")
+    assert result == {"operation": "get", "memory_id": 3}
+
+
 # --- Every command is GREEN (no approval) ------------------------------------
 
 
@@ -162,6 +186,8 @@ def test_search_memories_in_category_routes_to_filtered_search() -> None:
         "show memories in personal",
         "search memories for milk",
         "search memories in project for deadline",
+        "show memory categories",
+        "list memory categories",
     ],
 )
 def test_all_memory_commands_run_green(

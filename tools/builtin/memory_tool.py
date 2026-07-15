@@ -11,11 +11,20 @@ MemoryManager, adding no storage logic of its own, and it honours the
 "do not remember" rule enforced by the manager.
 
 Supported operations (via the 'operation' input):
-    - "list":   return the most recent memories, optionally filtered by category.
-    - "search": return memories matching the 'query' input, optionally filtered
-                by category.
-    - "save":   store the 'content' text the user explicitly asked to remember,
-                under an optional 'category' (defaulting to "general").
+    - "list":       return the most recent memories, optionally filtered by
+                    category.
+    - "search":     return memories matching the 'query' input, optionally
+                    filtered by category.
+    - "save":       store the 'content' text the user explicitly asked to
+                    remember, under an optional 'category' (defaulting to
+                    "general").
+    - "categories": return a real, honest count per known category (Phase
+                    71, Batch 1) - every category in
+                    memory.memory_models.KNOWN_CATEGORIES, including an
+                    honest zero for one with no memories, always in that
+                    fixed, declared order - never sorted by count, so
+                    nothing here implies one category is more important
+                    than another.
 
 Why "save" is GREEN:
     A manual save happens only when the user explicitly says "remember this".
@@ -29,6 +38,7 @@ from __future__ import annotations
 
 from memory.memory_manager import MemoryManager
 from memory.episodic_memory import MemoryRecord
+from memory.memory_models import KNOWN_CATEGORIES
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 
 _DEFAULT_LIMIT = 10
@@ -73,8 +83,12 @@ class MemoryTool(BaseTool):
 
         The action names what the operation actually does: "save memory" for a
         save, "search memories" for a search, and "list memories" for a list.
-        The Security Manager classifies all three as GREEN - a manual save is a
-        single, explicit, user-requested store, not a broad state change.
+        The Security Manager classifies all of these as GREEN - a manual save
+        is a single, explicit, user-requested store, not a broad state
+        change, and "show memory categories" (Phase 71, Batch 1) is a plain
+        read, classified GREEN via the same existing, unchanged generic
+        "show" rule "show system health"/"show configuration" already use -
+        no new Security Manager rule was needed or added for it.
 
         Args:
             request: The request being handled.
@@ -89,14 +103,18 @@ class MemoryTool(BaseTool):
             return "search memories"
         if operation == "get":
             return "show memory"
+        if operation == "categories":
+            return "show memory categories"
         return "list memories"
 
     def run(self, request: ToolRequest) -> ToolResult:
-        """Save, list, or search memories according to the requested operation.
+        """Save, list, search, or summarise-by-category memories according
+        to the requested operation.
 
         Args:
             request: The request. Recognised input keys:
-                operation: "list" (default), "search", or "save".
+                operation: "list" (default), "search", "save", "get", or
+                    "categories".
                 query: the search text, required when operation is "search".
                 content: the text to store, required when operation is "save".
                 category: optional category for save/list/search filtering.
@@ -126,6 +144,9 @@ class MemoryTool(BaseTool):
                 return self.fail(f"No memory found with id {memory_id}.")
             return self.ok(self._format_row(record))
 
+        if operation == "categories":
+            return self.ok(self._format_categories())
+
         if operation == "list":
             records = self._list_recent(limit=limit, category=category)
             header = "Recent memories"
@@ -147,7 +168,8 @@ class MemoryTool(BaseTool):
             return self.ok(self._format(records, header))
 
         return self.fail(
-            f"Unknown operation '{operation}'. Use 'list', 'search', or 'save'."
+            f"Unknown operation '{operation}'. Use 'list', 'search', 'save', "
+            "'get', or 'categories'."
         )
 
     def _run_save(
@@ -289,3 +311,28 @@ class MemoryTool(BaseTool):
         """
         created = record.created_at.isoformat(timespec="seconds")
         return f"[{record.id}] ({record.category}) {record.content} (created: {created})"
+
+    def _format_categories(self) -> str:
+        """Format a real, per-category memory count breakdown (Phase 71,
+        Batch 1).
+
+        Each count comes from one call to
+        MemoryManager.count_by_category() - never a fabricated,
+        estimated, or inferred value, and no AI involvement. Every
+        category in memory.memory_models.KNOWN_CATEGORIES is included,
+        even one with zero memories - an honest zero is reported, never
+        omitted. Categories are rendered in KNOWN_CATEGORIES's own
+        fixed, declared order - never sorted by count - so nothing here
+        implies one category is more important than another, mirroring
+        the dashboard's own established Category Breakdown panel
+        (Phase 63) exactly.
+
+        Returns:
+            A formatted, multi-line string: a header line followed by
+            one "<category>: <count>" line per known category.
+        """
+        lines = ["Memory categories:"]
+        for category in KNOWN_CATEGORIES:
+            count = self._memory.count_by_category(category)
+            lines.append(f"  {category}: {count}")
+        return "\n".join(lines)

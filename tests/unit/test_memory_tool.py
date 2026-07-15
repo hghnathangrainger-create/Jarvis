@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import pytest
 
 from memory.episodic_memory import MemoryRecord
-from memory.memory_models import normalize_category
+from memory.memory_models import KNOWN_CATEGORIES, normalize_category
 from security.security_manager import SecurityManager
 from tools.base_tool import ToolRequest
 from tools.builtin import MemoryTool
@@ -73,6 +73,10 @@ class _FakeMemory:
             cat = normalize_category(category)
             rows = [r for r in rows if r.category == cat]
         return rows[:limit]
+
+    def count_by_category(self, category: str) -> int:
+        cat = normalize_category(category)
+        return sum(1 for record in self.data if record.category == cat)
 
     def get(self, memory_id: int) -> MemoryRecord | None:
         for record in self.data:
@@ -263,3 +267,69 @@ def test_get_output_is_unknown_operation_free_of_regression(
     assert "(project)" in result.output
     assert "ship it" in result.output
     assert "(created:" in result.output
+
+
+# --- Category breakdown (Phase 71, Batch 1) -----------------------------------
+
+
+def test_categories_action_string_is_honest(tool: MemoryTool) -> None:
+    assert tool.action_for(_request(operation="categories")) == "show memory categories"
+
+
+def test_categories_classifies_green(tool: MemoryTool) -> None:
+    security = SecurityManager()
+    action = tool.action_for(_request(operation="categories"))
+    assert security.classify_action(action).tier.name == "GREEN"
+
+
+def test_categories_includes_every_known_category(tool: MemoryTool) -> None:
+    result = tool.run(_request(operation="categories"))
+    assert result.success is True
+    for category in KNOWN_CATEGORIES:
+        assert f"{category}:" in result.output
+
+
+def test_categories_empty_store_shows_every_category_at_zero(
+    tool: MemoryTool,
+) -> None:
+    result = tool.run(_request(operation="categories"))
+    for category in KNOWN_CATEGORIES:
+        assert f"{category}: 0" in result.output
+
+
+def test_categories_reports_real_counts(tool: MemoryTool) -> None:
+    tool.run(_request(operation="save", content="a", category="project"))
+    tool.run(_request(operation="save", content="b", category="project"))
+    tool.run(_request(operation="save", content="c", category="personal"))
+    result = tool.run(_request(operation="categories"))
+    assert "project: 2" in result.output
+    assert "personal: 1" in result.output
+    assert "general: 0" in result.output
+
+
+def test_categories_preserves_known_order_not_sorted_by_count(
+    tool: MemoryTool,
+) -> None:
+    """Categories must never be reordered by count - this would visually
+    imply a ranking/importance the data does not actually carry."""
+    last_category = KNOWN_CATEGORIES[-1]
+    for _ in range(5):
+        tool.run(_request(operation="save", content="x", category=last_category))
+    result = tool.run(_request(operation="categories"))
+
+    lines = [
+        line.strip().split(":")[0]
+        for line in result.output.splitlines()[1:]
+        if line.strip()
+    ]
+    assert lines == list(KNOWN_CATEGORIES)
+
+
+def test_categories_does_not_involve_ai_or_estimation(tool: MemoryTool) -> None:
+    """Structural sanity check: the categories output never resembles an
+    AI disclaimer/advisory marker, since count_by_category() is a plain,
+    deterministic count with no AI involvement."""
+    result = tool.run(_request(operation="categories"))
+    assert "[AI suggestion" not in result.output
+    assert "advisory only" not in result.output.lower()
+    assert "estimate" not in result.output.lower()

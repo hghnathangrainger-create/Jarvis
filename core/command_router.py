@@ -1910,13 +1910,14 @@ class CommandRouter:
     def _build_memory_input(cls, text: str) -> dict[str, object]:
         """Parse a memory command into a memory-tool input dictionary.
 
-        Six command shapes are recognised (case-insensitively):
+        Seven command shapes are recognised (case-insensitively):
             remember this: <text>                     -> save (general)
             remember this as <category>: <text>       -> save (<category>)
             show memories                             -> list
             show memories in <category>               -> list (<category>)
             search memories for <query>               -> search
             search memories in <category> for <query> -> search (<category>)
+            show memory categories / list memory categories -> categories
 
         Anything unrecognised falls back to a plain list, so the command is
         always safe and read-only by default.
@@ -1929,6 +1930,19 @@ class CommandRouter:
         """
         stripped = text.strip()
         lowered = stripped.casefold()
+
+        # --- Category breakdown: "show memory categories" / "list memory
+        # categories" (Phase 71, Batch 1). Checked first, before the "show
+        # memory <id>" branch below, since "show memory categories" would
+        # otherwise start matching that branch's own prefix check (it starts
+        # with "show memory") and silently fall through to a plain list,
+        # quietly ignoring the word "categories" entirely.
+        if (
+            ("show" in lowered or "list" in lowered)
+            and "categor" in lowered
+            and "memor" in lowered
+        ):
+            return {"operation": "categories"}
 
         # --- Show one by id: "show memory <id>" ---
         if lowered.startswith("show memory") or lowered.startswith("view memory"):

@@ -873,6 +873,27 @@ def test_build_input_memory_get_by_id(router: CommandRouter) -> None:
     }
 
 
+def test_build_input_memory_categories(router: CommandRouter) -> None:
+    assert router.build_input("memory", "show memory categories") == {
+        "operation": "categories"
+    }
+
+
+def test_build_input_memory_categories_list_alias(router: CommandRouter) -> None:
+    assert router.build_input("memory", "list memory categories") == {
+        "operation": "categories"
+    }
+
+
+def test_match_show_memory_categories_routes_to_memory_tool(
+    router: CommandRouter,
+) -> None:
+    """Phase 71, Batch 1: proves the new command reaches the memory tool
+    the same way every other memory command already does - no new tool
+    registration was needed."""
+    assert router.match("show memory categories") == "memory"
+
+
 def test_build_input_memory_search(router: CommandRouter) -> None:
     assert router.build_input("memory", "search memories for milk") == {
         "operation": "search",
