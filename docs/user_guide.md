@@ -42,7 +42,7 @@ poetry install
 poetry run python main.py
 ```
 
-On startup you'll see `Jarvis Online.`, a short usage reminder, and — if any new scheduled Inbox entries exist since you last checked — a one-line notice (see §8). Type a request at the `you>` prompt. Type `exit`, `quit`, or `bye` to leave (case-insensitive).
+On startup you'll see `Jarvis Online.`, a short usage reminder (including a reminder that `help` lists available commands), and — if any new scheduled Inbox entries exist since you last checked — a one-line notice (see §8). Type a request at the `you>` prompt. Type `exit`, `quit`, or `bye` to leave (case-insensitive).
 
 **Environment variables** (set in a `.env` file in the project root):
 

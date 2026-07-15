@@ -375,6 +375,24 @@ def test_banner_warns_against_typing_prompt(
     assert "you>" in banner
 
 
+def test_banner_tells_the_user_help_exists(
+    orchestrator: JarvisOrchestrator,
+) -> None:
+    """Phase 69: the startup banner must tell a new user the 'help'
+    command exists - previously HelpTool (Phase 43) was accurate but
+    undiscoverable, since nothing at startup ever mentioned it."""
+    scripted = iter(["exit"])
+    outputs: list[str] = []
+    cli = JarvisCLI(
+        orchestrator,
+        input_fn=lambda _prompt: next(scripted),
+        output_fn=outputs.append,
+    )
+    cli.run()
+    banner = "\n".join(outputs)
+    assert "Type 'help' to see available commands." in banner
+
+
 # --- Startup notice (Phase 22, Batch 1) ---------------------------------------
 
 

@@ -1340,7 +1340,7 @@ poetry install
 poetry run python main.py
 ```
 
-On startup Jarvis prints `Jarvis Online.` Type your request, or `exit`, `quit`, or `bye` to leave.
+On startup Jarvis prints `Jarvis Online.`, a short usage reminder including a hint that `help` lists available commands, and then waits for a request. Type your request, or `exit`, `quit`, or `bye` to leave.
 
 To enable AI reasoning (optional, needs an API key and credits), set in your `.env`:
 

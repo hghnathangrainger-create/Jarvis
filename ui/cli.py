@@ -455,12 +455,18 @@ class JarvisCLI:
 
     def _print_banner(self) -> None:
         """Print the startup banner, a short usage hint, and any
-        pre-built startup notice (Phase 22)."""
+        pre-built startup notice (Phase 22).
+
+        Phase 69: the usage hint now also tells the user the 'help'
+        command exists - previously HelpTool (Phase 43) was accurate but
+        undiscoverable, since nothing at startup ever mentioned it.
+        """
         self._output(STARTUP_BANNER)
         self._output(f"{APP_NAME} interactive CLI.")
         self._output("Type only your request after the prompt.")
         self._output("Do not type the 'you>' prompt text itself.")
         self._output("Type 'exit', 'quit', or 'bye' to leave.")
+        self._output("Type 'help' to see available commands.")
         self._output("")
         if self._startup_notice is not None:
             self._output(self._startup_notice)
