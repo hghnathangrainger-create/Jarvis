@@ -41,10 +41,13 @@ from dashboard.read_model import (
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
+    InboxRow,
+    InboxSourceTypeCount,
     MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
+    ScheduleStatusCount,
     StoreReachability,
     WorkflowRow,
     WorkflowStatusCount,
@@ -68,12 +71,15 @@ from ui.dashboard_app import (
     approval_status_breakdown_line,
     format_error_state,
     format_timestamp,
+    inbox_detail_text,
+    inbox_source_type_breakdown_line,
     memory_category_breakdown_line,
     memory_detail_text,
     memory_row_to_tree_values,
     approval_row_to_tree_values,
     overview_summary_lines,
     quarantine_row_to_tree_values,
+    schedule_enabled_breakdown_line,
     schedule_row_to_tree_values,
     store_reachability_line,
     system_status_lines,
@@ -262,6 +268,12 @@ class _RaisingReadModel:
     def get_workflow_status_breakdown(self, limit: int = 10):
         raise RuntimeError("simulated workflow status breakdown query failure")
 
+    def get_inbox_source_type_breakdown(self):
+        raise RuntimeError("simulated inbox source type breakdown query failure")
+
+    def get_schedule_enabled_breakdown(self, limit: int = 50):
+        raise RuntimeError("simulated schedule enabled breakdown query failure")
+
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
 
@@ -377,6 +389,88 @@ def test_approval_detail_text_includes_all_real_fields() -> None:
     assert "2026-01-01 00:00:00 UTC" in text
     assert "2026-01-01 00:05:00 UTC" in text
     assert "user" in text
+
+
+def test_inbox_source_type_breakdown_line_formats_real_count() -> None:
+    row = InboxSourceTypeCount(source_type="web_search_summary", count=3)
+    assert inbox_source_type_breakdown_line(row) == "web_search_summary: 3"
+
+
+def test_inbox_source_type_breakdown_line_formats_honest_zero() -> None:
+    row = InboxSourceTypeCount(source_type="webpage_summary", count=0)
+    assert inbox_source_type_breakdown_line(row) == "webpage_summary: 0"
+
+
+def test_schedule_enabled_breakdown_line_formats_enabled_count() -> None:
+    row = ScheduleStatusCount(enabled=True, count=2)
+    assert schedule_enabled_breakdown_line(row) == "enabled: 2"
+
+
+def test_schedule_enabled_breakdown_line_formats_disabled_honest_zero() -> None:
+    row = ScheduleStatusCount(enabled=False, count=0)
+    assert schedule_enabled_breakdown_line(row) == "disabled: 0"
+
+
+def test_inbox_detail_text_includes_all_real_fields() -> None:
+    row = InboxRow(
+        id=5,
+        source_query="jarvis news",
+        preview="A synthesis.",
+        full_body="[AI web search summary] A synthesis.",
+        included_count=4,
+        created_at=datetime(2026, 1, 1, 12, 0, 0),
+        source_type="web_search_summary",
+    )
+    text = inbox_detail_text(row)
+    assert "Source type: web_search_summary" in text
+    assert "Source query: jarvis news" in text
+    assert "2026-01-01 12:00:00 UTC" in text
+    assert "Included count: 4" in text
+    assert "[AI web search summary] A synthesis." in text
+
+
+def test_inbox_detail_text_shows_dash_for_missing_included_count() -> None:
+    row = InboxRow(
+        id=1,
+        source_query="q",
+        preview="b",
+        full_body="b",
+        included_count=None,
+        created_at=datetime(2026, 1, 1),
+        source_type="webpage_summary",
+    )
+    text = inbox_detail_text(row)
+    assert "Included count: —" in text
+
+
+def test_inbox_detail_text_shows_dash_for_missing_source_type() -> None:
+    """Backward compatibility: InboxRow.source_type defaults to "" for
+    any call site predating Phase 65 - the detail pane must render an
+    honest "—" rather than a blank or fabricated value."""
+    row = InboxRow(
+        id=1,
+        source_query="q",
+        preview="b",
+        full_body="b",
+        included_count=None,
+        created_at=datetime(2026, 1, 1),
+    )
+    text = inbox_detail_text(row)
+    assert "Source type: —" in text
+
+
+def test_inbox_detail_text_never_truncates_full_body() -> None:
+    long_body = "z" * 500
+    row = InboxRow(
+        id=1,
+        source_query="q",
+        preview=long_body[:120] + "...",
+        full_body=long_body,
+        included_count=None,
+        created_at=datetime(2026, 1, 1),
+        source_type="web_search_summary",
+    )
+    assert long_body in inbox_detail_text(row)
 
 
 def test_approval_detail_text_shows_placeholder_for_missing_decision_reason() -> None:
@@ -892,6 +986,14 @@ class TestDashboardAppWithRealTk:
             "Could not read workflow status breakdown"
             in app._workflow_breakdown_error_var.get()
         )
+        assert (
+            "Could not read inbox source breakdown"
+            in app._inbox_breakdown_error_var.get()
+        )
+        assert (
+            "Could not read schedule enabled/disabled breakdown"
+            in app._schedule_breakdown_error_var.get()
+        )
 
     def test_one_overview_panel_failure_does_not_blank_another(
         self, root: tk.Tk
@@ -1215,6 +1317,10 @@ class TestDashboardAppWithRealTk:
     def test_inbox_selection_populates_detail_pane_with_full_body(
         self, root: tk.Tk
     ) -> None:
+        """Phase 65, Batch 2 enhanced the detail pane from full-body-only
+        to also show source type/query/created/included count - this
+        assertion is updated to `in` (rather than `==`) as an intentional
+        part of this batch, not a regression."""
         read_model, _, _, _, inbox, _, _ = _make_real_stack()
         long_body = "z" * 200
         inbox.append(source_type="web_search_summary", source_query="q", body=long_body)
@@ -1222,7 +1328,7 @@ class TestDashboardAppWithRealTk:
         iid = app._inbox_tree.get_children()[0]
         app._inbox_tree.selection_set(iid)
         app._on_inbox_row_selected(None)
-        assert app._inbox_detail_var.get() == long_body
+        assert long_body in app._inbox_detail_var.get()
 
     def test_command_like_inbox_content_renders_literally(self, root: tk.Tk) -> None:
         read_model, _, _, _, inbox, _, _ = _make_real_stack()
@@ -1237,6 +1343,72 @@ class TestDashboardAppWithRealTk:
         values = app._inbox_tree.item(children[0], "values")
         assert values[1] == adversarial_text
         assert values[2] == adversarial_text
+
+    def test_inbox_source_breakdown_renders_all_known_source_types(
+        self, root: tk.Tk
+    ) -> None:
+        from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+        read_model, _, _, _, inbox, _, _ = _make_real_stack()
+        inbox.append(source_type="web_search_summary", source_query="q", body="b")
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._inbox_breakdown_labels
+        ]
+        assert len(breakdown_texts) == len(KNOWN_INBOX_SOURCE_TYPES)
+        assert "web_search_summary: 1" in breakdown_texts
+
+    def test_inbox_source_breakdown_empty_store_shows_every_type_at_zero(
+        self, root: tk.Tk
+    ) -> None:
+        from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._inbox_breakdown_labels
+        ]
+        for source_type in KNOWN_INBOX_SOURCE_TYPES:
+            assert f"{source_type}: 0" in breakdown_texts
+        assert app._inbox_breakdown_error_var.get() == ""
+
+    def test_inbox_source_breakdown_order_not_sorted_by_count(
+        self, root: tk.Tk
+    ) -> None:
+        from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+        read_model, _, _, _, inbox, _, _ = _make_real_stack()
+        last_source_type = KNOWN_INBOX_SOURCE_TYPES[-1]
+        for i in range(5):
+            inbox.append(source_type=last_source_type, source_query=f"q{i}", body="b")
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._inbox_breakdown_labels
+        ]
+        rendered_source_types = [text.split(":")[0] for text in breakdown_texts]
+        assert rendered_source_types == list(KNOWN_INBOX_SOURCE_TYPES)
+
+    def test_inbox_detail_pane_shows_source_type_and_included_count(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, _, _, _, inbox, _, _ = _make_real_stack()
+        inbox.append(
+            source_type="scheduled_web_search_summary",
+            source_query="jarvis news",
+            body="[AI web search summary] A synthesis.",
+            included_count=3,
+        )
+        app = _build_app(root, read_model)
+        iid = app._inbox_tree.get_children()[0]
+        app._inbox_tree.selection_set(iid)
+        app._on_inbox_row_selected(None)
+        detail = app._inbox_detail_var.get()
+        assert "Source type: scheduled_web_search_summary" in detail
+        assert "Source query: jarvis news" in detail
+        assert "Included count: 3" in detail
 
     def test_schedule_rows_render_real_data(self, root: tk.Tk) -> None:
         read_model, _, _, _, _, schedules, _ = _make_real_stack()
@@ -1291,6 +1463,49 @@ class TestDashboardAppWithRealTk:
         assert "read-only" in lowered
         assert "nothing here can be created, edited, enabled, disabled, or run now" in lowered
         assert "does not show whether a schedule is currently due" in lowered
+
+    def test_schedule_breakdown_renders_enabled_and_disabled_counts(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, _, _, _, _, schedules, _ = _make_real_stack()
+        enabled_one = schedules.create(query="a", time_of_day="08:00")
+        schedules.create(query="b", time_of_day="09:00")
+        schedules.disable(enabled_one.id)
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._schedule_breakdown_labels
+        ]
+        assert "enabled: 1" in breakdown_texts
+        assert "disabled: 1" in breakdown_texts
+
+    def test_schedule_breakdown_empty_store_shows_both_states_at_zero(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._schedule_breakdown_labels
+        ]
+        assert "enabled: 0" in breakdown_texts
+        assert "disabled: 0" in breakdown_texts
+        assert app._schedule_breakdown_error_var.get() == ""
+
+    def test_schedule_breakdown_order_not_sorted_by_count(self, root: tk.Tk) -> None:
+        """"enabled" must always render before "disabled" - even when
+        disabled schedules outnumber enabled ones."""
+        read_model, _, _, _, _, schedules, _ = _make_real_stack()
+        for i in range(5):
+            record = schedules.create(query=f"q{i}", time_of_day="08:00")
+            schedules.disable(record.id)
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._schedule_breakdown_labels
+        ]
+        rendered_states = [text.split(":")[0] for text in breakdown_texts]
+        assert rendered_states == ["enabled", "disabled"]
 
     def test_quarantine_rows_render_real_data(self, root: tk.Tk) -> None:
         read_model, _, _, _, _, _, quarantine = _make_real_stack()

@@ -4,7 +4,9 @@ dashboard_app.py
 tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
 (Phase 19; extended Phase 20, Batch 2 with the Inbox tab; extended Phase
 21, Batch 3 with the Schedules tab; extended Phase 39, Batch 2 with the
-Quarantine tab).
+Quarantine tab; extended Phase 65, Batch 2 with an Inbox Source
+Breakdown panel, an enhanced Inbox detail pane, and a Schedules
+Enabled/Disabled Breakdown panel).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
@@ -63,10 +65,12 @@ from dashboard.read_model import (
     DashboardReadModel,
     DashboardSystemStatus,
     InboxRow,
+    InboxSourceTypeCount,
     MemoryCategoryCount,
     MemoryRow,
     QuarantineRow,
     ScheduleRow,
+    ScheduleStatusCount,
     StoreReachability,
     WorkflowRow,
     WorkflowStatusCount,
@@ -525,6 +529,73 @@ def approval_detail_text(row: ApprovalRow) -> str:
     )
 
 
+def inbox_source_type_breakdown_line(row: InboxSourceTypeCount) -> str:
+    """Format one InboxSourceTypeCount as a single honest status line
+    (Phase 65, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    exactly what InboxStore.count_since() returned - a true, unbounded,
+    all-time total - including an honest zero for a source type with no
+    matching entries.
+
+    Args:
+        row: The inbox source type count view model to format.
+
+    Returns:
+        A single plain-text line naming the source type and its real count.
+    """
+    return f"{row.source_type}: {row.count}"
+
+
+def schedule_enabled_breakdown_line(row: ScheduleStatusCount) -> str:
+    """Format one ScheduleStatusCount as a single honest status line
+    (Phase 65, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    a tally of every configured schedule's own real `enabled` field,
+    including an honest zero for a state with no matching schedules.
+
+    Args:
+        row: The schedule enabled/disabled count view model to format.
+
+    Returns:
+        A single plain-text line naming the state ("enabled"/"disabled")
+        and its real count.
+    """
+    label = "enabled" if row.enabled else "disabled"
+    return f"{label}: {row.count}"
+
+
+def inbox_detail_text(row: InboxRow) -> str:
+    """Build the enhanced selected-inbox-entry detail text (Phase 65,
+    Batch 2).
+
+    Uses only fields already present on the already-fetched InboxRow -
+    never a new query, never a fabricated field. Replaces the previous
+    full-body-only detail pane with one that also shows the entry's
+    source type, source query, creation time, and included result
+    count, mirroring memory_detail_text's/approval_detail_text's own
+    established enhancement pattern.
+
+    Args:
+        row: The selected inbox entry row to describe.
+
+    Returns:
+        A short, multi-line, plain-text description followed by the
+        entry's full, untruncated body.
+    """
+    source_type = row.source_type if row.source_type else "—"
+    included_count = (
+        str(row.included_count) if row.included_count is not None else "—"
+    )
+    return (
+        f"Source type: {source_type}\n"
+        f"Source query: {row.source_query}\n"
+        f"Created: {format_timestamp(row.created_at)}\n"
+        f"Included count: {included_count}\n\n{row.full_body}"
+    )
+
+
 class DashboardApp:
     """The tkinter/ttk read-only dashboard window.
 
@@ -874,6 +945,19 @@ class DashboardApp:
         self._notebook.add(frame, text="Inbox")
 
         ttk.Label(frame, text=INBOX_CAPTION, wraplength=480).pack(anchor="w")
+
+        # --- Source Breakdown (Phase 65, Batch 2) ------------------------------
+        ttk.Label(
+            frame, text="Source Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._inbox_breakdown_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._inbox_breakdown_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._inbox_breakdown_frame = ttk.Frame(frame)
+        self._inbox_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._inbox_breakdown_labels: list[ttk.Label] = []
+
         self._inbox_error_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self._inbox_error_var, foreground="red").pack(
             anchor="w"
@@ -902,6 +986,19 @@ class DashboardApp:
         self._notebook.add(frame, text="Schedules")
 
         ttk.Label(frame, text=SCHEDULES_CAPTION, wraplength=480).pack(anchor="w")
+
+        # --- Enabled/Disabled Breakdown (Phase 65, Batch 2) ---------------------
+        ttk.Label(
+            frame, text="Enabled/Disabled Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._schedule_breakdown_error_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self._schedule_breakdown_error_var, foreground="red"
+        ).pack(anchor="w")
+        self._schedule_breakdown_frame = ttk.Frame(frame)
+        self._schedule_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._schedule_breakdown_labels: list[ttk.Label] = []
+
         self._schedules_error_var = tk.StringVar(value="")
         ttk.Label(
             frame, textvariable=self._schedules_error_var, foreground="red"
@@ -979,7 +1076,9 @@ class DashboardApp:
         self._refresh_approval_history()
         self._refresh_workflow_breakdown()
         self._refresh_workflow_history()
+        self._refresh_inbox_breakdown()
         self._refresh_inbox()
+        self._refresh_schedule_breakdown()
         self._refresh_schedules()
         self._refresh_quarantine()
         self._last_refreshed_var.set(
@@ -1192,6 +1291,24 @@ class DashboardApp:
                 "", "end", values=workflow_transition_row_to_tree_values(transition)
             )
 
+    def _refresh_inbox_breakdown(self) -> None:
+        """Refresh the Inbox Source Breakdown panel (Phase 65, Batch 2),
+        isolated from _refresh_inbox's own error state, mirroring this
+        module's established per-panel isolation convention."""
+        try:
+            rows = self._read_model.get_inbox_source_type_breakdown()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._inbox_breakdown_error_var.set(
+                format_error_state("inbox source breakdown", exc)
+            )
+            return
+        self._inbox_breakdown_error_var.set("")
+        self._inbox_breakdown_labels = self._render_label_lines(
+            self._inbox_breakdown_frame,
+            self._inbox_breakdown_labels,
+            [inbox_source_type_breakdown_line(row) for row in rows],
+        )
+
     def _refresh_inbox(self) -> None:
         try:
             rows = self._read_model.get_recent_inbox_entries()
@@ -1209,6 +1326,25 @@ class DashboardApp:
             iid = str(row.id)
             tree.insert("", "end", iid=iid, values=inbox_row_to_tree_values(row))
             self._inbox_rows_by_id[iid] = row
+
+    def _refresh_schedule_breakdown(self) -> None:
+        """Refresh the Schedules Enabled/Disabled Breakdown panel (Phase
+        65, Batch 2), isolated from _refresh_schedules's own error
+        state, mirroring this module's established per-panel isolation
+        convention."""
+        try:
+            rows = self._read_model.get_schedule_enabled_breakdown()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._schedule_breakdown_error_var.set(
+                format_error_state("schedule enabled/disabled breakdown", exc)
+            )
+            return
+        self._schedule_breakdown_error_var.set("")
+        self._schedule_breakdown_labels = self._render_label_lines(
+            self._schedule_breakdown_frame,
+            self._schedule_breakdown_labels,
+            [schedule_enabled_breakdown_line(row) for row in rows],
+        )
 
     def _refresh_schedules(self) -> None:
         try:
@@ -1306,10 +1442,14 @@ class DashboardApp:
         self._refresh_transitions_for_selected_workflow()
 
     def _on_inbox_row_selected(self, _event: object) -> None:
-        """Populate the detail pane with one inbox entry's full saved text.
+        """Populate the detail pane with one inbox entry's source type,
+        source query, creation time, included count, and full saved text
+        (Phase 65, Batch 2: enhanced from full-body-only).
 
-        Selecting a row only reads already-loaded local state - it never
-        triggers a database query, a tool call, or any external action.
+        Selecting a row only reads already-loaded local state (the same
+        InboxRow already fetched by the last _refresh_inbox() call) - it
+        never triggers a new database query, a tool call, or any
+        external action.
         """
         selection = self._inbox_tree.selection()
         if not selection:
@@ -1317,4 +1457,4 @@ class DashboardApp:
         row = self._inbox_rows_by_id.get(selection[0])
         if row is None:
             return
-        self._inbox_detail_var.set(row.full_body)
+        self._inbox_detail_var.set(inbox_detail_text(row))
