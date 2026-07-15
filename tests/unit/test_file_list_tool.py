@@ -135,7 +135,7 @@ def test_more_entries_than_limit_shows_exact_notice(
     tool: FileListTool, sample_dir: Path
 ) -> None:
     result = _run(tool, path=str(sample_dir), limit=2)
-    assert "[showing 2 of 4 entries; increase 'limit' to see more]" in result.output
+    assert "[showing 2 of 4 entries; more entries exist]" in result.output
 
 
 def test_exactly_limit_entries_shows_no_notice(
@@ -168,7 +168,7 @@ def test_truncation_notice_does_not_change_entry_order_or_labels(
     assert lines[0] == f"Contents of {sample_dir}:"
     assert lines[1] == "  [DIR] alpha_folder"
     assert lines[2] == "        apple.txt"
-    assert lines[3] == "[showing 2 of 4 entries; increase 'limit' to see more]"
+    assert lines[3] == "[showing 2 of 4 entries; more entries exist]"
 
 
 # --- Security ----------------------------------------------------------------

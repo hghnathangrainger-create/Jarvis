@@ -441,7 +441,7 @@ class FileSearchTool(BaseTool):
 
         if len(matches) >= limit:
             lines.append(
-                f"\n[showing up to {limit} results; more may exist - increase 'limit' to see more]"
+                f"\n[showing up to {limit} results; more may exist]"
             )
 
         return "\n".join(lines)

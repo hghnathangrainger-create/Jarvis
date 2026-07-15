@@ -186,6 +186,6 @@ class FileListTool(BaseTool):
         shown = len(entries)
         if total > shown:
             lines.append(
-                f"\n[showing {shown} of {total} entries; increase 'limit' to see more]"
+                f"\n[showing {shown} of {total} entries; more entries exist]"
             )
         return "\n".join(lines)

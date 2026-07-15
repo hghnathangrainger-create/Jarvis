@@ -178,6 +178,21 @@ def test_result_limit_clamps_output(tool: FileSearchTool, tmp_path: Path) -> Non
     assert "showing up to 3 results" in result.output
 
 
+def test_truncation_notice_uses_exact_neutral_wording(
+    tool: FileSearchTool, tmp_path: Path
+) -> None:
+    """Phase 77: the truncation notice must not claim a 'limit' CLI syntax
+    exists, since CommandRouter never exposes one - only the honest hedge
+    'more may exist' is kept, since this tool genuinely cannot know the
+    real total without a second, unbounded scan."""
+    for i in range(10):
+        (tmp_path / f"match_{i}.txt").write_text("content")
+    result = _run(tool, mode="name", query="match", path=str(tmp_path), limit=3)
+    assert "[showing up to 3 results; more may exist]" in result.output
+    assert "increase" not in result.output.lower()
+    assert "limit'" not in result.output.lower()
+
+
 def test_limit_clamps_below_one(tool: FileSearchTool, tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x")
     result = _run(tool, mode="name", query="a", path=str(tmp_path), limit=0)
