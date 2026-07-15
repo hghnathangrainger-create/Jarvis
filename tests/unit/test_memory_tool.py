@@ -74,6 +74,9 @@ class _FakeMemory:
             rows = [r for r in rows if r.category == cat]
         return rows[:limit]
 
+    def count(self) -> int:
+        return len(self.data)
+
     def count_by_category(self, category: str) -> int:
         cat = normalize_category(category)
         return sum(1 for record in self.data if record.category == cat)
@@ -218,6 +221,103 @@ def test_listing_shows_category(tool: MemoryTool) -> None:
     tool.run(_request(operation="save", content="note here", category="note"))
     result = tool.run(_request(operation="list"))
     assert "(note)" in result.output
+
+
+# --- List truncation honesty (Phase 75, Batch 1) -------------------------------
+
+
+def test_list_shows_exact_notice_when_more_memories_exist(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory {i}"))
+    result = tool.run(_request(operation="list", limit=3))
+    assert "[showing 3 of 5 memories; more memories exist]" in result.output
+
+
+def test_list_category_filtered_notice_uses_category_specific_total(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(4):
+        tool.run(_request(operation="save", content=f"p{i}", category="project"))
+    tool.run(_request(operation="save", content="g0", category="general"))
+    result = tool.run(
+        _request(operation="list", category="project", limit=2)
+    )
+    assert (
+        "[showing 2 of 4 memories in category 'project'; more memories exist]"
+        in result.output
+    )
+    # The notice must never use the global total (5), only the
+    # category-specific one (4).
+    assert "of 5 memories" not in result.output
+
+
+def test_list_no_notice_when_fewer_than_limit(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="only one"))
+    result = tool.run(_request(operation="list", limit=10))
+    assert "showing" not in result.output.lower()
+
+
+def test_list_no_notice_when_shown_equals_total(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(3):
+        tool.run(_request(operation="save", content=f"memory {i}"))
+    result = tool.run(_request(operation="list", limit=3))
+    assert "showing" not in result.output.lower()
+
+
+def test_list_empty_output_unchanged_by_batch_1(tool: MemoryTool) -> None:
+    result = tool.run(_request(operation="list"))
+    assert result.output == "Recent memories: none found."
+    assert "showing" not in result.output.lower()
+
+
+def test_list_notice_does_not_change_row_content_category_or_order(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    tool.run(_request(operation="save", content="first", category="project"))
+    tool.run(_request(operation="save", content="second", category="personal"))
+    tool.run(_request(operation="save", content="third", category="general"))
+    result = tool.run(_request(operation="list", limit=2))
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert lines[0] == "Recent memories:"
+    assert "third" in lines[1] and "(general)" in lines[1]
+    assert "second" in lines[2] and "(personal)" in lines[2]
+    assert lines[-1] == "[showing 2 of 3 memories; more memories exist]"
+
+
+def test_list_truncation_does_not_mutate_memories(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory {i}"))
+    before = list(memory.data)
+    tool.run(_request(operation="list", limit=2))
+    assert memory.data == before
+
+
+def test_save_get_categories_search_unaffected_by_list_notice(
+    tool: MemoryTool, memory: _FakeMemory
+) -> None:
+    """Batch 1 only touches the "list" operation - "save", "get",
+    "categories", and "search" must all be completely unaffected."""
+    for i in range(5):
+        tool.run(_request(operation="save", content=f"memory {i}"))
+    record_id = memory.data[0].id
+
+    save_result = tool.run(_request(operation="save", content="new one"))
+    get_result = tool.run(_request(operation="get", memory_id=record_id))
+    categories_result = tool.run(_request(operation="categories"))
+    search_result = tool.run(_request(operation="search", query="memory", limit=2))
+
+    assert "showing" not in save_result.output.lower()
+    assert "showing" not in get_result.output.lower()
+    assert "showing" not in categories_result.output.lower()
+    assert "showing" not in search_result.output.lower()
 
 
 # --- Creation timestamp (Phase 70) --------------------------------------------

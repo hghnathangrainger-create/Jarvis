@@ -63,6 +63,9 @@ class _FakeMemory:
         term = query.lower()
         return [r for r in reversed(self._data) if term in r.content.lower()][:limit]
 
+    def count(self) -> int:
+        return len(self._data)
+
 
 # --- Fixtures ----------------------------------------------------------------
 

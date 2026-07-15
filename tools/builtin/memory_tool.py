@@ -12,7 +12,10 @@ MemoryManager, adding no storage logic of its own, and it honours the
 
 Supported operations (via the 'operation' input):
     - "list":       return the most recent memories, optionally filtered by
-                    category.
+                    category. Discloses an honest, exact truncation notice
+                    (Phase 75, Batch 1) when more memories exist than are
+                    shown, using MemoryManager.count()/count_by_category() -
+                    both already-existing methods, never a new query.
     - "search":     return memories matching the 'query' input, optionally
                     filtered by category.
     - "save":       store the 'content' text the user explicitly asked to
@@ -152,7 +155,7 @@ class MemoryTool(BaseTool):
             header = "Recent memories"
             if category:
                 header = f"Recent memories in '{category.strip().lower()}'"
-            return self.ok(self._format(records, header))
+            return self.ok(self._format_list(records, header, category))
 
         if operation == "search":
             query = request.input_data.get("query")
@@ -292,6 +295,66 @@ class MemoryTool(BaseTool):
         for record in records:
             lines.append(f"  {MemoryTool._format_row(record)}")
         return "\n".join(lines)
+
+    def _format_list(
+        self, records: list[MemoryRecord], header: str, category: str | None
+    ) -> str:
+        """Format the "list" operation's output, including an honest
+        truncation notice when more memories exist than are shown
+        (Phase 75, Batch 1).
+
+        Reuses the existing, shared _format() for the header and rows
+        completely unchanged - this method only appends a trailing
+        notice, and only for the "list" operation. "search" (which
+        also calls _format() directly, on its own separate code path)
+        is entirely unaffected by this method.
+
+        The real total comes from one call to MemoryManager.count()
+        (no category filter) or MemoryManager.count_by_category()
+        (category-filtered) - both already-existing methods (the
+        latter already used by this class's own "categories" operation
+        since Phase 71) - never a new query, never estimated, never
+        AI-derived. The notice deliberately never says "increase
+        'limit'" or similar, since no user-facing CLI syntax exists to
+        do that today - it states the honest fact only.
+
+        Args:
+            records: The already-fetched memory records this listing
+                is about to render.
+            header: The plain header text (already built by the
+                caller) - unchanged from before this batch.
+            category: The category filter that was applied, if any -
+                used only to pick the matching real total and to name
+                the category in the notice text.
+
+        Returns:
+            The same formatted text _format() would already produce,
+            with an honest "[showing N of M memories...; more memories
+            exist]" notice appended only when the real total is
+            greater than the number of records actually shown. The
+            empty-result case ("{header}: none found.") is returned
+            completely unchanged - an empty result always means the
+            real total is honestly zero too, so no notice is needed to
+            say so.
+        """
+        formatted = self._format(records, header)
+        if not records:
+            return formatted
+
+        shown = len(records)
+        if category:
+            total = self._memory.count_by_category(category)
+            scope = f" in category '{category.strip().lower()}'"
+        else:
+            total = self._memory.count()
+            scope = ""
+
+        if total > shown:
+            formatted += (
+                f"\n\n[showing {shown} of {total} memories{scope}; "
+                "more memories exist]"
+            )
+        return formatted
 
     @staticmethod
     def _format_row(record: MemoryRecord) -> str:
