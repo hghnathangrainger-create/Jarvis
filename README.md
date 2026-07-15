@@ -1232,7 +1232,7 @@ The Inbox and Schedules tabs were the two remaining "table-only" tabs after Phas
 
 ```
 Saved advisory summaries - durable copies of what Jarvis already showed
-you once. Read-only: nothing here can be re-run, edited, or sent
+you once - read-only. Nothing here can be re-run, edited, or sent
 anywhere.
 
 Source Breakdown

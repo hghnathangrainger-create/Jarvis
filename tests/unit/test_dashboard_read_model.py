@@ -3,8 +3,14 @@ test_dashboard_read_model.py
 
 Unit tests for dashboard/read_model.py (Phase 19, Batch 1; extended Phase
 20, Batch 2 for the inbox; extended Phase 21, Batch 3 for schedules;
-extended Phase 39, Batch 1 for quarantine visibility): the narrow,
-read-only composition layer over MemoryManager, ApprovalHistoryStore,
+extended Phase 39, Batch 1 for quarantine visibility; extended across
+the Phase 62-66 "Visible Jarvis Dashboard" upgrade series with system
+status, store reachability, a recent-activity feed, and a real-count
+breakdown/summary method per domain - MemoryCategoryCount,
+ApprovalStatusCount, WorkflowStatusCount, InboxSourceTypeCount,
+ScheduleStatusCount, QuarantineSummary; Phase 67 made a wording-only
+consistency pass, adding no new behavior): the narrow, read-only
+composition layer over MemoryManager, ApprovalHistoryStore,
 WorkflowHistoryStore, InboxStore, ScheduleStore, and (optionally)
 QuarantineStore that the dashboard UI depends on.
 

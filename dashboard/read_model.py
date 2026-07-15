@@ -8,13 +8,18 @@ visibility; extended Phase 62, Batch 1 with system status, store
 reachability, and a merged recent-activity feed; extended Phase 65,
 Batch 1 with an inbox source-type breakdown and a schedule
 enabled/disabled breakdown; extended Phase 66, Batch 1 with an honest
-quarantine summary).
+quarantine summary; Phase 67 made a wording-only consistency pass
+across this docstring itself - no behavior changed).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
       display (MemoryRow, ApprovalRow, WorkflowRow, WorkflowTransitionRow,
       InboxRow, ScheduleRow, QuarantineRow, DashboardOverview,
-      DashboardSystemStatus, StoreReachability, ActivityRow).
+      DashboardSystemStatus, StoreReachability, ActivityRow), and their
+      real-count breakdown/summary counterparts added across Phases
+      63-66 (MemoryCategoryCount, ApprovalStatusCount,
+      WorkflowStatusCount, InboxSourceTypeCount, ScheduleStatusCount,
+      QuarantineSummary).
     - Define DashboardReadModel, which composes MemoryManager,
       ApprovalHistoryStore, WorkflowHistoryStore, InboxStore,
       ScheduleStore, (optionally) QuarantineStore's, and (optionally) an

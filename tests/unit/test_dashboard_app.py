@@ -2,8 +2,12 @@
 test_dashboard_app.py
 
 Tests for ui/dashboard_app.py (Phase 19, Batch 2; extended Phase 39,
-Batch 2 with the Quarantine tab): the tkinter/ttk presentation layer
-for the local, read-only Jarvis dashboard.
+Batch 2 with the Quarantine tab; extended across the Phase 62-66
+"Visible Jarvis Dashboard" upgrade series with a Category/Status/
+Source/Enabled-Disabled Breakdown panel or Summary panel and richer
+selection detail on most tabs; Phase 67 made a wording-only
+consistency pass, adding no new behavior): the tkinter/ttk presentation
+layer for the local, read-only Jarvis dashboard.
 
 Most assertions are pure state/view-model/render-structure checks (no Tk
 instantiation) per the authorizing instructions' preference against
@@ -1434,6 +1438,20 @@ class TestDashboardAppWithRealTk:
         assert "Source type: scheduled_web_search_summary" in detail
         assert "Source query: jarvis news" in detail
         assert "Included count: 3" in detail
+
+    def test_inbox_tab_caption_discloses_read_only_and_no_write_actions(
+        self, root: tk.Tk
+    ) -> None:
+        """Phase 67: mirrors the existing per-tab caption-wording test
+        pattern (Memories/Schedules/Quarantine/Approval History/Workflow
+        History all already have one; Inbox's was the one gap)."""
+        from ui.dashboard_app import INBOX_CAPTION
+
+        lowered = INBOX_CAPTION.lower()
+        assert "read-only" in lowered
+        assert "re-run" in lowered
+        assert "edited" in lowered or "edit" in lowered
+        assert "sent anywhere" in lowered
 
     def test_schedule_rows_render_real_data(self, root: tk.Tk) -> None:
         read_model, _, _, _, _, schedules, _ = _make_real_stack()

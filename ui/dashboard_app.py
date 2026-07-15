@@ -7,7 +7,8 @@ tkinter/ttk presentation layer for the local, read-only Jarvis dashboard
 Quarantine tab; extended Phase 65, Batch 2 with an Inbox Source
 Breakdown panel, an enhanced Inbox detail pane, and a Schedules
 Enabled/Disabled Breakdown panel; extended Phase 66, Batch 2 with a
-Quarantine Summary panel).
+Quarantine Summary panel; Phase 67 made a wording-only consistency
+pass across the Phase 62-66 series - no behavior changed).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
@@ -30,7 +31,8 @@ Does NOT:
     - Wire any widget to approve, deny, edit, delete, save, run, retry,
       resume, cancel, open-URL, browse-web, or ask-AI behaviour. No
       command input box exists. No double-click is executable. In
-      particular, the Schedules tab has no create/edit/delete/enable/
+      particular, the Inbox tab has no archive/delete/clear control of
+      any kind, the Schedules tab has no create/edit/delete/enable/
       disable/run-now/retry control of any kind, and the Quarantine tab
       has no restore/delete/empty-trash/cleanup control of any kind.
     - Open a socket, HTTP listener, or any network connection of any
@@ -164,11 +166,14 @@ MEMORIES_CAPTION = (
 
 #: Read-only wording for the Inbox tab (Phase 20): a saved entry is a
 #: durable copy of something already shown once - never a live queue,
-#: never re-runnable, never editable.
+#: never re-runnable, never editable. Reworded in Phase 67 to match the
+#: "<description> - read-only. Nothing here can be <X>" mid-sentence
+#: convention MEMORIES_CAPTION/SCHEDULES_CAPTION/QUARANTINE_CAPTION
+#: already use - wording only, meaning unchanged.
 INBOX_CAPTION = (
     "Saved advisory summaries - durable copies of what Jarvis already "
-    "showed you once. Read-only: nothing here can be re-run, edited, or "
-    "sent anywhere."
+    "showed you once - read-only. Nothing here can be re-run, edited, "
+    "or sent anywhere."
 )
 INBOX_DETAIL_PLACEHOLDER = "Select an inbox entry above to see its full saved text."
 
