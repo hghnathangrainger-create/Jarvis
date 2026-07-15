@@ -2928,6 +2928,79 @@ def test_build_input_schedule_create_handles_missing_at_separator(
     assert result == {"query": "jarvis ai", "time_of_day": ""}
 
 
+# --- Schedule naming grammar (Phase 81) ---------------------------------------
+
+
+def test_build_input_schedule_create_parses_trailing_name(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input(
+        "schedule_create",
+        "schedule web search summary for jarvis news at 08:00 as morning news",
+    )
+    assert result == {
+        "query": "jarvis news",
+        "time_of_day": "08:00",
+        "name": "morning news",
+    }
+
+
+def test_build_input_schedule_create_without_name_omits_name_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the unnamed grammar must remain completely unchanged -
+    no "name" key at all, not even an empty one."""
+    result = router.build_input(
+        "schedule_create",
+        "schedule web search summary for jarvis news at 08:00",
+    )
+    assert result == {"query": "jarvis news", "time_of_day": "08:00"}
+    assert "name" not in result
+
+
+def test_build_input_schedule_create_query_containing_as_is_not_mis_split(
+    router: CommandRouter,
+) -> None:
+    """A query that legitimately contains the word "as" before the final
+    " at <time>" must not be truncated at the wrong point - "as" is only
+    ever treated as a name separator within the already-isolated
+    trailing segment after the last " at "."""
+    result = router.build_input(
+        "schedule_create",
+        "schedule web search summary for cafes known as bistros at 08:00",
+    )
+    assert result == {"query": "cafes known as bistros", "time_of_day": "08:00"}
+    assert "name" not in result
+
+
+def test_build_input_schedule_create_query_containing_at_still_uses_last_at(
+    router: CommandRouter,
+) -> None:
+    """Existing last-" at "-wins behavior is preserved when a name suffix
+    is also present."""
+    result = router.build_input(
+        "schedule_create",
+        "schedule web search summary for restaurants open late at night "
+        "at 22:00 as dinner spots",
+    )
+    assert result == {
+        "query": "restaurants open late at night",
+        "time_of_day": "22:00",
+        "name": "dinner spots",
+    }
+
+
+def test_build_input_schedule_create_blank_name_after_as_is_treated_as_absent(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input(
+        "schedule_create",
+        "schedule web search summary for jarvis news at 08:00 as    ",
+    )
+    assert result == {"query": "jarvis news", "time_of_day": "08:00"}
+    assert "name" not in result
+
+
 def test_build_input_schedule_enable_extracts_id(router: CommandRouter) -> None:
     assert router.build_input("schedule_enable", "enable schedule 42") == {
         "schedule_id": 42

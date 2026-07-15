@@ -330,6 +330,37 @@ def test_schedule_created_via_cli_can_later_be_claimed_and_run(tmp_path: Path) -
         stack.engine.dispose()
 
 
+# --- named schedule created via CLI (Phase 81) ----------------------------------
+
+
+def test_named_schedule_created_via_cli_reaches_schedule_create_tool(
+    tmp_path: Path,
+) -> None:
+    """Phase 81: the CLI "... at <HH:MM> as <name>" grammar must actually
+    reach ScheduleCreateTool through the real CommandRouter -> ToolExecutor
+    -> ApprovalManager path and be stored - not just parsed and dropped."""
+    db_path = tmp_path / "sched_e2e_named.db"
+    reasoning, _ = _reasoning_engine()
+    stack = _build_full_stack(
+        db_path, search_provider=_FakeSearchProvider(results=[_result()]), reasoning=reasoning
+    )
+    try:
+        response = stack.orchestrator.handle_request(
+            "schedule web search summary for jarvis ai news at 08:00 as morning news"
+        )
+        assert response.requires_confirmation is True
+        decision = stack.approvals.approve(response.approval_request.request_id)
+        executed = stack.orchestrator.execute_approved(response, decision)
+        assert executed.success is True
+        assert executed.tool_result is not None
+        assert "morning news" in executed.tool_result.output
+
+        schedule_id = int(executed.tool_result.metadata["schedule_id"])
+        assert stack.schedules.get(schedule_id).name == "morning news"
+    finally:
+        stack.engine.dispose()
+
+
 # --- full poll-cycle pipeline: due schedule -> exactly one Inbox entry ----------
 
 

@@ -184,6 +184,7 @@ None of these write anywhere — they only read memory and produce an advisory s
 | Command | Does | Tier |
 |---|---|---|
 | `schedule web search summary for <query> at <HH:MM>` | Creates a new daily schedule that searches `<query>` and saves an AI summary to the Inbox at `<HH:MM>` (24-hour, host local time) every day. | YELLOW |
+| `schedule web search summary for <query> at <HH:MM> as <name>` | Same as above, plus gives the schedule a name (Phase 81) — shown in `list schedules`/`show schedules` and in the creation confirmation. Optional; omit `as <name>` for an unnamed schedule. | YELLOW |
 | `list schedules` / `show schedules` | Lists every configured schedule, its time, enabled state, and last run. | GREEN |
 | `enable schedule <id>` | Re-activates a disabled schedule. | YELLOW |
 | `disable schedule <id>` | Deactivates a schedule (the only way to stop one — there is no delete command). | YELLOW |

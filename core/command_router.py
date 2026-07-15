@@ -1589,8 +1589,11 @@ class CommandRouter:
             return {"path": path}
 
         if tool_name == "schedule_create":
-            query, time_of_day = self._extract_schedule_create_input(text)
-            return {"query": query, "time_of_day": time_of_day}
+            query, time_of_day, name = self._extract_schedule_create_input(text)
+            result: dict[str, object] = {"query": query, "time_of_day": time_of_day}
+            if name:
+                result["name"] = name
+            return result
 
         if tool_name == "schedule_enable":
             return {
@@ -1686,35 +1689,60 @@ class CommandRouter:
         return cls._clean_path(path_part), content
 
     @classmethod
-    def _extract_schedule_create_input(cls, text: str) -> tuple[str, str]:
-        """Extract (query, time_of_day) from a schedule-create command.
+    def _extract_schedule_create_input(cls, text: str) -> tuple[str, str, str]:
+        """Extract (query, time_of_day, name) from a schedule-create command.
 
-        The recognised shape is: "<schedule-prefix> <query> at <HH:MM>".
+        The recognised shape is:
+        "<schedule-prefix> <query> at <HH:MM> [as <name>]" - the trailing
+        " as <name>" clause is optional (Phase 81).
+
         Unlike _extract_create_input's " with " split (which splits on
-        the *first* occurrence), this splits on the *last* " at " in the
-        remainder, so a query that itself legitimately contains the
-        word " at " (for example "restaurants open late at night") is
-        never truncated at the wrong point - only the final " at
-        <time>" suffix is treated as the time separator.
+        the *first* occurrence), the query/time split is on the *last*
+        " at " in the remainder, so a query that itself legitimately
+        contains the word " at " (for example "restaurants open late at
+        night") is never truncated at the wrong point - only the final
+        " at <time>[ as <name>]" suffix is treated as the time/name
+        separator. The optional name is then split off the *first*
+        " as " found only within that already-isolated trailing
+        segment - never from the query itself - so a query containing
+        the word "as" before the final " at " (for example "cafes known
+        as bistros at 08:00") is never mis-split.
 
         Args:
             text: The original request text.
 
         Returns:
-            A tuple of (query, time_of_day). Either may be empty/invalid,
-            in which case ScheduleCreateTool/ScheduleStore.create()
-            itself reports the problem - this method never validates,
-            it only splits text.
+            A tuple of (query, time_of_day, name). query/time_of_day may
+            be empty/invalid, in which case ScheduleCreateTool/
+            ScheduleStore.create() itself reports the problem - this
+            method never validates, it only splits text. name is the
+            empty string when no " as <name>" clause is present, or when
+            it is present but blank/whitespace-only - both cases mean
+            "no name", handled identically by the caller.
         """
         remainder = cls._strip_write_prefix(text, _SCHEDULE_CREATE_PREFIXES)
         lowered = remainder.casefold()
         separator = " at "
         idx = lowered.rfind(separator)
         if idx == -1:
-            return remainder.strip(), ""
+            return remainder.strip(), "", ""
         query = remainder[:idx].strip()
-        time_of_day = remainder[idx + len(separator) :].strip()
-        return query, time_of_day
+        # remainder (and therefore trailing, its suffix) already had any
+        # trailing whitespace stripped by _strip_write_prefix above, so a
+        # blank " as    " clause survives here only as a bare trailing
+        # " as" with nothing after it - handled as its own case below,
+        # separately from " as " followed by a real name.
+        trailing = remainder[idx + len(separator) :]
+        lowered_trailing = trailing.casefold()
+        name_separator = " as "
+        name_idx = lowered_trailing.find(name_separator)
+        if name_idx != -1:
+            time_of_day = trailing[:name_idx].strip()
+            name = trailing[name_idx + len(name_separator) :].strip()
+            return query, time_of_day, name
+        if lowered_trailing.endswith(" as"):
+            return query, trailing[: -len(" as")].strip(), ""
+        return query, trailing.strip(), ""
 
     @classmethod
     def _extract_file_search_input(cls, text: str) -> tuple[str, str]:
