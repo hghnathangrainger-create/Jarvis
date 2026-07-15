@@ -775,11 +775,12 @@ def test_inbox_row_fields_map_from_real_record(rm) -> None:
 
 
 def test_webpage_summary_source_type_renders_like_any_other_entry(rm) -> None:
-    """Phase 61, Batch 2 smoke check: get_recent_inbox_entries()/InboxRow
-    never reference source_type at all (confirmed by reading
-    dashboard/read_model.py directly) - a "webpage_summary" entry from
-    the new explicit save command flows through identically to a
-    "web_search_summary" entry, with no dashboard code change needed."""
+    """A "webpage_summary" entry (Phase 61) flows through identically to
+    any other source type - including its source_type field (Phase 65,
+    Batch 1 restored InboxRow.source_type; this test's docstring
+    previously said InboxRow never referenced source_type at all - that
+    is no longer true, updated here as an intentional part of this
+    batch, not a regression)."""
     read_model, _, _, _, inbox, _, _ = rm
     inbox.append(
         source_type="webpage_summary",
@@ -792,8 +793,19 @@ def test_webpage_summary_source_type_renders_like_any_other_entry(rm) -> None:
     assert row.full_body == (
         "[AI webpage summary - based on one fetched page] A synthesis."
     )
+    assert row.source_type == "webpage_summary"
     assert isinstance(row.id, int)
     assert row.created_at is not None
+
+
+def test_inbox_row_source_type_maps_from_real_record(rm) -> None:
+    read_model, _, _, _, inbox, _, _ = rm
+    inbox.append(
+        source_type="scheduled_web_search_summary", source_query="q", body="b"
+    )
+
+    row = read_model.get_recent_inbox_entries()[0]
+    assert row.source_type == "scheduled_web_search_summary"
 
 
 def test_inbox_preview_truncated_above_120_chars(rm) -> None:
@@ -809,6 +821,87 @@ def test_inbox_preview_truncated_above_120_chars(rm) -> None:
 def test_recent_inbox_entries_empty_store_returns_empty_list(rm) -> None:
     read_model, _, _, _, _, _, _ = rm
     assert read_model.get_recent_inbox_entries() == []
+
+
+# --- get_inbox_source_type_breakdown (Phase 65, Batch 1) ----------------------
+
+
+def test_inbox_source_type_breakdown_includes_all_known_source_types(rm) -> None:
+    from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_inbox_source_type_breakdown()
+
+    assert [row.source_type for row in breakdown] == list(KNOWN_INBOX_SOURCE_TYPES)
+
+
+def test_inbox_source_type_breakdown_reports_real_counts(rm) -> None:
+    read_model, _, _, _, inbox, _, _ = rm
+    inbox.append(source_type="web_search_summary", source_query="a", body="b")
+    inbox.append(source_type="web_search_summary", source_query="c", body="d")
+    inbox.append(
+        source_type="scheduled_web_search_summary", source_query="e", body="f"
+    )
+
+    breakdown = {
+        row.source_type: row.count
+        for row in read_model.get_inbox_source_type_breakdown()
+    }
+    assert breakdown["web_search_summary"] == 2
+    assert breakdown["scheduled_web_search_summary"] == 1
+    assert breakdown["webpage_summary"] == 0
+
+
+def test_inbox_source_type_breakdown_empty_store_shows_every_type_at_zero(
+    rm,
+) -> None:
+    from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+    read_model, *_ = rm
+
+    breakdown = read_model.get_inbox_source_type_breakdown()
+
+    assert len(breakdown) == len(KNOWN_INBOX_SOURCE_TYPES)
+    assert all(row.count == 0 for row in breakdown)
+
+
+def test_inbox_source_type_breakdown_preserves_known_order_not_sorted_by_count(
+    rm,
+) -> None:
+    """Source types must never be reordered by count - this would
+    visually imply significance the data does not actually carry."""
+    from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES
+
+    read_model, _, _, _, inbox, _, _ = rm
+    # Give the LAST known source type the highest count, to prove
+    # sorting by count is never applied.
+    last_source_type = KNOWN_INBOX_SOURCE_TYPES[-1]
+    for i in range(5):
+        inbox.append(source_type=last_source_type, source_query=f"q{i}", body="b")
+
+    breakdown = read_model.get_inbox_source_type_breakdown()
+    assert [row.source_type for row in breakdown] == list(KNOWN_INBOX_SOURCE_TYPES)
+
+
+def test_inbox_source_type_breakdown_total_matches_real_inbox_total(rm) -> None:
+    read_model, _, _, _, inbox, _, _ = rm
+    inbox.append(source_type="web_search_summary", source_query="a", body="b")
+    inbox.append(source_type="scheduled_web_search_summary", source_query="c", body="d")
+    inbox.append(source_type="webpage_summary", source_query="e", body="f")
+
+    breakdown = read_model.get_inbox_source_type_breakdown()
+    assert sum(row.count for row in breakdown) == inbox.count()
+
+
+def test_inbox_source_type_breakdown_does_not_mutate_inbox_state(rm) -> None:
+    read_model, _, _, _, inbox, _, _ = rm
+    inbox.append(source_type="web_search_summary", source_query="a", body="b")
+    before = inbox.count()
+
+    read_model.get_inbox_source_type_breakdown()
+
+    assert inbox.count() == before
 
 
 # --- get_schedules ---------------------------------------------------------------
@@ -869,6 +962,64 @@ def test_schedule_query_preview_truncated_above_120_chars(rm) -> None:
 
     row = read_model.get_schedules()[0]
     assert row.query_preview == ("z" * 120) + "..."
+
+
+# --- get_schedule_enabled_breakdown (Phase 65, Batch 1) -------------------------
+
+
+def test_schedule_enabled_breakdown_returns_enabled_and_disabled_counts(rm) -> None:
+    read_model, _, _, _, _, schedules, _ = rm
+    enabled_one = schedules.create(query="a", time_of_day="08:00")
+    schedules.create(query="b", time_of_day="09:00")
+    schedules.disable(enabled_one.id)
+
+    breakdown = {row.enabled: row.count for row in read_model.get_schedule_enabled_breakdown()}
+    assert breakdown[True] == 1
+    assert breakdown[False] == 1
+
+
+def test_schedule_enabled_breakdown_empty_store_shows_both_states_at_zero(rm) -> None:
+    read_model, *_ = rm
+
+    breakdown = read_model.get_schedule_enabled_breakdown()
+
+    assert len(breakdown) == 2
+    assert all(row.count == 0 for row in breakdown)
+
+
+def test_schedule_enabled_breakdown_preserves_fixed_order_not_sorted_by_count(
+    rm,
+) -> None:
+    """"enabled" must always come before "disabled" - even when disabled
+    schedules outnumber enabled ones - since this would otherwise
+    visually imply significance the data does not actually carry."""
+    read_model, _, _, _, _, schedules, _ = rm
+    for i in range(5):
+        record = schedules.create(query=f"q{i}", time_of_day="08:00")
+        schedules.disable(record.id)
+
+    breakdown = read_model.get_schedule_enabled_breakdown()
+    assert [row.enabled for row in breakdown] == [True, False]
+
+
+def test_schedule_enabled_breakdown_total_matches_real_schedule_total(rm) -> None:
+    read_model, _, _, _, _, schedules, _ = rm
+    schedules.create(query="a", time_of_day="08:00")
+    schedules.create(query="b", time_of_day="09:00")
+    schedules.create(query="c", time_of_day="10:00")
+
+    breakdown = read_model.get_schedule_enabled_breakdown()
+    assert sum(row.count for row in breakdown) == len(schedules.list_all())
+
+
+def test_schedule_enabled_breakdown_does_not_mutate_schedule_state(rm) -> None:
+    read_model, _, _, _, _, schedules, _ = rm
+    schedules.create(query="a", time_of_day="08:00")
+    before = len(schedules.list_all())
+
+    read_model.get_schedule_enabled_breakdown()
+
+    assert len(schedules.list_all()) == before
 
 
 # --- get_quarantine_entries (Phase 39, Batch 1) ---------------------------------

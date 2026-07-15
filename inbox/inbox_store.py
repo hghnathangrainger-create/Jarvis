@@ -3,7 +3,9 @@ inbox_store.py
 
 Data-access layer for the durable, append-only Jarvis inbox (Phase 20,
 Batch 1; extended Phase 22, Batch 1 with a narrow, read-only count-since
-query).
+query; extended Phase 65, Batch 1 with KNOWN_INBOX_SOURCE_TYPES, the
+fixed vocabulary the dashboard's source-type breakdown reads via
+count_since()).
 
 Responsibilities:
     - Append one new inbox entry (write-once; there is no update method).
@@ -47,6 +49,18 @@ from storage.database import session_scope
 from storage.models import InboxEntry
 
 _MAX_LIMIT = 50
+
+#: The fixed, known inbox source types (Phase 65, Batch 1) - every
+#: producer that has ever called append(): the interactive web-search
+#: summary (Phase 20), the scheduler's own web-search summary (Phase 21),
+#: and the webpage summary (Phase 61). Used by the dashboard's source-type
+#: breakdown to report an honest count for every known type, including one
+#: with zero entries, in a fixed, declared order - never sorted by count.
+KNOWN_INBOX_SOURCE_TYPES: tuple[str, ...] = (
+    "web_search_summary",
+    "scheduled_web_search_summary",
+    "webpage_summary",
+)
 
 
 @dataclass(frozen=True, slots=True)

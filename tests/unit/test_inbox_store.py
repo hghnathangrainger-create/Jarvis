@@ -28,7 +28,7 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from inbox.inbox_store import InboxStore
+from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES, InboxStore
 from storage.database import create_session_factory, initialize_database
 
 
@@ -252,6 +252,21 @@ def test_count_since_empty_store_returns_zero_and_none(store: InboxStore) -> Non
     assert count == 0
     assert latest_id is None
     assert latest_created_at is None
+
+
+# --- KNOWN_INBOX_SOURCE_TYPES (Phase 65, Batch 1) ----------------------------------
+
+
+def test_known_inbox_source_types_includes_the_real_known_producers() -> None:
+    """The fixed vocabulary must name exactly the three real producers
+    that have ever called append() - the interactive web-search summary
+    (Phase 20), the scheduler's own web-search summary (Phase 21), and
+    the webpage summary (Phase 61)."""
+    assert set(KNOWN_INBOX_SOURCE_TYPES) == {
+        "web_search_summary",
+        "scheduled_web_search_summary",
+        "webpage_summary",
+    }
 
 
 # --- long content handling --------------------------------------------------------

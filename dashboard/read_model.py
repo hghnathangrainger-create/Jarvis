@@ -5,7 +5,9 @@ Narrow, read-only composition layer over Jarvis's durable stores, for the
 local dashboard (Phase 19; extended Phase 20 with the inbox; extended
 Phase 21 with schedules; extended Phase 39, Batch 1 with quarantine
 visibility; extended Phase 62, Batch 1 with system status, store
-reachability, and a merged recent-activity feed).
+reachability, and a merged recent-activity feed; extended Phase 65,
+Batch 1 with an inbox source-type breakdown and a schedule
+enabled/disabled breakdown).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
@@ -74,6 +76,17 @@ Does NOT:
       presented, or claimed, as an all-time total, since no all-time
       per-status aggregation exists for workflows (a workflow's
       "status" is its own latest transition, not a fixed column).
+    - Sort, rank, or score inbox source types by their own counts
+      (Phase 65, Batch 1): get_inbox_source_type_breakdown() always
+      returns source types in inbox.inbox_store.KNOWN_INBOX_SOURCE_TYPES's
+      own fixed, declared order - never reordered by count. Each count is
+      a true, unbounded, all-time total (InboxStore.count_since() called
+      with after_id=None) - no new store method was added for this.
+    - Sort, rank, or score schedule states by their own counts (Phase 65,
+      Batch 1): get_schedule_enabled_breakdown() always returns
+      "enabled" before "disabled", never reordered by count. Both counts
+      come from tallying get_schedules()'s own already-fetched result -
+      no new store method was added for this either.
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -92,7 +105,7 @@ from approval.approval_history_store import (
     ApprovalHistoryStore,
 )
 from config.settings import Settings
-from inbox.inbox_store import InboxStore
+from inbox.inbox_store import KNOWN_INBOX_SOURCE_TYPES, InboxStore
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from quarantine.quarantine_store import QuarantineStore
@@ -354,8 +367,10 @@ class InboxRow:
     """A single saved inbox entry, shaped for dashboard display.
 
     This describes a durably saved copy of an AI-generated output that
-    was already shown to Nathan once (Phase 20) - today, exactly one
-    producer: a "summarise web search for <query>" advisory summary.
+    was already shown to Nathan once (Phase 20). Three producers exist
+    today (see inbox.inbox_store.KNOWN_INBOX_SOURCE_TYPES): the
+    interactive web-search summary (Phase 20), the scheduler's own
+    web-search summary (Phase 21), and the webpage summary (Phase 61).
     `full_body` already includes its fixed disclosure label, stored
     verbatim from the original response - this row never re-derives or
     reconstructs anything.
@@ -371,6 +386,12 @@ class InboxRow:
             based on, if known.
         created_at: UTC-in-substance timestamp of when this entry was
             saved.
+        source_type: The producer that created this entry (one of
+            KNOWN_INBOX_SOURCE_TYPES), for example "web_search_summary"
+            (Phase 65, Batch 1). Defaults to "" only for backward
+            compatibility with call sites predating this field -
+            get_recent_inbox_entries() always populates it from the
+            real, already-fetched record.
     """
 
     id: int
@@ -379,6 +400,32 @@ class InboxRow:
     full_body: str
     included_count: int | None
     created_at: datetime
+    source_type: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class InboxSourceTypeCount:
+    """One known inbox source type's real, all-time count (Phase 65,
+    Batch 1).
+
+    Produced only by calling InboxStore.count_since(source_type=...,
+    after_id=None) - a true, unbounded, all-time total, never a
+    fabricated, estimated, or inferred value, and never a ranking:
+    get_inbox_source_type_breakdown() always returns these in
+    inbox.inbox_store.KNOWN_INBOX_SOURCE_TYPES's own fixed order, never
+    sorted by count, so nothing here implies one source is more
+    significant than another.
+
+    Attributes:
+        source_type: The known source type name (one of
+            KNOWN_INBOX_SOURCE_TYPES).
+        count: The real, current, all-time number of inbox entries with
+            this exact source_type - zero is a valid, honestly reported
+            value, never omitted.
+    """
+
+    source_type: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +459,30 @@ class ScheduleRow:
     enabled: bool
     last_run_at: datetime | None
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleStatusCount:
+    """One schedule enabled/disabled state's real count among all
+    configured schedules (Phase 65, Batch 1).
+
+    A tally of get_schedules()'s own already-fetched ScheduleRow.enabled
+    values - never a fabricated, estimated, or inferred value, and never
+    a ranking: get_schedule_enabled_breakdown() always returns "enabled"
+    before "disabled", never sorted by count. No new store method was
+    added for this - ScheduleStore.list_all() already returns every
+    configured schedule.
+
+    Attributes:
+        enabled: True for the "enabled" row, False for the "disabled"
+            row.
+        count: The real, current number of configured schedules in this
+            state - zero is a valid, honestly reported value, never
+            omitted.
+    """
+
+    enabled: bool
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -917,6 +988,37 @@ class DashboardReadModel:
             for record in records
         ]
 
+    def get_schedule_enabled_breakdown(
+        self, limit: int = 50
+    ) -> tuple[ScheduleStatusCount, ...]:
+        """Return a real enabled/disabled count across all configured
+        schedules (Phase 65, Batch 1).
+
+        A tally of get_schedules()'s own already-fetched
+        ScheduleRow.enabled values - never a fabricated, estimated, or
+        inferred value, and no new store method: ScheduleStore.list_all()
+        already returns every configured schedule. Both "enabled" and
+        "disabled" are always included, even one with zero matching
+        schedules - an honest zero is reported, never omitted. "enabled"
+        is always returned before "disabled", never sorted by count.
+
+        Args:
+            limit: Maximum number of schedules to consider - passed
+                straight through to get_schedules(). Defaults to the
+                same value get_schedules() itself defaults to.
+
+        Returns:
+            A 2-tuple of ScheduleStatusCount: (enabled count, disabled
+            count), in that fixed order.
+        """
+        schedules = self.get_schedules(limit=limit)
+        enabled_count = sum(1 for row in schedules if row.enabled)
+        disabled_count = len(schedules) - enabled_count
+        return (
+            ScheduleStatusCount(enabled=True, count=enabled_count),
+            ScheduleStatusCount(enabled=False, count=disabled_count),
+        )
+
     def get_recent_inbox_entries(self, limit: int = 20) -> list[InboxRow]:
         """Return the most recent saved inbox entries as InboxRows.
 
@@ -935,9 +1037,38 @@ class DashboardReadModel:
                 full_body=record.body,
                 included_count=record.included_count,
                 created_at=record.created_at,
+                source_type=record.source_type,
             )
             for record in records
         ]
+
+    def get_inbox_source_type_breakdown(self) -> tuple[InboxSourceTypeCount, ...]:
+        """Return a real, all-time inbox entry count for every known
+        source type (Phase 65, Batch 1).
+
+        Each count comes from one call to InboxStore.count_since(
+        source_type=..., after_id=None) - a true, unbounded, all-time
+        total, never a fabricated, estimated, or inferred value, and no
+        new store method. Every source type in KNOWN_INBOX_SOURCE_TYPES
+        is included, even one with zero entries - an honest zero is
+        reported, never omitted. Source types are returned in
+        KNOWN_INBOX_SOURCE_TYPES's own fixed, declared order - never
+        sorted by count - so nothing here implies one source is more
+        significant than another.
+
+        Returns:
+            A tuple of InboxSourceTypeCount, one per known source type,
+            in KNOWN_INBOX_SOURCE_TYPES's own fixed order.
+        """
+        breakdown = []
+        for source_type in KNOWN_INBOX_SOURCE_TYPES:
+            count, _, _ = self._inbox.count_since(
+                source_type=source_type, after_id=None
+            )
+            breakdown.append(
+                InboxSourceTypeCount(source_type=source_type, count=count)
+            )
+        return tuple(breakdown)
 
     def get_quarantine_entries(self, limit: int = 50) -> list[QuarantineRow]:
         """Return recorded quarantine metadata as QuarantineRows, newest first.
