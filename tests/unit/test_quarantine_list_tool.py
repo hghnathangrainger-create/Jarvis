@@ -119,6 +119,82 @@ def test_multiple_quarantined_files_are_listed(
     assert result.metadata["file_count"] == "2"
 
 
+# ---------------------------------------------------------------------------
+# Header total count (Phase 72, Batch 2)
+# ---------------------------------------------------------------------------
+
+
+def test_header_shows_total_count_for_one_file(
+    tool: QuarantineListTool, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "notes__a1b2c3d4.txt").write_text("x", encoding="utf-8")
+
+    result = _run(tool)
+
+    assert "Quarantined files (1 total):" in result.output
+    # Existing row detail is still present alongside the new header.
+    assert "notes__a1b2c3d4.txt" in result.output
+
+
+def test_header_shows_total_count_for_multiple_files(
+    tool: QuarantineListTool, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "a__11111111.txt").write_text("a", encoding="utf-8")
+    (quarantine_dir / "b__22222222.txt").write_text("bb", encoding="utf-8")
+    (quarantine_dir / "c__33333333.txt").write_text("ccc", encoding="utf-8")
+
+    result = _run(tool)
+
+    assert "Quarantined files (3 total):" in result.output
+    assert result.metadata["file_count"] == "3"
+
+
+def test_header_count_reflects_real_data_not_estimated(
+    tool: QuarantineListTool, workspace: Path
+) -> None:
+    """The header count must come from the same already-computed `files`
+    list the rows below it are built from - never a separate query,
+    never an estimate."""
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "a__11111111.txt").write_text("a", encoding="utf-8")
+    (quarantine_dir / "b__22222222.txt").write_text("bb", encoding="utf-8")
+
+    result = _run(tool)
+
+    assert "Quarantined files (2 total):" in result.output
+    assert len(list(quarantine_dir.iterdir())) == 2
+
+
+def test_header_count_does_not_mutate_quarantine_files(
+    tool: QuarantineListTool, workspace: Path
+) -> None:
+    quarantine_dir = workspace / _QUARANTINE_DIR_NAME
+    quarantine_dir.mkdir()
+    (quarantine_dir / "a__11111111.txt").write_text("a", encoding="utf-8")
+    before = sorted(entry.name for entry in quarantine_dir.iterdir())
+
+    _run(tool)
+
+    after = sorted(entry.name for entry in quarantine_dir.iterdir())
+    assert before == after
+
+
+def test_empty_quarantine_header_is_unchanged_by_batch_2(
+    tool: QuarantineListTool, workspace: Path
+) -> None:
+    """Phase 72, Batch 2 only changes the non-empty header - the empty
+    and missing-directory states must remain exactly as they were
+    before this batch."""
+    (workspace / _QUARANTINE_DIR_NAME).mkdir()
+    result = _run(tool)
+    assert result.output == "Quarantine is empty - nothing is currently quarantined."
+
+
 def test_size_in_bytes_is_shown(tool: QuarantineListTool, workspace: Path) -> None:
     quarantine_dir = workspace / _QUARANTINE_DIR_NAME
     quarantine_dir.mkdir()

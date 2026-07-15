@@ -3,7 +3,8 @@ quarantine_list_tool.py
 
 A safe, read-only tool that lists the contents of Jarvis's quarantine
 directory (Phase 36; extended Phase 37, Batch 2 to display known
-original-path metadata).
+original-path metadata; extended Phase 72, Batch 2 with a real, honest
+total-file count in the list header).
 
 QuarantineListTool is a GREEN tool: it only reads directory entries and
 file metadata (name, size, modified time) from `.jarvis_trash/` - the
@@ -139,9 +140,12 @@ class QuarantineListTool(BaseTool):
         Returns:
             A ToolResult reporting: no quarantine directory exists yet;
             the directory exists but is empty; or the quarantined
-            files present, each with its size and modified time.
-            Never creates the directory, never reads a file's content,
-            and never modifies, moves, or deletes anything.
+            files present, each with its size and modified time, with
+            the header reporting a real, honest total count (Phase 72,
+            Batch 2) tallied from this same already-computed `files`
+            list - no new store method or query. Never creates the
+            directory, never reads a file's content, and never
+            modifies, moves, or deletes anything.
         """
         quarantine_dir = Path(_QUARANTINE_DIR_NAME)
 
@@ -162,7 +166,7 @@ class QuarantineListTool(BaseTool):
 
         lines: list[str] = []
         if files:
-            lines.append("Quarantined files:")
+            lines.append(f"Quarantined files ({len(files)} total):")
             lines.extend(self._format_entry(entry) for entry in files)
         else:
             lines.append("No quarantined files found.")
