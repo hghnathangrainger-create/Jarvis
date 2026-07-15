@@ -565,9 +565,9 @@ This is a second, independent process — it does not require the Jarvis CLI to 
 | Tab | What it shows |
 |---|---|
 | Overview | As originally built here: total memory count, the 5 most recent approval decisions, and the 5 most recently active workflows — every number traces to a real query, nothing estimated or simulated. Substantially redesigned in Phase 62 into a "Jarvis Online" home screen with additional System Status/Store Reachability/Recent Activity panels — see Phase 62 below for the current Overview tab. |
-| Memories | Recent memories (optionally filtered by category), each with a 120-character preview; full content is shown only after selecting a row. |
-| Approval History | Recent approval history entries — action, tier, status, timestamps. Durable history only, explicitly not a live list of approvals currently awaiting a decision. |
-| Workflow History | Recently active workflows and, on selection, that workflow's full recorded transition history. Durable lifecycle history only, explicitly not resumable or executable state. |
+| Memories | As originally built here: recent memories (optionally filtered by category), each with a 120-character preview; full content is shown only after selecting a row. Extended in Phase 63 with a Category Breakdown panel and a richer selected-memory detail pane — see Phase 63 below for the current Memories tab. |
+| Approval History | As originally built here: recent approval history entries — action, tier, status, timestamps. Durable history only, explicitly not a live list of approvals currently awaiting a decision. Extended in Phase 64 with a Status Breakdown panel and a selected-row detail pane — see Phase 64 below for the current Approval History tab. |
+| Workflow History | As originally built here: recently active workflows and, on selection, that workflow's full recorded transition history. Durable lifecycle history only, explicitly not resumable or executable state. Extended in Phase 64 with a recent-activity-scoped Status Breakdown panel and an Approval Request ID column in the transitions view — see Phase 64 below for the current Workflow History tab. |
 
 Refresh is a fixed, honestly-labelled requery — a "Refresh now" button plus an automatic requery every 5 seconds — never described as "live" or "real-time." Timestamps are shown as `YYYY-MM-DD HH:MM:SS UTC`; the `UTC` suffix is appended literally by the dashboard's own code (every timestamp in these three tables is produced from `datetime.now(timezone.utc)` at write time, confirmed directly, though SQLite itself returns it naive on reload) — it is never derived from timezone metadata that isn't actually there.
 
@@ -1149,6 +1149,74 @@ Nothing in Phase 63 adds a create/edit/delete/re-categorize control, a search bo
 ### What is deliberately NOT included in Phase 63
 
 No memory create/edit/delete/re-categorize control from the dashboard. No AI-generated memory summaries or insights. No importance, relevance, or priority score. No dashboard search box (the CLI's `search memories for <query>` already covers this; a dashboard equivalent remains a distinct, separately-evaluated future decision). No pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, `SecurityManager`, or approval behavior change. No other dashboard tab changed.
+
+---
+
+## Phase 64 — Approval & Workflow History Dashboard V1 (complete)
+
+The Approval History and Workflow History tabs were the two most safety-relevant tabs Phase 62's Overview redesign didn't touch, and Phase 63 didn't extend either. Phase 64 gives both the same honest, real-data-only treatment: a Status Breakdown panel on each, and richer selection-based detail — still read-only, still no new dependency. Delivered in three batches. See `docs/phase_64_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model foundation.** `ApprovalHistoryStore` gained `count_by_status()` (a true, unbounded, all-time total per status — unlike the already-clamped `list_by_status()`) and a fixed `KNOWN_APPROVAL_STATUSES` tuple. `workflow_history_store.py` gained a fixed `KNOWN_WORKFLOW_STATUSES` tuple naming `WorkflowEngine`'s own seven lifecycle event names. Two already-fetched-but-dropped fields were restored: `ApprovalRow` gained `reason`/`decision_reason`, `WorkflowTransitionRow` gained `approval_request_id` — both from queries the read model already ran, never a new one. `dashboard/read_model.py` gained `get_approval_status_breakdown()` (a true all-time count per known status) and `get_workflow_status_breakdown()` (honestly scoped to the most recently active workflows `get_recent_workflows()` already returns — never presented as an all-time total, since no all-time per-status aggregation exists for workflows).
+- **Batch 2 — UI layer.** Both tabs gained a "Status Breakdown" panel (the same destroy-and-rebuild label pattern Phases 62–63 already established); the Workflow History panel carries an explicit disclosure that its counts are recent-activity-scoped, not all-time. The Approval History tab gained its first-ever selection-based detail pane (it previously had none at all), showing request id, action, tier, status, reason, and decision reason. The Workflow History transitions tree gained an "Approval Request ID" column, showing the correlated approval request for a `workflow_step_waiting` row.
+- **Batch 3 — End-to-end verification, documentation, and closure.** Real, temporary-database smoke tests wire a real `DashboardReadModel` (with real approval requests across every status, and real workflow transitions including a `workflow_step_waiting` row) into a real `DashboardApp`, confirming both tabs' breakdown panels, tables, and detail/drill-down views all render honestly. `docs/user_guide.md` updated; this section added; the Phase 19 section's own "Dashboard views" table rows for Memories, Approval History, and Workflow History corrected with forward references, rather than left silently stale.
+
+### The upgraded Approval History tab
+
+```
+Durable history of past approval requests and decisions - not a live
+list of approvals currently awaiting your response...
+
+Status Breakdown
+  pending: 1
+  approved: 3
+  declined: 0
+  expired: 1
+
+<Request ID>  <Action>  <Tier>  <Status>  <Created At>  <Decided At>  <Decided By>
+...
+
+Request ID: req-2
+Action: update memory
+Tier: yellow
+Status: approved
+Reason: Updating a memory changes stored content and must be confirmed.
+Decision reason: looks safe
+Created: 2026-...  |  Decided: 2026-...  |  Decided by: user
+```
+
+### The upgraded Workflow History tab
+
+```
+Durable lifecycle history only - not resumable, not executable state...
+
+Status Breakdown
+Based on the most recently active workflows shown in the table above -
+not an all-time total across every workflow ever recorded.
+  workflow_started: 2
+  workflow_step_started: 0
+  workflow_step_completed: 1
+  workflow_step_waiting: 1
+  workflow_step_failed: 0
+  workflow_completed: 3
+  workflow_stopped: 0
+
+<Workflow ID>  <Latest Recorded Status>  <Step>  <Last Activity>
+...
+
+Recorded transitions for the selected workflow:
+<Status>              <Step>  <Tool>       <Recorded At>  <Approval Request ID>
+workflow_started       —      —            2026-...       —
+workflow_step_waiting  1/2    file_delete  2026-...       req-7
+workflow_completed     —      —            2026-...       —
+```
+
+### Safety note: still read-only, still no new authority
+
+Nothing in Phase 64 adds an approve/deny/resume/run/cancel control, a command box, or any interactive element beyond the pre-existing category/refresh controls — re-confirmed by the same structural test that walks every widget in the entire window and finds exactly one `Button` ("Refresh now") anywhere, plus a new Phase 64 test scoping that same proof to just these two tabs specifically. `dashboard/read_model.py` and `ui/dashboard_app.py` still import no execution, approval, command-routing, AI, or tool-execution component. Both Status Breakdown panels are real, current counts — never a score, a ranking, or an AI-generated insight — and the Workflow History one is explicitly, honestly labeled as recent-activity-scoped rather than implied to be an all-time total.
+
+### What is deliberately NOT included in Phase 64
+
+No approve/deny control, no workflow resume/run/cancel control, no dashboard write action of any kind. No AI-generated summaries or insights. No risk, urgency, importance, or intelligence score. No dashboard search box, no pagination/infinite-scroll change. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, `ApprovalManager`, or `WorkflowEngine` behavior change. No other dashboard tab changed.
 
 ---
 

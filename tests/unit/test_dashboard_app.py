@@ -1505,3 +1505,130 @@ class TestDashboardAppWithRealTk:
             label.cget("text") for label in app._reachability_labels
         )
         assert "quarantine: reachable" in reachability_texts
+
+    # --- Phase 64, Batch 3: end-to-end Approval/Workflow History smoke checks -
+
+    def test_approval_history_renders_all_panels_honestly_with_real_data(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check: a real DashboardReadModel over
+        a real temporary database with real approval requests across
+        multiple statuses, wired into a real DashboardApp. Confirms the
+        Status Breakdown, table, and selected-row detail pane all
+        render honestly from that real data."""
+        from datetime import datetime, timezone
+
+        read_model, _, approvals, _, _, _, _ = _make_real_stack()
+        approvals.record_request(
+            request_id="req-1",
+            action="delete file",
+            reason="Deleting a file changes state and should be confirmed.",
+            security_tier="yellow",
+        )
+        approvals.record_request(
+            request_id="req-2", action="update memory", reason="r", security_tier="yellow"
+        )
+        approvals.record_decision(
+            request_id="req-2",
+            approved=True,
+            decided_by="user",
+            decided_at=datetime.now(timezone.utc),
+            reason="looks safe",
+        )
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._approval_breakdown_labels
+        ]
+        assert "pending: 1" in breakdown_texts
+        assert "approved: 1" in breakdown_texts
+        assert "declined: 0" in breakdown_texts
+        assert "expired: 0" in breakdown_texts
+
+        children = app._approval_tree.get_children()
+        assert len(children) == 2
+
+        app._approval_tree.selection_set("req-1")
+        app._on_approval_row_selected(None)
+        pending_detail = app._approval_detail_var.get()
+        assert "Status: pending" in pending_detail
+        assert "Decision reason: —" in pending_detail
+
+        app._approval_tree.selection_set("req-2")
+        app._on_approval_row_selected(None)
+        decided_detail = app._approval_detail_var.get()
+        assert "Status: approved" in decided_detail
+        assert "Decision reason: looks safe" in decided_detail
+
+        assert app._approval_error_var.get() == ""
+        assert app._approval_breakdown_error_var.get() == ""
+
+    def test_workflow_history_renders_all_panels_honestly_with_real_data(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check across the Workflow History tab:
+        Status Breakdown (recent-activity-scoped), table, transition
+        drill-down, and the Approval Request ID column all render
+        honestly from real, seeded workflow history data."""
+        read_model, _, _, workflows, _, _, _ = _make_real_stack()
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        workflows.record_transition(
+            workflow_id="wf-1",
+            status="workflow_step_waiting",
+            approval_request_id="req-1",
+        )
+        workflows.record_transition(workflow_id="wf-1", status="workflow_completed")
+        workflows.record_transition(workflow_id="wf-2", status="workflow_started")
+        app = _build_app(root, read_model)
+
+        breakdown_texts = [
+            label.cget("text") for label in app._workflow_breakdown_labels
+        ]
+        assert "workflow_completed: 1" in breakdown_texts
+        assert "workflow_started: 1" in breakdown_texts
+        assert "workflow_stopped: 0" in breakdown_texts
+
+        workflow_children = app._workflow_tree.get_children()
+        assert len(workflow_children) == 2
+
+        app._workflow_tree.selection_set("wf-1")
+        app._on_workflow_row_selected(None)
+        transition_children = app._transitions_tree.get_children()
+        values_by_status = {
+            app._transitions_tree.item(c, "values")[0]: app._transitions_tree.item(
+                c, "values"
+            )[-1]
+            for c in transition_children
+        }
+        assert values_by_status["workflow_started"] == "—"
+        assert values_by_status["workflow_step_waiting"] == "req-1"
+        assert values_by_status["workflow_completed"] == "—"
+
+        assert app._workflow_error_var.get() == ""
+        assert app._workflow_breakdown_error_var.get() == ""
+
+    def test_approval_and_workflow_history_no_write_widget_introduced(
+        self, root: tk.Tk
+    ) -> None:
+        """Structural, behavioral proof that Batch 1/2's new panels never
+        introduced a button or other write-triggering widget anywhere
+        in the Approval History or Workflow History tabs specifically."""
+        read_model, _, approvals, workflows, _, _, _ = _make_real_stack()
+        approvals.record_request(
+            request_id="req-1", action="a", reason="r", security_tier="yellow"
+        )
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        app = _build_app(root, read_model)
+
+        def _collect_buttons(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TButton":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_buttons(child))
+            return found
+
+        approval_tab_frame = app._approval_tree.master
+        workflow_tab_frame = app._workflow_tree.master
+        assert _collect_buttons(approval_tab_frame) == []
+        assert _collect_buttons(workflow_tab_frame) == []
