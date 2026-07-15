@@ -276,11 +276,11 @@ def build_orchestrator() -> JarvisOrchestrator:
     # HealthCheckTool (Phase 57): registered last, so its own
     # introspection of `registry` naturally sees every tool registered
     # above (and itself) once it actually runs. Reads only already-built
-    # objects - `registry`, `settings`, and (Batch 2) the same
-    # quarantine_store/inbox_store/schedule_store/security instances
-    # constructed above for other tools' use - never opens a new
-    # database connection, never constructs a new store or
-    # SecurityManager, never creates a file or row.
+    # objects - `registry`, `settings`, and the same
+    # quarantine_store/inbox_store/schedule_store/security/memory/
+    # approval_history instances constructed above for other tools' use -
+    # never opens a new database connection, never constructs a new
+    # store or SecurityManager, never creates a file or row.
     registry.register_tool(
         HealthCheckTool(
             registry,
@@ -289,6 +289,8 @@ def build_orchestrator() -> JarvisOrchestrator:
             schedule_store,
             quarantine_store,
             security,
+            memory,
+            approval_history,
         )
     )
 

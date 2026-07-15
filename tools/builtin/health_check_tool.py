@@ -59,6 +59,18 @@ instances - never a new database connection, never a new store):
       never approves or declines anything, and changes no approval or
       security state.
 
+Batch 1 (Phase 80) checks (reusing main.py's already-built MemoryManager
+and ApprovalHistoryStore instances - never a new database connection,
+never a new store):
+    - Memory: calls the already-injected MemoryManager.count() - the
+      same shape as the Inbox/Schedule/Quarantine checks above.
+    - Approval history: sums the already-injected
+      ApprovalHistoryStore.count_by_status() across every status in
+      KNOWN_APPROVAL_STATUSES - the same reuse
+      ApprovalHistoryTool._format_history() already established (Phase
+      73, Batch 1), never a new store method, never an invented or
+      partial status list.
+
 dashboard.py is never invoked and DashboardReadModel is never
 constructed - it is a wholly separate process with its own independent
 database connection; the shared SQLite file's existence is already
@@ -71,9 +83,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from approval.approval_history_store import (
+    KNOWN_APPROVAL_STATUSES,
+    ApprovalHistoryStore,
+)
 from config.constants import APP_NAME, SecurityTier
 from config.settings import Settings
 from inbox.inbox_store import InboxStore
+from memory.memory_manager import MemoryManager
 from quarantine.quarantine_store import QuarantineStore
 from scheduling.schedule_store import ScheduleStore
 from security.security_manager import SecurityManager
@@ -101,6 +118,8 @@ class HealthCheckTool(BaseTool):
         schedule_store: ScheduleStore,
         quarantine_store: QuarantineStore,
         security_manager: SecurityManager,
+        memory_manager: MemoryManager,
+        approval_history_store: ApprovalHistoryStore,
     ) -> None:
         """Initialise the tool with already-built dependencies only.
 
@@ -127,6 +146,12 @@ class HealthCheckTool(BaseTool):
                 SecurityManager. Only classify_action() is ever called,
                 on this tool's own fixed action string - never anything
                 that touches approval state.
+            memory_manager: The already-constructed MemoryManager
+                (Phase 80, Batch 1). Only count() is ever called.
+            approval_history_store: The already-constructed
+                ApprovalHistoryStore (Phase 80, Batch 1). Only
+                count_by_status() is ever called, once per status in
+                KNOWN_APPROVAL_STATUSES.
         """
         self._registry = registry
         self._settings = settings
@@ -134,6 +159,8 @@ class HealthCheckTool(BaseTool):
         self._schedule_store = schedule_store
         self._quarantine_store = quarantine_store
         self._security_manager = security_manager
+        self._memory_manager = memory_manager
+        self._approval_history_store = approval_history_store
 
     @property
     def name(self) -> str:
@@ -191,6 +218,8 @@ class HealthCheckTool(BaseTool):
             f"  Inbox store: {self._inbox_status()}",
             f"  Schedule store: {self._schedule_status()}",
             f"  Quarantine store: {self._quarantine_status()}",
+            f"  Memory store: {self._memory_status()}",
+            f"  Approval history store: {self._approval_history_status()}",
             f"  Security Manager: {self._security_manager_status()}",
         ]
         return self.ok("\n".join(lines))
@@ -292,6 +321,47 @@ class HealthCheckTool(BaseTool):
         except Exception as exc:  # noqa: BLE001 - a health check must never crash
             return f"NOT reachable ({exc})"
         return f"reachable ({count} file{'' if count == 1 else 's'} recorded)"
+
+    def _memory_status(self) -> str:
+        """Report whether the already-injected MemoryManager is reachable
+        (Phase 80, Batch 1).
+
+        Calls only count() - a pure SQL COUNT query, no row hydration,
+        no write of any kind - the same shape as
+        _inbox_status()/_schedule_status()/_quarantine_status() above.
+        Never constructs a new MemoryManager or database connection.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            count = self._memory_manager.count()
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return f"reachable ({count} memor{'y' if count == 1 else 'ies'} recorded)"
+
+    def _approval_history_status(self) -> str:
+        """Report whether the already-injected ApprovalHistoryStore is
+        reachable (Phase 80, Batch 1).
+
+        The total is a true, unbounded sum of count_by_status() across
+        every status in KNOWN_APPROVAL_STATUSES - the same reuse
+        ApprovalHistoryTool._format_history() already established
+        (Phase 73, Batch 1) - never an invented or partial status list,
+        and never a new store method. No row is ever hydrated, and
+        nothing is ever created, approved, or declined.
+
+        Returns:
+            A short, human-readable status string.
+        """
+        try:
+            count = sum(
+                self._approval_history_store.count_by_status(status)
+                for status in KNOWN_APPROVAL_STATUSES
+            )
+        except Exception as exc:  # noqa: BLE001 - a health check must never crash
+            return f"NOT reachable ({exc})"
+        return f"reachable ({count} entr{'y' if count == 1 else 'ies'} recorded)"
 
     def _security_manager_status(self) -> str:
         """Report whether the already-injected SecurityManager correctly
