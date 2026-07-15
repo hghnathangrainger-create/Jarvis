@@ -2,7 +2,9 @@
 schedule_enable_tool.py
 
 A guarded tool that re-enables a previously disabled web-search-summary
-schedule (Phase 21, Batch 1).
+schedule (Phase 21, Batch 1; extended Phase 78, Batch 2 so the success
+confirmation identifies the enabled schedule's name (if any), query,
+and time_of_day).
 
 ScheduleEnableTool is a YELLOW tool: re-enabling a schedule resumes
 unattended runs, so it is classified YELLOW and runs only after explicit
@@ -71,8 +73,10 @@ class ScheduleEnableTool(BaseTool):
                 schedule_id: the id of the schedule to enable (required).
 
         Returns:
-            A successful ToolResult when enabled, or a failed result if
-            the id is missing or unknown.
+            A successful ToolResult when enabled, whose output identifies
+            the schedule's id, optional name, query, and time_of_day
+            (Phase 78, Batch 2), or a failed result if the id is missing
+            or unknown.
         """
         schedule_id = self._parse_id(request.input_data.get("schedule_id"))
         if schedule_id is None:
@@ -84,10 +88,14 @@ class ScheduleEnableTool(BaseTool):
         if record is None:
             return self.fail(f"No schedule found with id {schedule_id}.")
 
+        label = f" ({record.name})" if record.name else ""
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Enabled schedule {schedule_id}.",
+            output=(
+                f"Enabled schedule {record.id}{label}: '{record.query}' "
+                f"at {record.time_of_day} daily."
+            ),
             metadata={"schedule_id": str(schedule_id)},
         )
 

@@ -245,12 +245,76 @@ def test_enable_tool_enables_a_disabled_schedule(store: ScheduleStore) -> None:
     assert store.get(record.id).enabled is True
 
 
+# --- Enable/disable confirmation detail (Phase 78, Batch 2) ------------------
+
+
+def test_enable_confirmation_includes_id_query_and_time_unnamed(
+    store: ScheduleStore,
+) -> None:
+    record = store.create(query="jarvis news", time_of_day="08:00")
+    store.disable(record.id)
+    tool = ScheduleEnableTool(store)
+    result = tool.run(
+        ToolRequest(tool_name="schedule_enable", input_data={"schedule_id": record.id})
+    )
+    assert result.output == (
+        f"Enabled schedule {record.id}: 'jarvis news' at 08:00 daily."
+    )
+
+
+def test_enable_confirmation_includes_name_when_present(
+    store: ScheduleStore,
+) -> None:
+    record = store.create(
+        query="jarvis news", time_of_day="08:00", name="morning news"
+    )
+    store.disable(record.id)
+    tool = ScheduleEnableTool(store)
+    result = tool.run(
+        ToolRequest(tool_name="schedule_enable", input_data={"schedule_id": record.id})
+    )
+    assert result.output == (
+        f"Enabled schedule {record.id} (morning news): 'jarvis news' at "
+        "08:00 daily."
+    )
+
+
+def test_disable_confirmation_includes_id_query_and_time_unnamed(
+    store: ScheduleStore,
+) -> None:
+    record = store.create(query="jarvis news", time_of_day="08:00")
+    tool = ScheduleDisableTool(store)
+    result = tool.run(
+        ToolRequest(tool_name="schedule_disable", input_data={"schedule_id": record.id})
+    )
+    assert result.output == (
+        f"Disabled schedule {record.id}: 'jarvis news' at 08:00 daily."
+    )
+
+
+def test_disable_confirmation_includes_name_when_present(
+    store: ScheduleStore,
+) -> None:
+    record = store.create(
+        query="jarvis news", time_of_day="08:00", name="morning news"
+    )
+    tool = ScheduleDisableTool(store)
+    result = tool.run(
+        ToolRequest(tool_name="schedule_disable", input_data={"schedule_id": record.id})
+    )
+    assert result.output == (
+        f"Disabled schedule {record.id} (morning news): 'jarvis news' at "
+        "08:00 daily."
+    )
+
+
 def test_enable_tool_rejects_unknown_id(store: ScheduleStore) -> None:
     tool = ScheduleEnableTool(store)
     result = tool.run(
         ToolRequest(tool_name="schedule_enable", input_data={"schedule_id": 99999})
     )
     assert result.success is False
+    assert result.error == "No schedule found with id 99999."
 
 
 def test_disable_tool_rejects_unknown_id(store: ScheduleStore) -> None:
@@ -259,12 +323,25 @@ def test_disable_tool_rejects_unknown_id(store: ScheduleStore) -> None:
         ToolRequest(tool_name="schedule_disable", input_data={"schedule_id": 99999})
     )
     assert result.success is False
+    assert result.error == "No schedule found with id 99999."
 
 
 def test_enable_tool_rejects_missing_id(store: ScheduleStore) -> None:
     tool = ScheduleEnableTool(store)
     result = tool.run(ToolRequest(tool_name="schedule_enable", input_data={}))
     assert result.success is False
+    assert result.error == (
+        "Enabling a schedule requires a valid numeric 'schedule_id'."
+    )
+
+
+def test_disable_tool_rejects_missing_id(store: ScheduleStore) -> None:
+    tool = ScheduleDisableTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_disable", input_data={}))
+    assert result.success is False
+    assert result.error == (
+        "Disabling a schedule requires a valid numeric 'schedule_id'."
+    )
 
 
 def test_disable_tool_rejects_non_numeric_id(store: ScheduleStore) -> None:

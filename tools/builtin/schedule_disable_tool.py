@@ -2,7 +2,9 @@
 schedule_disable_tool.py
 
 A guarded tool that disables a web-search-summary schedule (Phase 21,
-Batch 1).
+Batch 1; extended Phase 78, Batch 2 so the success confirmation
+identifies the disabled schedule's name (if any), query, and
+time_of_day).
 
 ScheduleDisableTool is a YELLOW tool: disabling changes durable state,
 so it is classified YELLOW and runs only after explicit approval through
@@ -73,8 +75,10 @@ class ScheduleDisableTool(BaseTool):
                 schedule_id: the id of the schedule to disable (required).
 
         Returns:
-            A successful ToolResult when disabled, or a failed result if
-            the id is missing or unknown.
+            A successful ToolResult when disabled, whose output identifies
+            the schedule's id, optional name, query, and time_of_day
+            (Phase 78, Batch 2), or a failed result if the id is missing
+            or unknown.
         """
         schedule_id = self._parse_id(request.input_data.get("schedule_id"))
         if schedule_id is None:
@@ -86,10 +90,14 @@ class ScheduleDisableTool(BaseTool):
         if record is None:
             return self.fail(f"No schedule found with id {schedule_id}.")
 
+        label = f" ({record.name})" if record.name else ""
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Disabled schedule {schedule_id}.",
+            output=(
+                f"Disabled schedule {record.id}{label}: '{record.query}' "
+                f"at {record.time_of_day} daily."
+            ),
             metadata={"schedule_id": str(schedule_id)},
         )
 
