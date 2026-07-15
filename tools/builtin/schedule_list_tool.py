@@ -2,7 +2,8 @@
 schedule_list_tool.py
 
 A safe, read-only tool that lists Nathan's configured web-search-summary
-schedules (Phase 21, Batch 1).
+schedules (Phase 21, Batch 1; extended Phase 72, Batch 1 with a real,
+honest enabled/disabled count in the list header).
 
 ScheduleListTool is a GREEN tool. It only reads from a ScheduleStore and
 never creates, enables, disables, claims, or runs anything.
@@ -78,6 +79,11 @@ class ScheduleListTool(BaseTool):
     def _format_many(records: list[ScheduleRecord]) -> str:
         """Format a list of schedules into readable text.
 
+        The header reports a real, honest enabled/disabled count (Phase
+        72, Batch 1), tallied from this same already-fetched `records`
+        list - no new ScheduleStore method or query is used, and
+        schedules are never reordered or re-fetched to compute it.
+
         Args:
             records: The schedules to format.
 
@@ -86,7 +92,9 @@ class ScheduleListTool(BaseTool):
         """
         if not records:
             return "Schedules: none configured."
-        lines = ["Schedules:"]
+        enabled_count = sum(1 for record in records if record.enabled)
+        disabled_count = len(records) - enabled_count
+        lines = [f"Schedules ({enabled_count} enabled, {disabled_count} disabled):"]
         for record in records:
             lines.append(ScheduleListTool._format_entry(record))
         return "\n".join(lines)

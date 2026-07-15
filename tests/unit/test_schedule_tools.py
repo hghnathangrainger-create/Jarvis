@@ -137,6 +137,78 @@ def test_list_tool_never_mutates(store: ScheduleStore) -> None:
     assert store.list_all()[0].enabled is True
 
 
+# --- ScheduleListTool enabled/disabled header count (Phase 72, Batch 1) -------------
+
+
+def test_list_tool_header_shows_mixed_enabled_disabled_counts(
+    store: ScheduleStore,
+) -> None:
+    enabled_record = store.create(query="morning", time_of_day="08:00")
+    to_disable = store.create(query="evening", time_of_day="18:00")
+    store.disable(to_disable.id)
+    tool = ScheduleListTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    assert "Schedules (1 enabled, 1 disabled):" in result.output
+    # Existing row detail is still present alongside the new header.
+    assert "morning" in result.output
+    assert "evening" in result.output
+    assert enabled_record.enabled is True
+
+
+def test_list_tool_header_shows_honest_zero_disabled(store: ScheduleStore) -> None:
+    store.create(query="a", time_of_day="08:00")
+    store.create(query="b", time_of_day="09:00")
+    tool = ScheduleListTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    assert "Schedules (2 enabled, 0 disabled):" in result.output
+
+
+def test_list_tool_header_shows_honest_zero_enabled(store: ScheduleStore) -> None:
+    first = store.create(query="a", time_of_day="08:00")
+    second = store.create(query="b", time_of_day="09:00")
+    store.disable(first.id)
+    store.disable(second.id)
+    tool = ScheduleListTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    assert "Schedules (0 enabled, 2 disabled):" in result.output
+
+
+def test_list_tool_header_count_reflects_real_data_not_estimated(
+    store: ScheduleStore,
+) -> None:
+    """The header count must come from the same already-fetched records
+    the rows below it are built from - never a separate query, never an
+    estimate."""
+    for i in range(3):
+        store.create(query=f"q{i}", time_of_day="08:00")
+    disabled_one = store.list_all()[0]
+    store.disable(disabled_one.id)
+    tool = ScheduleListTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    assert "Schedules (2 enabled, 1 disabled):" in result.output
+    assert len(store.list_all()) == 3
+
+
+def test_list_tool_header_count_does_not_mutate_schedules(
+    store: ScheduleStore,
+) -> None:
+    store.create(query="a", time_of_day="08:00")
+    store.create(query="b", time_of_day="09:00")
+    before = store.list_all()
+    tool = ScheduleListTool(store)
+    tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    after = store.list_all()
+    assert before == after
+
+
+def test_empty_schedule_header_is_unchanged_by_batch_1(store: ScheduleStore) -> None:
+    """Phase 72, Batch 1 only changes the non-empty header - the empty
+    state must remain exactly as it was before this batch."""
+    tool = ScheduleListTool(store)
+    result = tool.run(ToolRequest(tool_name="schedule_list", input_data={}))
+    assert result.output == "Schedules: none configured."
+
+
 # --- ScheduleEnableTool / ScheduleDisableTool ---------------------------------------
 
 
