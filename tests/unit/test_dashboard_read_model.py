@@ -1099,6 +1099,92 @@ def test_get_quarantine_entries_respects_limit(rm) -> None:
     assert len(rows) == 2
 
 
+# --- get_quarantine_summary (Phase 66, Batch 1) ---------------------------------
+
+
+def test_quarantine_summary_reports_real_total_count(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+    )
+    quarantine.record_quarantine(
+        original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+    )
+
+    summary = read_model.get_quarantine_summary()
+    assert summary.total_count == 2
+
+
+def test_quarantine_summary_reports_real_latest_timestamp(rm) -> None:
+    """Compares against list_recent()'s own re-queried value (not the
+    freshly-created record.quarantined_at) since a freshly-flushed
+    record's timestamp is still timezone-aware while a value re-read
+    from SQLite comes back naive - the same documented UTC-in-substance-
+    but-naive-on-reload quirk every other timestamp in this project
+    already has (see docs/phase_19_implementation_plan.md section 8/12).
+    """
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+    )
+    quarantine.record_quarantine(
+        original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+    )
+    expected = quarantine.list_recent(limit=1)[0].quarantined_at
+
+    summary = read_model.get_quarantine_summary()
+    assert summary.latest_quarantined_at == expected
+
+
+def test_quarantine_summary_empty_store_reports_honest_zero_and_none(rm) -> None:
+    read_model, *_ = rm
+
+    summary = read_model.get_quarantine_summary()
+    assert summary.total_count == 0
+    assert summary.latest_quarantined_at is None
+
+
+def test_quarantine_summary_no_store_supplied_reports_honest_zero_and_none(
+    rm,
+) -> None:
+    """Backward compatible with any caller predating Phase 39: no
+    QuarantineStore supplied at all must return the same honest empty
+    summary as an empty store, never fail."""
+    from dashboard.read_model import DashboardReadModel
+
+    read_model, memory, approvals, workflows, inbox, schedules, _ = rm
+    no_quarantine_model = DashboardReadModel(
+        memory, approvals, workflows, inbox, schedules
+    )
+    summary = no_quarantine_model.get_quarantine_summary()
+    assert summary.total_count == 0
+    assert summary.latest_quarantined_at is None
+
+
+def test_quarantine_summary_does_not_mutate_quarantine_state(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    quarantine.record_quarantine(
+        original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
+    )
+    before = len(quarantine.list_recent())
+
+    read_model.get_quarantine_summary()
+
+    assert len(quarantine.list_recent()) == before
+
+
+def test_quarantine_summary_total_matches_real_quarantine_count(rm) -> None:
+    read_model, _, _, _, _, _, quarantine = rm
+    for i in range(5):
+        quarantine.record_quarantine(
+            original_path=f"/a/file{i}.txt",
+            quarantine_path=f"/trash/file{i}__{i:08d}.txt",
+        )
+
+    summary = read_model.get_quarantine_summary()
+    assert summary.total_count == quarantine.count()
+
+
 # --- get_system_status (Phase 62, Batch 1) --------------------------------------
 
 

@@ -12,6 +12,9 @@ Responsibilities:
     - List recorded quarantine metadata, newest first, for dashboard
       display (Phase 39) - a read-only listing over the same durable
       records, never the live filesystem.
+    - Report the total number of recorded quarantine entries (Phase 66,
+      Batch 1) - a true, unbounded count, never clamped the way
+      list_recent()'s own listing is.
 
 Does NOT:
     - Provide any update, delete, restore, or cleanup method. This is a
@@ -156,6 +159,19 @@ class QuarantineStore:
             if record is None:
                 return None
             return self._to_view(record)
+
+    def count(self) -> int:
+        """Return the total number of recorded quarantine entries.
+
+        A plain, unbounded COUNT - unlike list_recent(), this is never
+        clamped to _MAX_LIMIT, so it always reports the real, true total
+        (Phase 66, Batch 1).
+
+        Returns:
+            The total count of recorded quarantine entries.
+        """
+        with session_scope(self._session_factory) as db:
+            return db.query(QuarantineRecord).count()
 
     def list_recent(self, limit: int = 50) -> list[QuarantineRecordView]:
         """Return recorded quarantine metadata, newest first.

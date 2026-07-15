@@ -7,7 +7,8 @@ Phase 21 with schedules; extended Phase 39, Batch 1 with quarantine
 visibility; extended Phase 62, Batch 1 with system status, store
 reachability, and a merged recent-activity feed; extended Phase 65,
 Batch 1 with an inbox source-type breakdown and a schedule
-enabled/disabled breakdown).
+enabled/disabled breakdown; extended Phase 66, Batch 1 with an honest
+quarantine summary).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
@@ -87,6 +88,12 @@ Does NOT:
       "enabled" before "disabled", never reordered by count. Both counts
       come from tallying get_schedules()'s own already-fetched result -
       no new store method was added for this either.
+    - Fabricate a quarantine breakdown that doesn't correspond to real
+      data (Phase 66, Batch 1): get_quarantine_summary() never reports a
+      "known vs. unknown original path" split - QuarantineRecord.original_path
+      is never null, so every durable row already has a known path - and
+      never reports a total size, since no size is ever stored and this
+      class never inspects the filesystem to compute one.
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -515,6 +522,36 @@ class QuarantineRow:
     original_path: str
     quarantined_at: datetime
     session_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantineSummary:
+    """A small, honest, real-data-only summary of durable quarantine
+    records (Phase 66, Batch 1).
+
+    Deliberately not a category breakdown like the other dashboard
+    tabs' own KNOWN_X panels: quarantine records have no fixed-vocabulary
+    dimension (no status, no source type, no enabled/disabled flag) to
+    tally. total_count comes from QuarantineStore.count() - a true,
+    unbounded total, never the length of a capped list_recent() result.
+    latest_quarantined_at is derived from get_quarantine_entries()'s own
+    already-fetched, newest-first data - no second query is made for it.
+    Deliberately excludes a "known vs. unknown original path" breakdown
+    (QuarantineRecord.original_path is never null - every durable row
+    already has a known original path) and a total-size figure (no size
+    is ever stored, and computing one would require inspecting the live
+    filesystem, which this read model never does).
+
+    Attributes:
+        total_count: The real, current, all-time number of recorded
+            quarantine entries - zero is a valid, honestly reported
+            value on an empty store, never fabricated.
+        latest_quarantined_at: The most recently quarantined entry's
+            real timestamp, or None if no entries exist yet.
+    """
+
+    total_count: int
+    latest_quarantined_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1108,6 +1145,41 @@ class DashboardReadModel:
             )
             for record in records
         ]
+
+    def get_quarantine_summary(self) -> QuarantineSummary:
+        """Return a small, honest, real-data-only quarantine summary
+        (Phase 66, Batch 1).
+
+        total_count comes from one call to QuarantineStore.count() - a
+        true, unbounded, all-time total, never the length of a capped
+        list_recent() result. latest_quarantined_at is derived from
+        get_quarantine_entries(limit=1)'s own already-fetched,
+        newest-first data - no new query shape is introduced for it.
+        Returns an honest, empty QuarantineSummary (total_count=0,
+        latest_quarantined_at=None) when no QuarantineStore was supplied
+        (backward compatible with any caller predating Phase 39) or when
+        no quarantine records exist yet - never an error either way.
+
+        Deliberately never inspects .jarvis_trash/'s actual filesystem
+        contents (no size figure, no "known vs. unknown original path"
+        breakdown - see this class's own module docstring and
+        QuarantineSummary's own docstring for why neither is included).
+
+        Returns:
+            A QuarantineSummary describing the real, current total and
+            the most recent entry's real timestamp, or the honest empty
+            state described above.
+        """
+        if self._quarantine is None:
+            return QuarantineSummary(total_count=0, latest_quarantined_at=None)
+        total_count = self._quarantine.count()
+        latest_entries = self.get_quarantine_entries(limit=1)
+        latest_quarantined_at = (
+            latest_entries[0].quarantined_at if latest_entries else None
+        )
+        return QuarantineSummary(
+            total_count=total_count, latest_quarantined_at=latest_quarantined_at
+        )
 
     def get_system_status(self) -> DashboardSystemStatus:
         """Return Jarvis's current configuration status, or an honest

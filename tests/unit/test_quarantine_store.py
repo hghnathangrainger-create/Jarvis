@@ -264,6 +264,54 @@ def test_list_recent_does_not_modify_existing_records(
     assert unchanged.session_id == original.session_id
 
 
+# --- count (Phase 66, Batch 1) --------------------------------------------------
+
+
+def test_count_reflects_total_entries(store: QuarantineStore) -> None:
+    store.record_quarantine(
+        original_path="/a/first.txt", quarantine_path="/trash/first__1.txt"
+    )
+    store.record_quarantine(
+        original_path="/b/second.txt", quarantine_path="/trash/second__2.txt"
+    )
+
+    assert store.count() == 2
+
+
+def test_count_on_empty_store_is_zero(store: QuarantineStore) -> None:
+    assert store.count() == 0
+
+
+def test_count_is_not_clamped_like_list_recent(store: QuarantineStore) -> None:
+    """Unlike list_recent(), count() must report the real, true total -
+    never clamped to _MAX_LIMIT."""
+    for i in range(55):
+        store.record_quarantine(
+            original_path=f"/a/file{i}.txt",
+            quarantine_path=f"/trash/file{i}__{i:08d}.txt",
+        )
+
+    assert store.count() == 55
+
+
+def test_count_does_not_modify_existing_records(store: QuarantineStore) -> None:
+    original = store.record_quarantine(
+        original_path="/a/notes.txt",
+        quarantine_path="/trash/notes__11111111.txt",
+        session_id=7,
+    )
+
+    store.count()
+    store.count()
+
+    unchanged = store.get_by_quarantine_path("/trash/notes__11111111.txt")
+    assert unchanged is not None
+    assert unchanged.id == original.id
+    assert unchanged.original_path == original.original_path
+    assert unchanged.quarantine_path == original.quarantine_path
+    assert unchanged.session_id == original.session_id
+
+
 # --- Structural: write-once, no update/delete/restore/cleanup surface ----------
 
 
