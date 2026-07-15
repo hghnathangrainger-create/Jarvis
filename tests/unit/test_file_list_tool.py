@@ -112,13 +112,63 @@ def test_file_path_instead_of_folder_fails(
 
 
 def test_limit_is_respected(tool: FileListTool, sample_dir: Path) -> None:
+    """Phase 74 added an honest truncation notice line when more entries
+    exist than are shown - sample_dir has 4 entries and limit=2 here, so
+    exactly one extra, non-entry notice line is now expected alongside
+    the 2 shown entries. This assertion is updated intentionally to
+    account for it, not a regression."""
     result = _run(tool, path=str(sample_dir), limit=2)
     body = [
         line
         for line in result.output.splitlines()
-        if line.strip() and not line.startswith("Contents")
+        if line.strip()
+        and not line.startswith("Contents")
+        and not line.startswith("[showing")
     ]
     assert len(body) == 2
+
+
+# --- Truncation notice (Phase 74) ---------------------------------------------
+
+
+def test_more_entries_than_limit_shows_exact_notice(
+    tool: FileListTool, sample_dir: Path
+) -> None:
+    result = _run(tool, path=str(sample_dir), limit=2)
+    assert "[showing 2 of 4 entries; increase 'limit' to see more]" in result.output
+
+
+def test_exactly_limit_entries_shows_no_notice(
+    tool: FileListTool, sample_dir: Path
+) -> None:
+    result = _run(tool, path=str(sample_dir), limit=4)
+    assert "showing" not in result.output.lower()
+
+
+def test_fewer_entries_than_limit_shows_no_notice(
+    tool: FileListTool, sample_dir: Path
+) -> None:
+    result = _run(tool, path=str(sample_dir), limit=50)
+    assert "showing" not in result.output.lower()
+
+
+def test_empty_directory_unaffected_by_truncation_notice(
+    tool: FileListTool, tmp_path: Path
+) -> None:
+    result = _run(tool, path=str(tmp_path))
+    assert result.output == f"{tmp_path} is empty."
+    assert "showing" not in result.output.lower()
+
+
+def test_truncation_notice_does_not_change_entry_order_or_labels(
+    tool: FileListTool, sample_dir: Path
+) -> None:
+    result = _run(tool, path=str(sample_dir), limit=2)
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert lines[0] == f"Contents of {sample_dir}:"
+    assert lines[1] == "  [DIR] alpha_folder"
+    assert lines[2] == "        apple.txt"
+    assert lines[3] == "[showing 2 of 4 entries; increase 'limit' to see more]"
 
 
 # --- Security ----------------------------------------------------------------
