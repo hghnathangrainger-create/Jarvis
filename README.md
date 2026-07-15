@@ -564,7 +564,7 @@ This is a second, independent process — it does not require the Jarvis CLI to 
 
 | Tab | What it shows |
 |---|---|
-| Overview | Total memory count, the 5 most recent approval decisions, and the 5 most recently active workflows — every number traces to a real query, nothing estimated or simulated. |
+| Overview | As originally built here: total memory count, the 5 most recent approval decisions, and the 5 most recently active workflows — every number traces to a real query, nothing estimated or simulated. Substantially redesigned in Phase 62 into a "Jarvis Online" home screen with additional System Status/Store Reachability/Recent Activity panels — see Phase 62 below for the current Overview tab. |
 | Memories | Recent memories (optionally filtered by category), each with a 120-character preview; full content is shown only after selecting a row. |
 | Approval History | Recent approval history entries — action, tier, status, timestamps. Durable history only, explicitly not a live list of approvals currently awaiting a decision. |
 | Workflow History | Recently active workflows and, on selection, that workflow's full recorded transition history. Durable lifecycle history only, explicitly not resumable or executable state. |
@@ -1053,6 +1053,61 @@ No entry is ever saved unless this explicit command was used, and even then only
 ### What is deliberately NOT included in Phase 61
 
 No change to the plain `summarize webpage <url>` command's own behavior. No automatic/implicit saving of any kind — saving only ever happens when this exact explicit command was used. No change to the YELLOW `read webpage` approval gate, to `WebpageReadTool`, or to any trust boundary — webpage content remains untrusted and scanned exactly as before. No dashboard code change (the dashboard's Inbox view was already source-type-agnostic). No scheduler involvement or scheduler schema change. No new dependency. No Research Agent, Core service, voice, phone, goals, projects, or tasks.
+
+---
+
+## Phase 62 — Visible Jarvis Dashboard V1 (complete)
+
+The dashboard's Overview tab was, until now, five plain-text count lines — accurate, but not a home screen. Phase 62 redesigns it into a clearer "Jarvis Online" daily-use surface, still built entirely on real, already-durable backend data, still read-only, and still built on the Python standard library's `tkinter`/`ttk` — no new dependency. Delivered in three batches. See `docs/phase_62_completion_report.md` for the full closure write-up.
+
+- **Batch 1 — Read-model foundation.** `dashboard/read_model.py` gained `DashboardSystemStatus`, `StoreReachability`, and `ActivityRow` view models, plus `get_system_status()`, `get_store_reachability()`, and `get_recent_activity()`. System status reads only the already-loaded `Settings` object `dashboard.py`'s own composition root already builds — never a second `load_settings()` call — using the exact same field selection and secret-handling discipline `ConfigTool` already established for the CLI's `show config` command: the API key is only ever reported as "configured"/"not configured", never its value, a masked form, its length, or a hash. Store reachability wraps each store's existing read call in isolated try/except, never opening a new connection. Recent activity merges rows the read model's own `get_recent_*()` methods already return, sorted by real timestamp, capped, with deterministic non-AI summaries. `DashboardReadModel.__init__` gained a `settings` parameter, optional and defaulting to `None` for full backward compatibility.
+- **Batch 2 — UI layer.** `ui/dashboard_app.py`'s Overview tab was rebuilt around a "Jarvis Online" header and four independently-refreshed panels: System Status, Store Reachability, the original Summary Counts (kept, unchanged), and Recent Activity. Each panel has its own error variable, so one panel's read failure never blanks another's last-good state — the same per-tab isolation discipline this module already used elsewhere, now applied within one tab's four sub-panels.
+- **Batch 3 — End-to-end verification, documentation, and closure.** A real, temporary-database smoke test wires a real `DashboardReadModel` (with a real `Settings` object and one real row seeded in every domain) into a real `DashboardApp`, confirming all four panels render honestly from that real data and that the configured API key's own value never appears anywhere in the window. `docs/user_guide.md` and this section updated; the Phase 19 section's own "Dashboard views" table updated with a forward reference here, rather than left silently stale.
+
+### The redesigned Overview tab
+
+```
+Jarvis Online
+
+System Status
+  AI reasoning enabled: True
+  AI model: claude-...
+  Voice enabled: False (provider: none)
+  Voice input enabled: False (provider: none)
+  Log level: INFO
+  Database path: data/jarvis.db
+  Approval timeout (seconds): 60
+  Anthropic API key: configured
+
+Store Reachability
+  memory: reachable
+  approvals: reachable
+  workflow history: reachable
+  inbox: reachable
+  schedules: reachable
+  quarantine: reachable
+
+Summary Counts
+  Total memories stored: ...
+  Recent approval decisions shown below: ...
+  Recently active workflows shown below: ...
+  Total inbox entries: ...
+  Scheduled inbox entries: ... (most recent: ...)
+
+Recent Activity
+  <Time>  <Domain>  <Summary>
+  ...
+```
+
+If no `Settings` object were ever supplied, System Status shows a single honest "unavailable" line instead of guessing; if the optional `QuarantineStore` isn't configured, Store Reachability reports it as "not reachable (not configured)" rather than fabricating success. A store whose read call genuinely raises is reported "not reachable (<reason>)", isolated from every other store's own check.
+
+### Safety note: still read-only, still no new authority
+
+Nothing in Phase 62 adds a button, a command box, or any interactive control beyond the pre-existing "Refresh now" — proven directly by this project's own structural test walking every widget in the window and confirming exactly one `Button` exists anywhere. No execution, approval, command-routing, AI, or tool-execution component is imported by `dashboard/read_model.py` or `ui/dashboard_app.py` — confirmed structurally, unchanged from Phase 19. The Recent Activity feed is plain string formatting of already-real fields only; it is never AI-generated, and no score, percentage, or "readiness"/"intelligence" metric of any kind was added anywhere.
+
+### What is deliberately NOT included in Phase 62
+
+No command box, no approve/deny/run/restore/delete/enable/disable control, no dashboard write action of any kind. No new database table or column, no schema change. No new dependency. No CLI, scheduler, `SecurityManager`, approval, or quarantine/restore behavior change. No new command grammar. No real voice/audio work, no real microphone/STT/TTS, no hotkeys, no wake word, no always-listening behavior. No empty-trash, no permanent delete. No Research Agent, Core service, or phone integration. No autonomous behavior.
 
 ---
 

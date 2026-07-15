@@ -250,7 +250,7 @@ Seven tabs, all read-only:
 
 | Tab | Shows |
 |---|---|
-| **Overview** | Total memories, recent approval decisions, recently active workflows, total Inbox entries, and a real count + latest timestamp of scheduled Inbox entries specifically. |
+| **Overview** | A "Jarvis Online" home screen (Phase 62) with four honestly-isolated panels: **System Status** (AI reasoning/model, voice/voice-input configuration, log level, database path, approval timeout, and whether the API key is configured — never its value); **Store Reachability** (a plain reachable/not-reachable check for each durable store this dashboard depends on); **Summary Counts** (the original real-data counts: total memories, recent approval decisions, recently active workflows, total Inbox entries, scheduled Inbox entries); and **Recent Activity** (a merged, real-timestamp, newest-first list across memories, approvals, workflows, inbox, and quarantine — deterministic text only, never AI-generated). Any panel that can't be read shows its own honest error, without affecting the others. |
 | **Memories** | Recent memories (filterable by category), full content on selecting a row. |
 | **Approval History** | Past approval requests and decisions — durable history, not a live "awaiting your decision" list. |
 | **Workflow History** | Recently active workflows and their full recorded transition history on selection — durable history, not resumable state. |

@@ -24,6 +24,7 @@ import inspect
 import time
 import tkinter as tk
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,7 @@ sqlalchemy = pytest.importorskip("sqlalchemy")
 from sqlalchemy import create_engine
 
 from approval.approval_history_store import ApprovalHistoryStore
+from config.settings import Settings
 from dashboard.read_model import (
     ActivityRow,
     ApprovalRow,
@@ -56,6 +58,7 @@ from workflow.workflow_history_store import WorkflowHistoryStore
 import ui.dashboard_app as dashboard_app_module
 from ui.dashboard_app import (
     DashboardApp,
+    OVERVIEW_HEADER,
     WINDOW_TITLE,
     activity_row_to_tree_values,
     format_error_state,
@@ -144,6 +147,66 @@ def _make_real_stack() -> tuple[
         schedules,
         quarantine,
     )
+
+
+def _make_real_stack_with_settings(
+    settings: Settings | None,
+) -> tuple[
+    DashboardReadModel,
+    MemoryManager,
+    ApprovalHistoryStore,
+    WorkflowHistoryStore,
+    InboxStore,
+    ScheduleStore,
+    QuarantineStore,
+]:
+    """Build the same real stack _make_real_stack() does, but also
+    threading a Settings object through (Phase 62, Batch 3) - kept
+    separate so _make_real_stack()'s own 7-tuple shape and every
+    existing test destructuring it are completely unaffected."""
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    memory = MemoryManager(EpisodicMemoryStore(factory))
+    approvals = ApprovalHistoryStore(factory)
+    workflows = WorkflowHistoryStore(factory)
+    inbox = InboxStore(factory)
+    schedules = ScheduleStore(factory)
+    quarantine = QuarantineStore(factory)
+    return (
+        DashboardReadModel(
+            memory, approvals, workflows, inbox, schedules, quarantine, settings
+        ),
+        memory,
+        approvals,
+        workflows,
+        inbox,
+        schedules,
+        quarantine,
+    )
+
+
+def _test_settings(**overrides: object) -> Settings:
+    """Build a real Settings object for Phase 62, Batch 3 smoke tests,
+    mirroring test_dashboard_read_model.py's own established
+    _test_settings() helper pattern."""
+    defaults: dict[str, object] = dict(
+        anthropic_api_key="test-key-not-real",
+        ai_model="test-model",
+        ai_max_tokens=1024,
+        database_path=Path("unused.db"),
+        log_level="INFO",
+        approval_timeout_seconds=60,
+        debug=False,
+        ai_reasoning_enabled=False,
+        voice_enabled=False,
+        voice_speak_mode="off",
+        voice_provider="none",
+        voice_input_enabled=False,
+        voice_input_provider="none",
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)  # type: ignore[arg-type]
 
 
 class _RaisingReadModel:
@@ -957,3 +1020,114 @@ class TestDashboardAppWithRealTk:
         collect_buttons(root)
         assert len(buttons) == 1
         assert buttons[0].cget("text") == "Refresh now"
+
+    # --- Phase 62, Batch 3: end-to-end Overview smoke verification -------------
+
+    def test_overview_header_says_jarvis_online(self, root: tk.Tk) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        texts = []
+        for child in app._overview_frame.winfo_children():
+            try:
+                texts.append(str(child.cget("text")))
+            except tk.TclError:
+                continue
+        assert OVERVIEW_HEADER in texts
+
+    def test_overview_renders_all_panels_honestly_with_real_data_across_domains(
+        self, root: tk.Tk
+    ) -> None:
+        """A real, end-to-end smoke check: a real DashboardReadModel over
+        a real temporary database, a real Settings object, and one real
+        row seeded in every domain, wired into a real DashboardApp.
+        Confirms every one of the four redesigned Overview panels
+        renders honestly from that real data - never a fabricated
+        value, and never the configured API key's own value."""
+        settings = _test_settings(
+            ai_model="claude-test-model",
+            ai_reasoning_enabled=True,
+            anthropic_api_key="sk-should-never-appear-in-any-widget",
+        )
+        read_model, memory, approvals, workflows, inbox, _, quarantine = (
+            _make_real_stack_with_settings(settings)
+        )
+        memory.save("buy milk")
+        approvals.record_request(
+            request_id="req-1",
+            action="delete file",
+            reason="Deleting a file changes state and should be confirmed.",
+            security_tier="yellow",
+        )
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        inbox.append(source_type="web_search_summary", source_query="q", body="b")
+        quarantine.record_quarantine(
+            original_path="/a/notes.txt", quarantine_path="/trash/notes__1.txt"
+        )
+
+        app = _build_app(root, read_model)
+
+        status_texts = " ".join(
+            label.cget("text") for label in app._system_status_labels
+        )
+        assert "AI model: claude-test-model" in status_texts
+        assert "Anthropic API key: configured" in status_texts
+        assert "sk-should-never-appear-in-any-widget" not in status_texts
+
+        reachability_texts = " ".join(
+            label.cget("text") for label in app._reachability_labels
+        )
+        assert "memory: reachable" in reachability_texts
+        assert "quarantine: reachable" in reachability_texts
+
+        counts_texts = " ".join(label.cget("text") for label in app._overview_labels)
+        assert "Total memories stored: 1" in counts_texts
+
+        activity_children = app._activity_tree.get_children()
+        activity_domains = {
+            app._activity_tree.item(child, "values")[1] for child in activity_children
+        }
+        assert activity_domains == {
+            "memory",
+            "approval",
+            "workflow",
+            "inbox",
+            "quarantine",
+        }
+
+        assert app._system_status_error_var.get() == ""
+        assert app._reachability_error_var.get() == ""
+        assert app._overview_error_var.get() == ""
+        assert app._activity_error_var.get() == ""
+
+    def test_overview_system_status_honest_when_no_settings_configured(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        status_texts = " ".join(
+            label.cget("text") for label in app._system_status_labels
+        )
+        assert "unavailable" in status_texts.lower()
+
+    def test_overview_activity_empty_state_is_honest(self, root: tk.Tk) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        children = app._activity_tree.get_children()
+        assert len(children) == 1
+        assert app._activity_tree.item(children[0], "values")[0] == (
+            dashboard_app_module._ACTIVITY_EMPTY_STATE
+        )
+
+    def test_overview_reachability_reports_quarantine_reachable_with_real_store(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        reachability_texts = " ".join(
+            label.cget("text") for label in app._reachability_labels
+        )
+        assert "quarantine: reachable" in reachability_texts
