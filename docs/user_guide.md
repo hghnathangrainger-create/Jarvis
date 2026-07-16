@@ -103,11 +103,13 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 |---|---|---|
 | `remember this: <text>` | Saves a memory (general category). | GREEN |
 | `remember this as <category>: <text>` | Saves a memory under a specific category. | GREEN |
-| `show memories` | Lists recent memories. | GREEN |
+| `show memories` | Lists recent memories (10 by default). | GREEN |
 | `show memories in <category>` | Lists memories in one category. | GREEN |
+| `show memories limit <N>` / `show memories in <category> limit <N>` | Same as above, but shows up to `<N>` memories instead of the default (Phase 83). `<N>` is clamped between 1 and 50. | GREEN |
 | `show memory categories` / `list memory categories` | Shows a real, honest count of memories in each known category (`general`, `personal`, `project`, `preference`, `note`) — categories with no memories show `0`, always in that fixed order, never sorted by count. | GREEN |
-| `search memories for <query>` | Searches memory content. | GREEN |
+| `search memories for <query>` | Searches memory content (10 results by default). | GREEN |
 | `search memories in <category> for <query>` | Searches within one category. | GREEN |
+| `search memories for <query> limit <N>` / `search memories in <category> for <query> limit <N>` | Same as above, but returns up to `<N>` results instead of the default (Phase 83). `<N>` is clamped between 1 and 50. | GREEN |
 | `update memory <id>: <new text>` | Replaces a memory's content. | YELLOW |
 | `move memory <id> to <category>` | Re-categorizes a memory. | YELLOW |
 | `forget memory <id>` | Deletes one memory. | YELLOW |
@@ -117,11 +119,13 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 
 | Command | Does | Tier |
 |---|---|---|
-| `list files`, `list files in <path>`, `show files in <path>`, `list directory`, `list dir` | Lists a directory. | GREEN |
+| `list files`, `list files in <path>`, `show files in <path>`, `list directory`, `list dir` | Lists a directory (50 entries by default). | GREEN |
+| `list files limit <N>` / `list files in <path> limit <N>` | Same as above, but lists up to `<N>` entries instead of the default (Phase 83). `<N>` is clamped between 1 and 500. | GREEN |
 | `read file <path>`, `show file <path>`, `open file <path>`, `cat file <path>` | Shows a file's contents (up to 4000 characters by default). | GREEN |
 | `read file <path> up to <N> chars` / `... up to <N> characters` | Same as above, but reads up to `<N>` characters instead of the default (Phase 82). `<N>` is clamped between 1 and 100,000. | GREEN |
-| `search files for <pattern>` / `find files named <pattern>` | Finds files whose **name** contains `<pattern>` (case-insensitive), recursively from the project directory. | GREEN |
+| `search files for <pattern>` / `find files named <pattern>` | Finds files whose **name** contains `<pattern>` (case-insensitive), recursively from the project directory (50 results by default). | GREEN |
 | `find files containing <text>` / `search files containing <text>` | Finds files whose **content** contains `<text>` (case-insensitive), recursively from the project directory. Shows a short one-line context snippet per match — never the full file. | GREEN |
+| `search files for <pattern> limit <N>` / `find files containing <text> limit <N>` | Same as above, but returns up to `<N>` results instead of the default (Phase 83). `<N>` is clamped between 1 and 500. | GREEN |
 | `create file <path> with <content>` | Creates a new file. `with <content>` is optional (creates an empty file). | YELLOW |
 | `append <content> to file <path>` or `append to file <path> <content>` | Appends text to an existing file. | YELLOW |
 | `copy file <source> to <destination>` | Copies an existing file to a new path. | YELLOW |
@@ -131,7 +135,7 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `restore file <quarantine-file-or-path>` | Moves a quarantined file back to its recorded original location. Only works for files with known original-path metadata. | YELLOW |
 | `summarise file <path>` / `summarize file <path>` | Reads a file and produces an AI summary of it (advisory only; requires `AI_REASONING_ENABLED`). | GREEN (reading), summary is advisory |
 
-**File search notes (Phase 24):** always searches from the project directory (there is no "in `<directory>`" clause); results are capped at 50 by default (a message tells you if more may exist); noisy directories are always skipped (`.git`, `__pycache__`, `.pytest_cache`, virtual environments, `node_modules`, build/cache folders); binary and unreadable files are silently skipped rather than causing an error; content search never shows more than a short snippet of the matching line — never a full file's contents. File search cannot move, rename, copy, or delete anything — it is exactly as read-only as `list files`/`read file`.
+**File search notes (Phase 24; `limit <N>` added Phase 83):** always searches from the project directory (there is no "in `<directory>`" clause); results are capped at 50 by default, or `<N>` (up to 500) when a trailing `limit <N>` clause is given (a message tells you if more may exist); noisy directories are always skipped (`.git`, `__pycache__`, `.pytest_cache`, virtual environments, `node_modules`, build/cache folders); binary and unreadable files are silently skipped rather than causing an error; content search never shows more than a short snippet of the matching line — never a full file's contents. File search cannot move, rename, copy, or delete anything — it is exactly as read-only as `list files`/`read file`. Known limitation: a search pattern that itself legitimately ends in the word "limit" followed by a number (for example, searching for the phrase "speed limit 55") is indistinguishable from a genuine `limit <N>` clause and is treated as one — an inherent trade-off of trailing keyword grammar, not a bug.
 
 **File copy notes (Phase 25):** copies exactly one file to one new path — never a directory, never recursive. The source file is never read as text and never modified, moved, renamed, or deleted; it is byte-for-byte unchanged after the copy (verified even for binary files). **The destination must not already exist** — this tool will never overwrite anything, and approving the command does not change that: if the destination exists, the copy is refused regardless of your decision. The destination's parent folder must already exist (this tool does not create folders), matching `create file`'s own behavior exactly.
 

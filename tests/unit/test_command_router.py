@@ -1045,6 +1045,55 @@ def test_build_input_memory_list(router: CommandRouter) -> None:
     assert router.build_input("memory", "show memories") == {"operation": "list"}
 
 
+# --- Memory list result limit grammar (Phase 83, Batch 2) --------------------
+
+
+def test_build_input_memory_list_with_limit_and_no_category(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "show memories limit 5")
+    assert result == {"operation": "list", "limit": "5"}
+
+
+def test_build_input_memory_list_with_category_and_limit(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "show memories in project limit 5")
+    assert result == {"operation": "list", "category": "project", "limit": "5"}
+
+
+def test_build_input_memory_list_without_limit_omits_limit_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the existing no-limit grammar must remain completely
+    unchanged - no "limit" key at all, not even an empty one."""
+    result = router.build_input("memory", "show memories")
+    assert result == {"operation": "list"}
+    assert "limit" not in result
+
+    result = router.build_input("memory", "show memories in project")
+    assert result == {"operation": "list", "category": "project"}
+    assert "limit" not in result
+
+
+def test_build_input_memory_list_malformed_limit_clause_preserved_as_category(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "show memories in limit many")
+    assert result == {"operation": "list", "category": "limit many"}
+    assert "limit" not in result
+
+
+def test_build_input_memory_categories_unaffected_by_limit_grammar(
+    router: CommandRouter,
+) -> None:
+    """Regression: "show memory categories" must not be reinterpreted by
+    the new list-branch limit stripping - it is handled by its own,
+    earlier branch."""
+    result = router.build_input("memory", "show memory categories")
+    assert result == {"operation": "categories"}
+
+
 def test_build_input_memory_get_by_id(router: CommandRouter) -> None:
     assert router.build_input("memory", "show memory 5") == {
         "operation": "get",
@@ -1077,6 +1126,103 @@ def test_build_input_memory_search(router: CommandRouter) -> None:
     assert router.build_input("memory", "search memories for milk") == {
         "operation": "search",
         "query": "milk",
+    }
+
+
+# --- Memory search result limit grammar (Phase 83, Batch 2) ------------------
+
+
+def test_build_input_memory_search_with_limit_and_no_category(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "search memories for jarvis limit 5")
+    assert result == {"operation": "search", "query": "jarvis", "limit": "5"}
+
+
+def test_build_input_memory_search_with_category_and_limit(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input(
+        "memory", "search memories in project for jarvis limit 5"
+    )
+    assert result == {
+        "operation": "search",
+        "category": "project",
+        "query": "jarvis",
+        "limit": "5",
+    }
+
+
+def test_build_input_memory_search_without_limit_omits_limit_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the existing no-limit grammar must remain completely
+    unchanged - no "limit" key at all, not even an empty one."""
+    result = router.build_input("memory", "search memories for jarvis")
+    assert result == {"operation": "search", "query": "jarvis"}
+    assert "limit" not in result
+
+    result = router.build_input(
+        "memory", "search memories in project for jarvis"
+    )
+    assert result == {
+        "operation": "search",
+        "category": "project",
+        "query": "jarvis",
+    }
+    assert "limit" not in result
+
+
+def test_build_input_memory_search_limit_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "search memories for jarvis LIMIT 5")
+    assert result == {"operation": "search", "query": "jarvis", "limit": "5"}
+
+
+def test_build_input_memory_search_query_containing_limit_word_not_mis_split(
+    router: CommandRouter,
+) -> None:
+    """A query that merely contains the word "limit" (not followed by a
+    number at the end) must not be truncated."""
+    result = router.build_input("memory", "search memories for limitations")
+    assert result == {"operation": "search", "query": "limitations"}
+    assert "limit" not in result
+
+
+def test_build_input_memory_search_malformed_limit_clause_preserved_as_query(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("memory", "search memories for limit many")
+    assert result == {"operation": "search", "query": "limit many"}
+    assert "limit" not in result
+
+
+def test_build_input_memory_search_query_ending_in_limit_number_is_treated_as_limit(
+    router: CommandRouter,
+) -> None:
+    """Known, documented ambiguity: a query that itself legitimately ends
+    in "limit <number>" (e.g. a search for "speed limit 55") is
+    indistinguishable from a genuine structural limit clause and is
+    treated as one - the same inherent trade-off already accepted and
+    tested for file_search in Batch 1."""
+    result = router.build_input("memory", "search memories for speed limit 55")
+    assert result == {"operation": "search", "query": "speed", "limit": "55"}
+
+
+def test_build_input_memory_save_content_containing_limit_word_untouched(
+    router: CommandRouter,
+) -> None:
+    """Critical safety check: the "remember this" save branch must never
+    run the limit-stripping logic - a memory whose real content happens
+    to contain the word "limit" followed by a number must be saved
+    exactly as given, never silently truncated."""
+    result = router.build_input(
+        "memory", "remember this: buy milk limit 5 at the store"
+    )
+    assert result == {
+        "operation": "save",
+        "content": "buy milk limit 5 at the store",
     }
 
 

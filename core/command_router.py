@@ -2053,7 +2053,9 @@ class CommandRouter:
     def _build_memory_input(cls, text: str) -> dict[str, object]:
         """Parse a memory command into a memory-tool input dictionary.
 
-        Seven command shapes are recognised (case-insensitively):
+        Seven command shapes are recognised (case-insensitively), and the
+        list/search shapes additionally accept an optional trailing
+        "limit <N>" clause (Phase 83, Batch 2):
             remember this: <text>                     -> save (general)
             remember this as <category>: <text>       -> save (<category>)
             show memories                             -> list
@@ -2116,25 +2118,38 @@ class CommandRouter:
             # "remember this <content>" with no colon: treat the rest as content.
             return {"operation": "save", "content": after.strip()}
 
-        # --- Search: "search memories [in <category>] for <query>" ---
+        # --- Search: "search memories [in <category>] for <query> [limit <N>]" ---
         if "search" in lowered and (
             "memor" in lowered
         ):
-            category = cls._extract_between(lowered, stripped, " in ", " for ")
-            query = cls._extract_after(stripped, " for ")
+            # The optional trailing "limit <N>" clause (Phase 83, Batch 2) is
+            # stripped from the *whole* command first, so the existing
+            # category/query extraction below runs on the remainder exactly
+            # as before - never touching "remember this"/"show memory <id>"/
+            # "categories", whose own branches never reach this point.
+            remainder, limit = cls._split_trailing_result_limit(stripped)
+            category = cls._extract_between(
+                remainder.casefold(), remainder, " in ", " for "
+            )
+            query = cls._extract_after(remainder, " for ")
             result: dict[str, object] = {"operation": "search"}
             if query:
                 result["query"] = query
             if category:
                 result["category"] = category
+            if limit:
+                result["limit"] = limit
             return result
 
-        # --- List: "show memories [in <category>]" ---
+        # --- List: "show memories [in <category>] [limit <N>]" ---
         if ("show" in lowered or "list" in lowered) and "memor" in lowered:
-            category = cls._extract_after(stripped, " in ")
-            result = {"operation": "list"}
+            remainder, limit = cls._split_trailing_result_limit(stripped)
+            category = cls._extract_after(remainder, " in ")
+            result: dict[str, object] = {"operation": "list"}
             if category:
                 result["category"] = category
+            if limit:
+                result["limit"] = limit
             return result
 
         # Fallback: safe read-only list.

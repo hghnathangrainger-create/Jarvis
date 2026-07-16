@@ -155,6 +155,38 @@ def test_search_in_category(cli_factory) -> None:
     assert "in personal" in tail
 
 
+# --- result limit grammar (Phase 83, Batch 2) --------------------------------
+
+
+def test_show_memories_respects_custom_limit(cli_factory) -> None:
+    """The CLI's "limit <N>" grammar must actually reach MemoryTool
+    through the real CommandRouter -> ToolExecutor path and change how
+    many memories are shown - not just be parsed and dropped."""
+    output = cli_factory(
+        [
+            "remember this: memory one",
+            "remember this: memory two",
+            "remember this: memory three",
+            "show memories limit 2",
+            "exit",
+        ]
+    )
+    assert "[showing 2 of 3 memories; more memories exist]" in output
+
+
+def test_search_memories_respects_custom_limit(cli_factory) -> None:
+    output = cli_factory(
+        [
+            "remember this: jarvis one",
+            "remember this: jarvis two",
+            "remember this: jarvis three",
+            "search memories for jarvis limit 2",
+            "exit",
+        ]
+    )
+    assert "[showing 2 of 3 matches; more matches exist]" in output
+
+
 # --- do not remember, and GREEN throughout -----------------------------------
 
 
