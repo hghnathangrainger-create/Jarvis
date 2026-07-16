@@ -2,7 +2,9 @@
 file_move_tool.py
 
 A guarded write tool that moves or renames an existing file to a new
-destination path (Phase 26).
+destination path (Phase 26; extended Phase 85, Batch 1 so the success
+confirmation discloses the moved file's real byte size, matching
+FileCopyTool's own established convention).
 
 FileMoveTool is a YELLOW tool: relocating a file changes state - and,
 unlike file_copy, makes the original path stop existing - so its action
@@ -113,14 +115,17 @@ class FileMoveTool(BaseTool):
                 destination: the new path for the file (required).
 
         Returns:
-            A successful ToolResult when the move completes, or a
-            failed result if either path is missing, the source does
-            not exist or is not a file, the source and destination are
-            the same path, the destination already exists, the
-            destination's parent folder does not exist, or a
-            permission/OS error occurs (including an attempt to move
-            across two different drives/filesystems, which a plain
-            rename cannot do).
+            A successful ToolResult when the move completes, whose
+            output and metadata disclose the moved file's real byte
+            size - read from the destination path after the move
+            succeeds, since that is the file's actual, resulting state
+            (Phase 85, Batch 1) - or a failed result if either path is
+            missing, the source does not exist or is not a file, the
+            source and destination are the same path, the destination
+            already exists, the destination's parent folder does not
+            exist, or a permission/OS error occurs (including an
+            attempt to move across two different drives/filesystems,
+            which a plain rename cannot do).
         """
         raw_source = request.input_data.get("source")
         if not isinstance(raw_source, str) or not raw_source.strip():
@@ -185,13 +190,15 @@ class FileMoveTool(BaseTool):
         except OSError as exc:
             return self.fail(f"Could not move file: {exc}")
 
+        size = destination.stat().st_size
         return ToolResult(
             tool_name=self.name,
             success=True,
-            output=f"Moved '{source}' to '{destination}'.",
+            output=f"Moved '{source}' to '{destination}' ({size} bytes).",
             metadata={
                 "source": str(source),
                 "destination": str(destination),
+                "size_bytes": str(size),
                 "operation": "move",
             },
         )

@@ -106,6 +106,56 @@ def test_metadata_reports_operation_and_paths(
     assert result.metadata["destination"] == str(destination)
 
 
+# --- byte-size disclosure (Phase 85, Batch 1) ------------------------------------
+
+
+def test_success_message_includes_moved_file_byte_size(
+    tool: FileMoveTool, tmp_path: Path, source_file: Path
+) -> None:
+    """The confirmation must disclose the moved file's real byte size,
+    matching FileCopyTool's own established "(<size> bytes)" wording."""
+    expected_size = len(source_file.read_bytes())
+    destination = tmp_path / "dest.txt"
+    result = _run(tool, source=str(source_file), destination=str(destination))
+    assert f"({expected_size} bytes)" in result.output
+
+
+def test_empty_file_move_reports_zero_bytes_honestly(
+    tool: FileMoveTool, tmp_path: Path
+) -> None:
+    source = tmp_path / "empty.txt"
+    source.touch()
+    destination = tmp_path / "empty_moved.txt"
+
+    result = _run(tool, source=str(source), destination=str(destination))
+    assert result.success is True
+    assert "(0 bytes)" in result.output
+
+
+def test_metadata_includes_size_bytes_key_matching_real_file_size(
+    tool: FileMoveTool, tmp_path: Path, source_file: Path
+) -> None:
+    expected_size = len(source_file.read_bytes())
+    destination = tmp_path / "dest.txt"
+    result = _run(tool, source=str(source_file), destination=str(destination))
+    assert result.metadata["size_bytes"] == str(expected_size)
+
+
+def test_binary_file_move_reports_correct_byte_size(
+    tool: FileMoveTool, tmp_path: Path
+) -> None:
+    """Proves the size is read from the real, moved binary file - not
+    derived from any text-based length calculation."""
+    source = tmp_path / "image.bin"
+    original_bytes = bytes(range(256)) * 4
+    source.write_bytes(original_bytes)
+    destination = tmp_path / "image_moved.bin"
+
+    result = _run(tool, source=str(source), destination=str(destination))
+    assert f"({len(original_bytes)} bytes)" in result.output
+    assert result.metadata["size_bytes"] == str(len(original_bytes))
+
+
 # --- no-overwrite rule ----------------------------------------------------------
 
 
