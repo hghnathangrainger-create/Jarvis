@@ -266,7 +266,7 @@ This notice shows **only a count and a timestamp** — never the search query, t
 
 ## 8. Dashboard Guide
 
-Seven tabs, all read-only:
+Eight tabs, all read-only:
 
 | Tab | Shows |
 |---|---|
@@ -277,6 +277,7 @@ Seven tabs, all read-only:
 | **Inbox** | A **Source Breakdown** panel (Phase 65) showing a real, all-time count for every known producer — `web_search_summary`, `scheduled_web_search_summary`, `webpage_summary` — including an honest zero, always in that fixed order (never sorted by count); saved summaries (interactive web search, scheduled, and explicit webpage-summary saves), newest first; and, on selecting a row, a detail pane showing its source type, source query, creation time, included result count, and full saved text. |
 | **Schedules** | An **Enabled/Disabled Breakdown** panel (Phase 65) showing a real count of currently enabled and disabled schedules, including an honest zero for either state, "enabled" always shown before "disabled" (never sorted by count); and every configured schedule: id, name, query, time, enabled state, last run, created date. |
 | **Quarantine** | A **Summary** panel (Phase 66) showing the real, all-time total number of recorded quarantine entries and the most recently quarantined item's real timestamp (or "—" if none exist yet) — based on Jarvis's own durable quarantine records, never a live scan of `.jarvis_trash/`; and the existing table of recorded quarantined files: name, original path, quarantine path, quarantined-at time, and session id. Durable metadata only — read-only, and a row does not guarantee the file is still physically in `.jarvis_trash/` (it may have already been restored). |
+| **Brain** | (Phase 87) Real **AI / Reasoning** configuration (the same fields the Overview tab's System Status panel shows); real **Memory** count; an **Approval Status Breakdown** (a true, all-time count per known status, honest zeros included); a **Workflow Status Breakdown** (scoped to the most recently active workflows, same as the Workflow History tab's own breakdown, never an all-time total); a static **Known Limits** section (cannot call the Claude API or any AI provider, cannot edit its own repository, cannot run autonomously, has no live git/test-suite knowledge); and a static **Claude Prompt Studio** section listing all five `prepare <mode> prompt for <goal>` commands (Phase 86) for you to run from the CLI. Never shows a tool registry size, or the current git branch, commit, phase, or test-suite result — this dashboard has no access to any of that. |
 
 The dashboard **cannot**: run any command, approve or decline anything, create/edit/enable/disable a schedule, delete or change a memory, restore or delete a quarantined file, empty the trash, clean up old quarantined files, or write anything to the database at all — all restore/delete actions remain CLI-only, and both still require YELLOW approval there. It refreshes on a timer (every 5 seconds) plus a manual "Refresh now" button — this is polling, not live/real-time updating, and the title bar itself says "(read-only)".
 

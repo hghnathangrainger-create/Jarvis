@@ -42,6 +42,7 @@ from dashboard.read_model import (
     ActivityRow,
     ApprovalRow,
     ApprovalStatusCount,
+    BrainStatus,
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
@@ -68,12 +69,18 @@ from workflow.workflow_history_store import WorkflowHistoryStore
 
 import ui.dashboard_app as dashboard_app_module
 from ui.dashboard_app import (
+    BRAIN_CAPTION,
+    BRAIN_HEADER,
+    BRAIN_KNOWN_LIMITS,
+    BRAIN_PROMPT_STUDIO_CAPTION,
+    BRAIN_PROMPT_STUDIO_COMMANDS,
     DashboardApp,
     OVERVIEW_HEADER,
     WINDOW_TITLE,
     activity_row_to_tree_values,
     approval_detail_text,
     approval_status_breakdown_line,
+    brain_memory_line,
     format_error_state,
     format_timestamp,
     inbox_detail_text,
@@ -283,6 +290,9 @@ class _RaisingReadModel:
     def get_schedule_enabled_breakdown(self, limit: int = 50):
         raise RuntimeError("simulated schedule enabled breakdown query failure")
 
+    def get_brain_status(self):
+        raise RuntimeError("simulated brain status query failure")
+
 
 # --- pure formatting/mapping functions (no Tk) --------------------------------
 
@@ -364,6 +374,26 @@ def test_approval_status_breakdown_line_formats_real_count() -> None:
 def test_approval_status_breakdown_line_formats_honest_zero() -> None:
     row = ApprovalStatusCount(status="expired", count=0)
     assert approval_status_breakdown_line(row) == "expired: 0"
+
+
+def test_brain_memory_line_formats_real_count() -> None:
+    brain = BrainStatus(
+        system_status=DashboardSystemStatus(available=False),
+        memory_count=3,
+        approval_breakdown=(),
+        workflow_breakdown=(),
+    )
+    assert brain_memory_line(brain) == "Total memories stored: 3"
+
+
+def test_brain_memory_line_formats_honest_zero() -> None:
+    brain = BrainStatus(
+        system_status=DashboardSystemStatus(available=False),
+        memory_count=0,
+        approval_breakdown=(),
+        workflow_breakdown=(),
+    )
+    assert brain_memory_line(brain) == "Total memories stored: 0"
 
 
 def test_workflow_status_breakdown_line_formats_real_count() -> None:
@@ -821,11 +851,34 @@ _FORBIDDEN_IMPORT_NAMES = {
     "FileDeleteTool",
     "QuarantineListTool",
     "QuarantineStore",
+    # Phase 87, Batch 2: the Brain tab must render only BrainStatus -
+    # never a new dependency on main.py's composition root, the tool
+    # registry, the CLI tool layer, or an AI-provider prompt-building
+    # path. Its Known Limits/Prompt Studio sections are static,
+    # hand-maintained text, never imported from
+    # tools/builtin/jarvis_brain_tool.py or ai/prompt_studio.py.
+    "ToolRegistry",
+    "JarvisBrainStatusTool",
+    "PromptBuilder",
 }
-_FORBIDDEN_MODULES = {"subprocess", "webbrowser", "os.system"}
+_FORBIDDEN_MODULES = {
+    "subprocess",
+    "webbrowser",
+    "os.system",
+    # Phase 87, Batch 2.
+    "git",
+    "main",
+    "tools.registry",
+    "tools.builtin.jarvis_brain_tool",
+    "ai.prompt_studio",
+}
 
 
 def test_dashboard_app_module_imports_no_execution_component() -> None:
+    """Extended Phase 87, Batch 2 to also collect each ImportFrom's own
+    module path (not just the imported symbol names), so a `from main
+    import ...`- or `from tools.builtin.jarvis_brain_tool import ...`-
+    shaped import would also be caught, not just a bare `import main`."""
     source = inspect.getsource(dashboard_app_module)
     tree = ast.parse(source)
 
@@ -834,6 +887,8 @@ def test_dashboard_app_module_imports_no_execution_component() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             imported_names.update(alias.name for alias in node.names)
+            if node.module:
+                imported_modules.add(node.module)
         elif isinstance(node, ast.Import):
             imported_modules.update(alias.name for alias in node.names)
 
@@ -901,7 +956,7 @@ class TestDashboardAppWithRealTk:
         assert root.title() == WINDOW_TITLE
         assert "read-only" in WINDOW_TITLE.lower()
 
-    def test_seven_tabs_exist(self, root: tk.Tk) -> None:
+    def test_eight_tabs_exist(self, root: tk.Tk) -> None:
         read_model, *_ = _make_real_stack()
         app = _build_app(root, read_model)
         tab_texts = [
@@ -915,6 +970,7 @@ class TestDashboardAppWithRealTk:
             "Inbox",
             "Schedules",
             "Quarantine",
+            "Brain",
         ]
 
     def test_memory_rows_render_real_data(self, root: tk.Tk) -> None:
@@ -1023,6 +1079,7 @@ class TestDashboardAppWithRealTk:
             "Could not read quarantine summary"
             in app._quarantine_summary_error_var.get()
         )
+        assert "Could not read brain status" in app._brain_error_var.get()
 
     def test_one_overview_panel_failure_does_not_blank_another(
         self, root: tk.Tk
@@ -2113,3 +2170,170 @@ class TestDashboardAppWithRealTk:
         schedules_tab_frame = app._schedules_tree.master
         assert _collect_buttons(inbox_tab_frame) == []
         assert _collect_buttons(schedules_tab_frame) == []
+
+    # --- Brain tab (Phase 87, Batch 2) ------------------------------------------
+
+    @staticmethod
+    def _collect_label_texts(widget: tk.Widget) -> list[str]:
+        found: list[str] = []
+        if widget.winfo_class() == "TLabel":
+            found.append(widget.cget("text"))
+        for child in widget.winfo_children():
+            found.extend(TestDashboardAppWithRealTk._collect_label_texts(child))
+        return found
+
+    def test_brain_tab_renders_ai_reasoning_information_from_read_model(
+        self, root: tk.Tk
+    ) -> None:
+        settings = _test_settings(
+            ai_model="claude-test-model", ai_reasoning_enabled=True
+        )
+        read_model, *_ = _make_real_stack_with_settings(settings)
+        app = _build_app(root, read_model)
+
+        texts = "\n".join(
+            label.cget("text") for label in app._brain_system_status_labels
+        )
+        assert "AI reasoning enabled: True" in texts
+        assert "AI model: claude-test-model" in texts
+        assert app._brain_error_var.get() == ""
+
+    def test_brain_tab_ai_reasoning_information_honest_when_unavailable(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()  # no Settings supplied
+        app = _build_app(root, read_model)
+
+        texts = [label.cget("text") for label in app._brain_system_status_labels]
+        assert len(texts) == 1
+        assert "unavailable" in texts[0].lower()
+
+    def test_brain_tab_renders_memory_count(self, root: tk.Tk) -> None:
+        read_model, memory, *_ = _make_real_stack()
+        memory.save("buy milk")
+        memory.save("call dentist")
+        app = _build_app(root, read_model)
+
+        texts = [label.cget("text") for label in app._brain_memory_labels]
+        assert "Total memories stored: 2" in texts
+
+    def test_brain_tab_renders_memory_count_honest_zero(self, root: tk.Tk) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        texts = [label.cget("text") for label in app._brain_memory_labels]
+        assert "Total memories stored: 0" in texts
+
+    def test_brain_tab_renders_approval_breakdown(self, root: tk.Tk) -> None:
+        from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+        read_model, _, approvals, *_ = _make_real_stack()
+        approvals.record_request(
+            request_id="req-1",
+            action="delete file",
+            reason="r",
+            security_tier="yellow",
+        )
+        app = _build_app(root, read_model)
+
+        texts = [label.cget("text") for label in app._brain_approval_breakdown_labels]
+        assert len(texts) == len(KNOWN_APPROVAL_STATUSES)
+        assert "pending: 1" in texts
+
+    def test_brain_tab_renders_workflow_breakdown(self, root: tk.Tk) -> None:
+        from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+        read_model, _, _, workflows, *_ = _make_real_stack()
+        workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+        app = _build_app(root, read_model)
+
+        texts = [label.cget("text") for label in app._brain_workflow_breakdown_labels]
+        assert len(texts) == len(KNOWN_WORKFLOW_STATUSES)
+        assert "workflow_started: 1" in texts
+
+    def test_brain_tab_renders_known_limits_section(self, root: tk.Tk) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        brain_tab_frame = app._brain_memory_frame.master
+        all_texts = "\n".join(self._collect_label_texts(brain_tab_frame))
+        for limit in BRAIN_KNOWN_LIMITS:
+            assert limit in all_texts
+
+    def test_brain_tab_renders_prompt_studio_discoverability_commands(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        brain_tab_frame = app._brain_memory_frame.master
+        all_texts = "\n".join(self._collect_label_texts(brain_tab_frame))
+        for command in BRAIN_PROMPT_STUDIO_COMMANDS:
+            assert command in all_texts
+        assert "never calls the Claude API" in all_texts
+
+    def test_brain_tab_refresh_updates_with_fresh_data(self, root: tk.Tk) -> None:
+        read_model, memory, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+        assert "Total memories stored: 0" in [
+            label.cget("text") for label in app._brain_memory_labels
+        ]
+
+        memory.save("new memory")
+        app.refresh_all()
+
+        assert "Total memories stored: 1" in [
+            label.cget("text") for label in app._brain_memory_labels
+        ]
+
+    def test_brain_tab_no_write_widget_introduced(self, root: tk.Tk) -> None:
+        """Structural, behavioral proof that the Brain tab never
+        introduced a button or other write-triggering widget - the
+        Prompt Studio section is plain informational text only."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        def _collect_buttons(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TButton":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_buttons(child))
+            return found
+
+        brain_tab_frame = app._brain_memory_frame.master
+        assert _collect_buttons(brain_tab_frame) == []
+
+    def test_brain_status_failure_isolated_from_other_tabs(self, root: tk.Tk) -> None:
+        """A failure reading brain status must never blank another
+        tab's own most recent successful state, mirroring this module's
+        established per-panel isolation convention (Phase 62, Batch 2's
+        own test_one_overview_panel_failure_does_not_blank_another)."""
+
+        class _PartiallyRaisingReadModel(_RaisingReadModel):
+            def get_overview(self):
+                return DashboardOverview(
+                    total_memory_count=0,
+                    recent_approvals=[],
+                    recent_workflows=[],
+                    total_inbox_count=0,
+                    recent_inbox_entries=[],
+                    total_scheduled_inbox_count=0,
+                    latest_scheduled_inbox_created_at=None,
+                )
+
+        app = _build_app(root, _PartiallyRaisingReadModel())
+        assert "Could not read brain status" in app._brain_error_var.get()
+        assert app._overview_error_var.get() == ""
+
+    def test_brain_caption_discloses_no_tool_registry_or_git_state(self) -> None:
+        lowered = BRAIN_CAPTION.lower()
+        assert "tool registry size" in lowered
+        assert "git branch, commit, phase, or test-suite result" in lowered
+
+    def test_brain_header_is_jarvis_brain(self) -> None:
+        assert BRAIN_HEADER == "Jarvis Brain"
+
+    def test_brain_prompt_studio_caption_discloses_no_api_call(self) -> None:
+        lowered = BRAIN_PROMPT_STUDIO_CAPTION.lower()
+        assert "never calls the claude api" in lowered

@@ -8,14 +8,18 @@ Quarantine tab; extended Phase 65, Batch 2 with an Inbox Source
 Breakdown panel, an enhanced Inbox detail pane, and a Schedules
 Enabled/Disabled Breakdown panel; extended Phase 66, Batch 2 with a
 Quarantine Summary panel; Phase 67 made a wording-only consistency
-pass across the Phase 62-66 series - no behavior changed).
+pass across the Phase 62-66 series - no behavior changed; extended
+Phase 87, Batch 2 with a Brain tab surfacing real AI/reasoning
+configuration, memory count, and approval/workflow breakdowns, plus a
+static Known Limits section and a static Claude Prompt Studio
+discoverability section).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
       WorkflowRow, WorkflowTransitionRow, InboxRow, ScheduleRow,
-      QuarantineRow, DashboardOverview) into a seven-tab ttk.Notebook
-      window: Overview, Memories, Approval History, Workflow History,
-      Inbox, Schedules, Quarantine.
+      QuarantineRow, DashboardOverview, BrainStatus) into an eight-tab
+      ttk.Notebook window: Overview, Memories, Approval History,
+      Workflow History, Inbox, Schedules, Quarantine, Brain.
     - Refresh displayed state manually (a button) and periodically (a
       fixed-interval Tk `.after()` tick calling the same refresh code) -
       never claimed as "live" or "real-time".
@@ -47,6 +51,26 @@ Does NOT:
       Quarantine tab reads only DashboardReadModel's own durable
       database records - it never duplicates QuarantineListTool's own
       filesystem-listing logic.
+    - Import tools.builtin.jarvis_brain_tool, ToolRegistry, main, ai.
+      prompt_studio, CommandRouter, AIRouter, AIReasoningEngine,
+      PromptBuilder, subprocess, or git anywhere (Phase 87, Batch 2):
+      the Brain tab renders only BrainStatus, which
+      DashboardReadModel.get_brain_status() already composes from
+      pre-existing methods/fields. Its Known Limits and Claude Prompt
+      Studio sections are static, hand-maintained text - independently
+      written here, not imported from tools/builtin/jarvis_brain_tool.py
+      or ai/prompt_studio.py - mirroring this module's own established
+      "duplicate a small amount of hand-maintained text rather than
+      cross-import the CLI tool layer" discipline (the same choice
+      get_system_status() already made relative to ConfigTool).
+    - Show a tool registry size, or a real git branch/commit/phase/
+      test-suite result, anywhere on the Brain tab (Phase 87, Batch 2):
+      neither is ever obtainable from this process (see dashboard.py's
+      own module docstring) and neither is ever fabricated.
+    - Give the Claude Prompt Studio section a button, or any other
+      widget wired to run a command, open the CLI, or call AI (Phase
+      87, Batch 2): it is plain, informational text only - "Refresh
+      now" remains the only interactive control in the entire window.
 
 The pure formatting/mapping functions in this module (format_timestamp,
 *_to_tree_values, empty/error-state text) do not touch Tk at all, so they
@@ -64,6 +88,7 @@ from dashboard.read_model import (
     ActivityRow,
     ApprovalRow,
     ApprovalStatusCount,
+    BrainStatus,
     DashboardOverview,
     DashboardReadModel,
     DashboardSystemStatus,
@@ -207,6 +232,60 @@ QUARANTINE_CAPTION = (
 QUARANTINE_SUMMARY_CAPTION = (
     "Based on Jarvis's own durable quarantine records - not a live scan "
     "of .jarvis_trash/'s actual contents."
+)
+
+#: Read-only wording for the Brain tab (Phase 87, Batch 2): the same
+#: "current as of last refresh, never live/real-time" honesty already
+#: established for OVERVIEW_HEADER, plus an explicit disclosure of what
+#: this tab deliberately does not and cannot show - mirroring
+#: dashboard/read_model.py's own BrainStatus docstring.
+BRAIN_HEADER = "Jarvis Brain"
+BRAIN_CAPTION = (
+    "Real AI/reasoning configuration and real memory/approval/workflow "
+    "counts, read directly from Jarvis's own configuration and durable "
+    "stores - read-only, current as of the last refresh, never live or "
+    "real-time. Does not show a tool registry size, or the current git "
+    "branch, commit, phase, or test-suite result - this dashboard has "
+    "no access to any of that, and none of it is fabricated."
+)
+
+#: Hand-maintained, independently-written Known Limits text for the
+#: Brain tab (Phase 87, Batch 2) - deliberately NOT imported from
+#: tools/builtin/jarvis_brain_tool.py's own _CURRENT_LIMITS, mirroring
+#: this module's established "duplicate a small amount of text rather
+#: than cross-import the CLI tool layer" discipline. Kept consistent in
+#: spirit with that tool's own wording, but maintained separately.
+BRAIN_KNOWN_LIMITS: tuple[str, ...] = (
+    "Cannot call the Claude API or any other AI provider from this "
+    "dashboard.",
+    "Cannot edit, patch, or apply changes to Jarvis's own repository.",
+    "Cannot run autonomously - every write action still requires your "
+    "explicit approval via the CLI.",
+    "Has no live knowledge of the current git branch, commit, or test "
+    "suite result - that state is not tracked anywhere in this app.",
+    "Every figure shown above is a real, live count or configuration "
+    "value - never simulated, estimated, or fabricated.",
+)
+
+#: Static, hand-maintained Claude Prompt Studio discoverability text
+#: (Phase 87, Batch 2) - a fully static UI list rather than an import of
+#: ai.prompt_studio.known_modes(), because that function only returns
+#: bare mode names ("implementation", "review", ...), not the full CLI
+#: command phrasing shown below; writing the five phrases by hand here,
+#: mirroring HelpTool's own established hand-maintained-text discipline,
+#: avoids a data-shape mismatch without introducing any new dependency.
+BRAIN_PROMPT_STUDIO_CAPTION = (
+    "Claude Prompt Studio (Phase 86) assembles a well-structured, "
+    "Claude-ready prompt for you to copy and paste manually - run any "
+    "command below from the CLI. This dashboard cannot run them, and "
+    "never calls the Claude API or any AI provider."
+)
+BRAIN_PROMPT_STUDIO_COMMANDS: tuple[str, ...] = (
+    "prepare implementation prompt for <goal>",
+    "prepare review prompt for <goal>",
+    "prepare brainstorm prompt for <goal>",
+    "prepare critique prompt for <goal>",
+    "prepare compare prompt for <goal>",
 )
 
 
@@ -641,6 +720,25 @@ def inbox_detail_text(row: InboxRow) -> str:
     )
 
 
+def brain_memory_line(brain: BrainStatus) -> str:
+    """Format BrainStatus's real memory count as a single honest status
+    line (Phase 87, Batch 2).
+
+    Never fabricates, estimates, or infers anything: the count shown is
+    exactly BrainStatus.memory_count, which
+    DashboardReadModel.get_brain_status() itself composes from the same
+    MemoryManager.count() call get_overview() already makes - never a
+    new query.
+
+    Args:
+        brain: The brain status view model to summarise.
+
+    Returns:
+        A single plain-text line naming the real memory count.
+    """
+    return f"Total memories stored: {brain.memory_count}"
+
+
 class DashboardApp:
     """The tkinter/ttk read-only dashboard window.
 
@@ -688,6 +786,7 @@ class DashboardApp:
         self._build_inbox_tab()
         self._build_schedules_tab()
         self._build_quarantine_tab()
+        self._build_brain_tab()
 
         refresh_bar = ttk.Frame(root, padding=(6, 4))
         refresh_bar.pack(fill="x")
@@ -1119,6 +1218,81 @@ class DashboardApp:
         tree.pack(fill="both", expand=True, pady=(4, 4))
         self._quarantine_tree = tree
 
+    def _build_brain_tab(self) -> None:
+        """Build the Brain tab (Phase 87, Batch 2): real AI/reasoning
+        configuration, memory count, and approval/workflow breakdowns -
+        all four sourced from one DashboardReadModel.get_brain_status()
+        call - plus a static Known Limits section and a static Claude
+        Prompt Studio discoverability section. A single error variable
+        covers all four dynamic sections, since they come from one
+        combined BrainStatus fetch rather than four independent
+        queries; the two static sections are built once here and never
+        rebuilt on refresh, since they never change."""
+        frame = ttk.Frame(self._notebook, padding=(8, 8))
+        self._notebook.add(frame, text="Brain")
+
+        ttk.Label(
+            frame, text=BRAIN_HEADER, font=("TkDefaultFont", 14, "bold")
+        ).pack(anchor="w", pady=(0, 6))
+        ttk.Label(frame, text=BRAIN_CAPTION, wraplength=480).pack(anchor="w")
+
+        self._brain_error_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self._brain_error_var, foreground="red").pack(
+            anchor="w"
+        )
+
+        # --- AI / Reasoning ----------------------------------------------------
+        ttk.Label(
+            frame, text="AI / Reasoning", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._brain_system_status_frame = ttk.Frame(frame)
+        self._brain_system_status_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_system_status_labels: list[ttk.Label] = []
+
+        # --- Memory --------------------------------------------------------------
+        ttk.Label(frame, text="Memory", font=("TkDefaultFont", 10, "bold")).pack(
+            anchor="w", pady=(6, 0)
+        )
+        self._brain_memory_frame = ttk.Frame(frame)
+        self._brain_memory_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_memory_labels: list[ttk.Label] = []
+
+        # --- Approval Status Breakdown -------------------------------------------
+        ttk.Label(
+            frame, text="Approval Status Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        self._brain_approval_breakdown_frame = ttk.Frame(frame)
+        self._brain_approval_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_approval_breakdown_labels: list[ttk.Label] = []
+
+        # --- Workflow Status Breakdown --------------------------------------------
+        ttk.Label(
+            frame, text="Workflow Status Breakdown", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            frame, text=WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE, wraplength=480
+        ).pack(anchor="w")
+        self._brain_workflow_breakdown_frame = ttk.Frame(frame)
+        self._brain_workflow_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_workflow_breakdown_labels: list[ttk.Label] = []
+
+        # --- Known Limits (static, built once) ------------------------------------
+        ttk.Label(
+            frame, text="Known Limits", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        for limit in BRAIN_KNOWN_LIMITS:
+            ttk.Label(frame, text=f"- {limit}", wraplength=480).pack(anchor="w")
+
+        # --- Claude Prompt Studio (static, built once) -----------------------------
+        ttk.Label(
+            frame, text="Claude Prompt Studio", font=("TkDefaultFont", 10, "bold")
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(frame, text=BRAIN_PROMPT_STUDIO_CAPTION, wraplength=480).pack(
+            anchor="w"
+        )
+        for command in BRAIN_PROMPT_STUDIO_COMMANDS:
+            ttk.Label(frame, text=f"- {command}", wraplength=480).pack(anchor="w")
+
     # --- refresh ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
@@ -1143,6 +1317,7 @@ class DashboardApp:
         self._refresh_schedules()
         self._refresh_quarantine_summary()
         self._refresh_quarantine()
+        self._refresh_brain()
         self._last_refreshed_var.set(
             f"Last refreshed: {format_timestamp(datetime.now(timezone.utc))}"
         )
@@ -1455,6 +1630,46 @@ class DashboardApp:
             return
         for row in rows:
             tree.insert("", "end", values=quarantine_row_to_tree_values(row))
+
+    def _refresh_brain(self) -> None:
+        """Refresh the Brain tab's four dynamic sections from one
+        combined DashboardReadModel.get_brain_status() call (Phase 87,
+        Batch 2).
+
+        A single error state covers all four sections here, unlike the
+        Overview tab's four independently-isolated panels: BrainStatus
+        is itself one atomic result of one call, so either all four
+        sections have fresh data or none do - there is no meaningful
+        finer-grained isolation to offer. On failure, all four panels
+        keep their most recent successful state untouched, exactly as
+        every other panel in this module already does.
+        """
+        try:
+            brain = self._read_model.get_brain_status()
+        except Exception as exc:  # noqa: BLE001 - isolate any read failure
+            self._brain_error_var.set(format_error_state("brain status", exc))
+            return
+        self._brain_error_var.set("")
+        self._brain_system_status_labels = self._render_label_lines(
+            self._brain_system_status_frame,
+            self._brain_system_status_labels,
+            system_status_lines(brain.system_status),
+        )
+        self._brain_memory_labels = self._render_label_lines(
+            self._brain_memory_frame,
+            self._brain_memory_labels,
+            [brain_memory_line(brain)],
+        )
+        self._brain_approval_breakdown_labels = self._render_label_lines(
+            self._brain_approval_breakdown_frame,
+            self._brain_approval_breakdown_labels,
+            [approval_status_breakdown_line(row) for row in brain.approval_breakdown],
+        )
+        self._brain_workflow_breakdown_labels = self._render_label_lines(
+            self._brain_workflow_breakdown_frame,
+            self._brain_workflow_breakdown_labels,
+            [workflow_status_breakdown_line(row) for row in brain.workflow_breakdown],
+        )
 
     def _schedule_next_refresh(self) -> None:
         """Schedule the next periodic requery via Tk's own `.after()`.
