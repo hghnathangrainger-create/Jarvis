@@ -99,6 +99,7 @@ from tools.builtin import (
     HealthCheckTool,
     HelpTool,
     InfoTool,
+    JarvisBrainStatusTool,
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
@@ -290,6 +291,21 @@ def build_orchestrator() -> JarvisOrchestrator:
             schedule_store,
             quarantine_store,
             security,
+            memory,
+            approval_history,
+            workflow_history,
+        )
+    )
+
+    # JarvisBrainStatusTool (Phase 86, Batch 1): reads only the same
+    # already-built `registry`, `settings`, `memory`, `approval_history`,
+    # and `workflow_history` instances constructed above for other
+    # tools' use - never opens a new database connection, never
+    # constructs a new store, never calls AI or a subprocess.
+    registry.register_tool(
+        JarvisBrainStatusTool(
+            registry,
+            settings,
             memory,
             approval_history,
             workflow_history,

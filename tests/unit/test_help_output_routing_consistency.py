@@ -80,6 +80,7 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     ("Basic: show config", "show config"),
     ("Basic: help", "help"),
     ("Basic: health check", "health check"),
+    ("Basic: jarvis brain status", "jarvis brain status"),
     # Memory
     ("Memory: remember this", "remember this: buy milk"),
     ("Memory: show memories", "show memories"),

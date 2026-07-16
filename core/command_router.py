@@ -154,6 +154,19 @@ _HEALTH_CHECK_EXACT_COMMANDS: frozenset[str] = frozenset(
     {"health check", "show health", "system health"}
 )
 
+#: Exact, read-only "brain status" phrases (Phase 86, Batch 1), matched
+#: case-insensitively after stripping surrounding whitespace, mirroring
+#: _HEALTH_CHECK_EXACT_COMMANDS's own established pattern exactly: two
+#: names for the same fixed, no-argument request to the same
+#: JarvisBrainStatusTool, never two different operations. Checked
+#: directly against every other exact/prefix table in this module: no
+#: existing command anywhere contains the word "jarvis" (confirmed by
+#: direct grep, not assumed), so neither phrase can collide with any
+#: existing entry.
+_JARVIS_BRAIN_EXACT_COMMANDS: frozenset[str] = frozenset(
+    {"jarvis brain status", "show jarvis brain"}
+)
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -746,6 +759,15 @@ class CommandRouter:
             "health_check"
         ):
             return "health_check"
+
+        # Jarvis brain status (Phase 86, Batch 1): read-only and GREEN.
+        # Exact phrases only, mirroring the health-check branch
+        # immediately above - never a prefix/substring match, so this
+        # can never be confused with any other command family.
+        if lowered.strip() in _JARVIS_BRAIN_EXACT_COMMANDS and self._registry.has_tool(
+            "jarvis_brain"
+        ):
+            return "jarvis_brain"
 
         # Quarantine listing (Phase 36): read-only and GREEN. Exact
         # phrases only, mirroring the config check immediately above -
@@ -1655,6 +1677,7 @@ class CommandRouter:
         # info takes no input
         # help takes no input
         # health_check takes no input
+        # jarvis_brain takes no input
         return {}
 
     @staticmethod

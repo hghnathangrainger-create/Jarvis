@@ -4,7 +4,8 @@ help_tool.py
 A safe tool that lists Jarvis's currently supported commands (Phase 43;
 updated Phase 84 to surface the optional grammar clauses Phases 81-83
 shipped: schedule naming, file-read character limits, and result-count
-limits for file/memory list and search).
+limits for file/memory list and search; updated Phase 86, Batch 1 to
+document the new "jarvis brain status" command).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -43,6 +44,9 @@ _HELP_LINES: tuple[str, ...] = (
     "  health check / show health / system health - reports basic system health "
     "(settings, database, tool registry, logging, Inbox/Schedule/Quarantine stores, "
     "Security Manager self-check)",
+    "  jarvis brain status / show jarvis brain - reports real AI/reasoning "
+    "configuration, real memory/approval/workflow counts, and known limits "
+    "(never calls the Claude API or any AI provider)",
     "",
     "Memory:",
     "  remember this: <text> / remember this as <category>: <text> - saves a memory",

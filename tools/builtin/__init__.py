@@ -42,6 +42,12 @@ Read-only tools (GREEN) - these never change any state:
       quarantine directory (.jarvis_trash/, Phase 36) - name, size, and
       modified time only. Never reads file content, never creates the
       quarantine directory, and never implies restore support exists.
+    - JarvisBrainStatusTool: reports Jarvis's own current AI/reasoning
+      configuration, real memory/approval/workflow counts, tool
+      registry size, and an honest "current limits" section (Phase 86,
+      Batch 1). Never calls AI, a subprocess, or the web; has no live
+      knowledge of the current git branch, commit, or test suite
+      result.
 
 Guarded read tools (YELLOW) - read-only from Jarvis's own state's point of
 view, but classified YELLOW because they reach an arbitrary, externally-
@@ -108,6 +114,7 @@ from tools.builtin.file_search_tool import FileSearchTool
 from tools.builtin.health_check_tool import HealthCheckTool
 from tools.builtin.help_tool import HelpTool
 from tools.builtin.info_tool import InfoTool
+from tools.builtin.jarvis_brain_tool import JarvisBrainStatusTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
@@ -125,6 +132,7 @@ __all__ = [
     "ConfigTool",
     "HealthCheckTool",
     "HelpTool",
+    "JarvisBrainStatusTool",
     "QuarantineListTool",
     "EchoTool",
     "InfoTool",

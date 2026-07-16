@@ -76,6 +76,8 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "health check",
         "show health",
         "system health",
+        "jarvis brain status",
+        "show jarvis brain",
         "remember this:",
         "show memories",
         "show memory categories",
@@ -136,6 +138,16 @@ def test_output_documents_health_check_command_and_its_aliases() -> None:
     assert "health check" in result.output
     assert "show health" in result.output
     assert "system health" in result.output
+
+
+def test_output_documents_jarvis_brain_status_command_and_its_alias() -> None:
+    """Phase 86, Batch 1: documented in the same batch the command
+    shipped, deliberately avoiding the exact Phase-57/58-class gap
+    (a real command missing from HelpTool's own _HELP_LINES)."""
+    result = _run(HelpTool())
+    assert "jarvis brain status" in result.output
+    assert "show jarvis brain" in result.output
+    assert "never calls the Claude API" in result.output
 
 
 def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (

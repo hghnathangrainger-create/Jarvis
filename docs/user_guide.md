@@ -96,6 +96,7 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | `show config`, `show settings` | Shows current configuration status (AI model, timeouts, database path, etc.). Never shows the API key's value — only whether it's set. |
 | `help`, `list commands`, `show commands` | Lists every currently supported command grammar phrase and a short description (Phase 43). Static, hand-maintained text — never AI-generated. |
 | `health check`, `show health`, `system health` | Reports basic system health: settings loaded, database path reachable, tool registry populated, console logging configured, Inbox/Schedule/Quarantine stores reachable, and a Security Manager self-classification check (Phase 57). Read-only; never shows the API key's value; never opens a new database connection, constructs a new store, or creates a file or row. |
+| `jarvis brain status`, `show jarvis brain` | Reports Jarvis's own current AI/reasoning configuration, real memory/approval/workflow counts, tool registry size, and an honest "current limits" section (Phase 86, Batch 1). Read-only; never shows the API key's value; never calls the Claude API, any other AI provider, a subprocess, or the web; has no live knowledge of the current git branch, commit, or test suite result. |
 
 ### Memory commands
 

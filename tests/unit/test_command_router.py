@@ -47,6 +47,7 @@ _ALL_TOOL_NAMES = (
     "config",
     "help",
     "health_check",
+    "jarvis_brain",
     "quarantine_list",
     "memory",
     "memory_update",
@@ -3711,6 +3712,66 @@ def test_build_input_health_check_takes_no_input(router: CommandRouter) -> None:
     assert router.build_input("health_check", "health check") == {}
     assert router.build_input("health_check", "show health") == {}
     assert router.build_input("health_check", "system health") == {}
+
+
+# --- match() -> "jarvis_brain" (Phase 86, Batch 1) -----------------------------
+
+
+def test_match_jarvis_brain_status(router: CommandRouter) -> None:
+    assert router.match("jarvis brain status") == "jarvis_brain"
+
+
+def test_match_show_jarvis_brain(router: CommandRouter) -> None:
+    assert router.match("show jarvis brain") == "jarvis_brain"
+
+
+def test_match_jarvis_brain_is_case_insensitive(router: CommandRouter) -> None:
+    assert router.match("JARVIS BRAIN STATUS") == "jarvis_brain"
+    assert router.match("SHOW JARVIS BRAIN") == "jarvis_brain"
+
+
+def test_match_jarvis_brain_ignores_surrounding_whitespace(
+    router: CommandRouter,
+) -> None:
+    assert router.match("  jarvis brain status  ") == "jarvis_brain"
+
+
+def test_match_jarvis_brain_requires_exact_phrase(router: CommandRouter) -> None:
+    """Not a prefix match - trailing/leading free text does not also
+    match, and near-misses are correctly unrecognised."""
+    assert router.match("jarvis brain status please") is None
+    assert router.match("jarvis brain") is None
+    assert router.match("brain status") is None
+    assert router.match("show jarvis") is None
+    assert router.match("jarvis") is None
+
+
+def test_match_jarvis_brain_does_not_route_when_tool_unregistered() -> None:
+    empty_registry = ToolRegistry()
+    router = CommandRouter(empty_registry)
+    assert router.match("jarvis brain status") is None
+    assert router.match("show jarvis brain") is None
+
+
+def test_match_jarvis_brain_does_not_collide_with_health_check(
+    router: CommandRouter,
+) -> None:
+    assert router.match("jarvis brain status") == "jarvis_brain"
+    assert router.match("health check") == "health_check"
+    assert router.match("show health") == "health_check"
+
+
+def test_match_show_jarvis_brain_does_not_collide_with_show_config_or_show_health(
+    router: CommandRouter,
+) -> None:
+    assert router.match("show jarvis brain") == "jarvis_brain"
+    assert router.match("show config") == "config"
+    assert router.match("show health") == "health_check"
+
+
+def test_build_input_jarvis_brain_takes_no_input(router: CommandRouter) -> None:
+    assert router.build_input("jarvis_brain", "jarvis brain status") == {}
+    assert router.build_input("jarvis_brain", "show jarvis brain") == {}
 
 
 # --- match() -> "quarantine_list" (Phase 36) ----------------------------------
