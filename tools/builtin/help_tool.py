@@ -1,7 +1,10 @@
 """
 help_tool.py
 
-A safe tool that lists Jarvis's currently supported commands (Phase 43).
+A safe tool that lists Jarvis's currently supported commands (Phase 43;
+updated Phase 84 to surface the optional grammar clauses Phases 81-83
+shipped: schedule naming, file-read character limits, and result-count
+limits for file/memory list and search).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -43,10 +46,13 @@ _HELP_LINES: tuple[str, ...] = (
     "",
     "Memory:",
     "  remember this: <text> / remember this as <category>: <text> - saves a memory",
-    "  show memories / show memories in <category> - lists memories",
+    "  show memories / show memories in <category> - lists memories (up to 10 by default)",
     "  show memory categories / list memory categories - shows a real count of memories "
     "in each known category, including honest zeros",
-    "  search memories for <query> / search memories in <category> for <query> - searches memory",
+    "  search memories for <query> / search memories in <category> for <query> - searches "
+    "memory (up to 10 results by default)",
+    "  ... limit <N> - add to any memory list/search command above to show up to <N> "
+    "results instead of the default (up to 50)",
     "  update memory <id>: <new text> - replaces a memory's content (approval required)",
     "  move memory <id> to <category> - re-categorizes a memory (approval required)",
     "  forget memory <id> - deletes one memory (approval required)",
@@ -57,11 +63,15 @@ _HELP_LINES: tuple[str, ...] = (
     "",
     "Files:",
     "  list files / list files in <path> / show files in <path> / list directory / list dir "
-    "- lists a directory",
+    "- lists a directory (up to 50 entries by default; add limit <N> for up to 500)",
     "  read file <path> / show file <path> / open file <path> / cat file <path> - shows a "
-    "file's contents",
-    "  search files for <pattern> / find files named <pattern> - finds files by name",
-    "  find files containing <text> / search files containing <text> - finds files by content",
+    "file's contents (up to 4000 characters by default)",
+    "  read file <path> up to <N> chars / ... up to <N> characters - same as above, but "
+    "reads up to <N> characters instead (up to 100,000)",
+    "  search files for <pattern> / find files named <pattern> - finds files by name (up "
+    "to 50 results by default; add limit <N> for up to 500)",
+    "  find files containing <text> / search files containing <text> - finds files by "
+    "content (up to 50 results by default; add limit <N> for up to 500)",
     "  create file <path> with <content> - creates a new file (approval required)",
     "  append <content> to file <path> - appends to an existing file (approval required)",
     "  copy file <source> to <destination> - copies a file (approval required)",
@@ -87,6 +97,7 @@ _HELP_LINES: tuple[str, ...] = (
     "Schedules:",
     "  schedule web search summary for <query> at <HH:MM> - creates a daily schedule "
     "(approval required)",
+    "  ... as <name> - add to the command above to give the schedule a name",
     "  list schedules / show schedules - lists configured schedules",
     "  enable schedule <id> - re-activates a schedule (approval required)",
     "  disable schedule <id> - deactivates a schedule (approval required)",

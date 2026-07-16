@@ -104,6 +104,9 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "summarize webpage",
         "and save to inbox",
         "schedule web search summary for",
+        "as <name>",
+        "up to <N> chars",
+        "limit <N>",
         "list schedules",
         "enable schedule",
         "disable schedule",
@@ -160,6 +163,38 @@ def test_output_documents_memory_categories_command_and_its_alias() -> None:
     assert "show memory categories" in result.output
     assert "list memory categories" in result.output
     assert "honest zeros" in result.output
+
+
+def test_output_documents_schedule_naming_grammar() -> None:
+    """Phase 84: Phase 81 added the optional "as <name>" clause to
+    schedule creation, but never to HelpTool's own _HELP_LINES - the
+    exact Phase-58-class gap this file's own docstring names as a known
+    blind spot (test_help_output_routing_consistency.py can only prove
+    listed phrases still route, never that every real command is
+    listed). This test closes it."""
+    result = _run(HelpTool())
+    assert "as <name>" in result.output
+    assert "give the schedule a name" in result.output
+
+
+def test_output_documents_file_read_character_limit_grammar() -> None:
+    """Phase 84: Phase 82 added the optional "up to <N> chars"/
+    "characters" clause to read file, but never to HelpTool's own
+    _HELP_LINES."""
+    result = _run(HelpTool())
+    assert "up to <N> chars" in result.output
+    assert "up to <N> characters" in result.output
+
+
+def test_output_documents_result_limit_grammar_for_files_and_memory() -> None:
+    """Phase 84: Phase 83 added the optional "limit <N>" clause to file
+    list, file search, memory list, and memory search, but never to
+    HelpTool's own _HELP_LINES."""
+    result = _run(HelpTool())
+    assert "limit <N>" in result.output
+    # Both the Files and Memory sections must carry their own explanation
+    # of the clause - not just a single, ambiguous mention.
+    assert result.output.count("limit <N>") >= 2
 
 
 def test_output_does_not_invent_a_nonexistent_command() -> None:
