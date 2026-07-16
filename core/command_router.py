@@ -623,6 +623,30 @@ _FILE_READ_MAX_CHARS_PATTERN = re.compile(
     r"\s+up to\s+(\d+)\s*(?:chars|characters)\s*$", re.IGNORECASE
 )
 
+#: Matches an optional trailing "limit <N>" clause on a file-list or
+#: file-search command (Phase 83, Batch 1), anchored to the end of the
+#: string so it can only ever match a genuine trailing limit clause -
+#: never a path or query that happens to contain the word "limit"
+#: earlier on. Requires at least one digit, so a malformed clause like
+#: "limit many" simply does not match and is left as part of the
+#: surrounding text, exactly like _FILE_READ_MAX_CHARS_PATTERN's own
+#: malformed-clause handling. The "(?:^|\s+)" alternation (rather than
+#: a bare "\s+") lets this match even when the limit clause is the
+#: *entire* already-extracted path/query (e.g. "list files limit 10"
+#: with no "in <path>" clause leaves "limit 10" as the whole raw path,
+#: with no leading whitespace to require).
+#:
+#: Known, accepted ambiguity: a search query that itself legitimately
+#: ends in the word "limit" followed by a number (e.g. "speed limit
+#: 55") is indistinguishable from a genuine structural limit clause -
+#: this is an inherent trade-off of any keyword-based trailing grammar,
+#: the same class already accepted for _FILE_READ_MAX_CHARS_PATTERN's
+#: "up to"/_SCHEDULE_CREATE_PREFIXES's "as", and is covered by a
+#: dedicated test rather than silently shipped.
+_FILE_RESULT_LIMIT_PATTERN = re.compile(
+    r"(?:^|\s+)limit\s+(\d+)\s*$", re.IGNORECASE
+)
+
 
 class CommandRouter:
     """Matches request text to a registered tool and builds its input.
@@ -1560,9 +1584,13 @@ class CommandRouter:
             alias = _WORKFLOW_ALIASES.get(text.casefold().strip())
             if alias is not None:
                 return {"path": alias[1]}
-            path = self._extract_path(text, _FILE_LIST_PREFIXES)
+            raw_path = self._extract_path(text, _FILE_LIST_PREFIXES)
+            path, limit = self._split_trailing_result_limit(raw_path)
             # Default to the current directory when no path is given.
-            return {"path": path or "."}
+            result: dict[str, object] = {"path": path or "."}
+            if limit:
+                result["limit"] = limit
+            return result
 
         if tool_name == "file_read":
             alias = _WORKFLOW_ALIASES.get(text.casefold().strip())
@@ -1583,8 +1611,12 @@ class CommandRouter:
             return {"path": path, "content": content}
 
         if tool_name == "file_search":
-            mode, query = self._extract_file_search_input(text)
-            return {"mode": mode, "query": query}
+            mode, raw_query = self._extract_file_search_input(text)
+            query, limit = self._split_trailing_result_limit(raw_query)
+            result: dict[str, object] = {"mode": mode, "query": query}
+            if limit:
+                result["limit"] = limit
+            return result
 
         if tool_name == "file_copy":
             source, destination = self._extract_copy_input(text)
@@ -1682,6 +1714,37 @@ class CommandRouter:
             remainder = remainder[4:].strip()
         # Strip surrounding quotes if the user quoted the path.
         return remainder.strip("'\"").strip()
+
+    @staticmethod
+    def _split_trailing_result_limit(text: str) -> tuple[str, str]:
+        """Split an optional trailing "limit <N>" clause off of
+        already-extracted path/query text (Phase 83, Batch 1).
+
+        Used by both the file_list and file_search build_input()
+        branches, applied to their own already-extracted path/query
+        string (never to the raw command text directly), so this never
+        needs to know anything about either command's own prefix
+        grammar. _FILE_RESULT_LIMIT_PATTERN is anchored to the end of
+        the string and requires at least one digit, so a path/query
+        that merely contains the word "limit" earlier, or a malformed
+        clause with no digits (e.g. "limit many"), is never mis-split
+        and is left as part of the text unchanged.
+
+        Args:
+            text: The already-extracted path or query string.
+
+        Returns:
+            A tuple of (text, limit). limit is the empty string when no
+            valid trailing limit clause is present; FileListTool/
+            FileSearchTool's own _clamp_limit() owns all coercion,
+            clamping, and default behaviour - this method only ever
+            extracts the raw digit string, never interprets or bounds
+            it.
+        """
+        match = _FILE_RESULT_LIMIT_PATTERN.search(text)
+        if match is None:
+            return text, ""
+        return text[: match.start()].strip(), match.group(1)
 
     @classmethod
     def _extract_file_read_input(cls, text: str) -> tuple[str, str]:

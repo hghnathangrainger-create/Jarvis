@@ -190,6 +190,20 @@ def test_green_command_journey(system: _System, workspace: Path) -> None:
     assert "approval required" not in output.lower()
 
 
+def test_file_list_journey_respects_custom_limit(
+    system: _System, workspace: Path
+) -> None:
+    """Phase 83, Batch 1: the CLI's "limit <N>" grammar must actually
+    reach FileListTool through the real CommandRouter -> ToolExecutor
+    path and change how many entries are shown - not just be parsed and
+    dropped."""
+    for i in range(5):
+        (workspace / f"extra_{i}.txt").write_text("x")
+    output = _drive(system, ["list files limit 2", "exit"])
+    assert "[OK]" in output
+    assert "showing 2 of 7 entries; more entries exist" in output
+
+
 # --- Scenario 2: file read journey -------------------------------------------
 
 

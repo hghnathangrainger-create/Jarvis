@@ -577,6 +577,61 @@ def test_build_input_file_search_content_extracts_query(router: CommandRouter) -
     ) == {"mode": "content", "query": "jarvis ai"}
 
 
+# --- File-search result limit grammar (Phase 83, Batch 1) ---------------------
+
+
+def test_build_input_file_search_with_limit(router: CommandRouter) -> None:
+    result = router.build_input("file_search", "search files for readme limit 5")
+    assert result == {"mode": "name", "query": "readme", "limit": "5"}
+
+
+def test_build_input_file_search_without_limit_omits_limit_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the existing no-limit grammar must remain completely
+    unchanged - no "limit" key at all, not even an empty one."""
+    result = router.build_input("file_search", "search files for readme")
+    assert result == {"mode": "name", "query": "readme"}
+    assert "limit" not in result
+
+
+def test_build_input_file_search_limit_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("file_search", "search files for readme LIMIT 5")
+    assert result == {"mode": "name", "query": "readme", "limit": "5"}
+
+
+def test_build_input_file_search_query_containing_limit_word_not_mis_split(
+    router: CommandRouter,
+) -> None:
+    """A query that merely contains the word "limit" (not followed by a
+    number at the end) must not be truncated."""
+    result = router.build_input("file_search", "search files for limitations")
+    assert result == {"mode": "name", "query": "limitations"}
+    assert "limit" not in result
+
+
+def test_build_input_file_search_malformed_limit_clause_preserved_as_query(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("file_search", "search files for limit many")
+    assert result == {"mode": "name", "query": "limit many"}
+    assert "limit" not in result
+
+
+def test_build_input_file_search_query_ending_in_limit_number_is_treated_as_limit(
+    router: CommandRouter,
+) -> None:
+    """Known, documented ambiguity: a query that itself legitimately ends
+    in "limit <number>" (e.g. a search for "speed limit 55") is
+    indistinguishable from a genuine structural limit clause and is
+    treated as one - an inherent trade-off of trailing keyword grammar,
+    verified directly here rather than left as an unproven assumption."""
+    result = router.build_input("file_search", "search files for speed limit 55")
+    assert result == {"mode": "name", "query": "speed", "limit": "55"}
+
+
 # --- match(): workflow aliases -------------------------------------------------
 
 
@@ -813,6 +868,60 @@ def test_build_input_file_list_defaults_to_current_dir(
 
 def test_build_input_file_list_alias(router: CommandRouter) -> None:
     assert router.build_input("file_list", "show project files") == {"path": "."}
+
+
+# --- File-list result limit grammar (Phase 83, Batch 1) -----------------------
+
+
+def test_build_input_file_list_with_limit_and_no_path(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("file_list", "list files limit 10")
+    assert result == {"path": ".", "limit": "10"}
+
+
+def test_build_input_file_list_with_path_and_limit(router: CommandRouter) -> None:
+    result = router.build_input("file_list", "list files in notes limit 10")
+    assert result == {"path": "notes", "limit": "10"}
+
+
+def test_build_input_file_list_without_limit_omits_limit_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the existing no-limit grammar must remain completely
+    unchanged - no "limit" key at all, not even an empty one."""
+    result = router.build_input("file_list", "list files")
+    assert result == {"path": "."}
+    assert "limit" not in result
+
+    result = router.build_input("file_list", "list files in docs")
+    assert result == {"path": "docs"}
+    assert "limit" not in result
+
+
+def test_build_input_file_list_limit_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("file_list", "list files LIMIT 20")
+    assert result == {"path": ".", "limit": "20"}
+
+
+def test_build_input_file_list_path_containing_limit_word_not_mis_split(
+    router: CommandRouter,
+) -> None:
+    """A path that merely contains the word "limit" (not followed by a
+    number at the end) must not be truncated."""
+    result = router.build_input("file_list", "list files in limitations")
+    assert result == {"path": "limitations"}
+    assert "limit" not in result
+
+
+def test_build_input_file_list_malformed_limit_clause_preserved_as_path(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input("file_list", "list files in limit many")
+    assert result == {"path": "limit many"}
+    assert "limit" not in result
 
 
 def test_build_input_file_read_direct_path(router: CommandRouter) -> None:
