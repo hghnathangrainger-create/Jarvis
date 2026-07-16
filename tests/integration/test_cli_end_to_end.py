@@ -200,6 +200,20 @@ def test_file_read_journey(system: _System, workspace: Path) -> None:
     assert "approval required" not in output.lower()
 
 
+def test_file_read_journey_respects_custom_max_chars(
+    system: _System, workspace: Path
+) -> None:
+    """Phase 82: the CLI's "up to <N> chars" grammar must actually reach
+    FileReadTool through the real CommandRouter -> ToolExecutor path and
+    change its truncation point - not just be parsed and dropped."""
+    (workspace / "long.txt").write_text("0123456789abcdefghij")
+    output = _drive(system, ["read file long.txt up to 10 chars", "exit"])
+    assert "[OK]" in output
+    assert "0123456789" in output
+    assert "abcdefghij" not in output
+    assert "showing the first 10 characters" in output
+
+
 # --- Scenario 3: YELLOW approve journey (backed tool runs) -------------------
 
 

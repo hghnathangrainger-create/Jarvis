@@ -118,7 +118,8 @@ All commands below are typed at the CLI's `you>` prompt. They are matched case-i
 | Command | Does | Tier |
 |---|---|---|
 | `list files`, `list files in <path>`, `show files in <path>`, `list directory`, `list dir` | Lists a directory. | GREEN |
-| `read file <path>`, `show file <path>`, `open file <path>`, `cat file <path>` | Shows a file's contents. | GREEN |
+| `read file <path>`, `show file <path>`, `open file <path>`, `cat file <path>` | Shows a file's contents (up to 4000 characters by default). | GREEN |
+| `read file <path> up to <N> chars` / `... up to <N> characters` | Same as above, but reads up to `<N>` characters instead of the default (Phase 82). `<N>` is clamped between 1 and 100,000. | GREEN |
 | `search files for <pattern>` / `find files named <pattern>` | Finds files whose **name** contains `<pattern>` (case-insensitive), recursively from the project directory. | GREEN |
 | `find files containing <text>` / `search files containing <text>` | Finds files whose **content** contains `<text>` (case-insensitive), recursively from the project directory. Shows a short one-line context snippet per match — never the full file. | GREEN |
 | `create file <path> with <content>` | Creates a new file. `with <content>` is optional (creates an empty file). | YELLOW |

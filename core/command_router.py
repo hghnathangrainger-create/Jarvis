@@ -612,6 +612,17 @@ _MEMORY_RECENT_COUNT_SUMMARY_PATTERN = re.compile(
     r"(?:summarise|summarize)\s+latest\s+(\S+)\s+memories", re.IGNORECASE
 )
 
+#: Matches an optional trailing "up to <N> chars"/"up to <N> characters"
+#: clause on a file-read command (Phase 82), anchored to the end of the
+#: string so it can only ever match a genuine trailing limit clause -
+#: never a path that happens to contain the words "up to" earlier on.
+#: Requires at least one digit, so a malformed clause like "up to many
+#: chars" simply does not match and is left as part of the path,
+#: exactly like any other unrecognised trailing text.
+_FILE_READ_MAX_CHARS_PATTERN = re.compile(
+    r"\s+up to\s+(\d+)\s*(?:chars|characters)\s*$", re.IGNORECASE
+)
+
 
 class CommandRouter:
     """Matches request text to a registered tool and builds its input.
@@ -1557,8 +1568,11 @@ class CommandRouter:
             alias = _WORKFLOW_ALIASES.get(text.casefold().strip())
             if alias is not None:
                 return {"path": alias[1]}
-            path = self._extract_path(text, _FILE_READ_PREFIXES)
-            return {"path": path}
+            path, max_chars = self._extract_file_read_input(text)
+            result: dict[str, object] = {"path": path}
+            if max_chars:
+                result["max_chars"] = max_chars
+            return result
 
         if tool_name == "file_create":
             path, content = self._extract_create_input(text)
@@ -1668,6 +1682,44 @@ class CommandRouter:
             remainder = remainder[4:].strip()
         # Strip surrounding quotes if the user quoted the path.
         return remainder.strip("'\"").strip()
+
+    @classmethod
+    def _extract_file_read_input(cls, text: str) -> tuple[str, str]:
+        """Extract (path, max_chars) from a file-read command.
+
+        The recognised shape is:
+        "<file-read-prefix> <path> [up to <N> chars|characters]" - the
+        trailing character-limit clause is optional (Phase 82).
+
+        Reuses _extract_path() entirely for the path itself (prefix,
+        leading "the", and quote stripping are all unchanged); this
+        method only additionally looks for a trailing limit clause on
+        that already-extracted path string, using
+        _FILE_READ_MAX_CHARS_PATTERN, which is anchored to the end of
+        the string and requires at least one digit - so a path that
+        merely contains the words "up to" somewhere earlier, or a
+        malformed clause with no digits (e.g. "up to many chars"), is
+        never mis-split and is left as part of the path unchanged.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (path, max_chars). path may be empty, in which
+            case FileReadTool itself reports the problem - this method
+            never validates it. max_chars is the empty string when no
+            valid trailing limit clause is present; FileReadTool's own
+            _clamp_max_chars() owns all coercion, clamping, and default
+            behaviour - this method only ever extracts the raw digit
+            string, never interprets or bounds it.
+        """
+        raw_path = cls._extract_path(text, _FILE_READ_PREFIXES)
+        match = _FILE_READ_MAX_CHARS_PATTERN.search(raw_path)
+        if match is None:
+            return raw_path, ""
+        path = raw_path[: match.start()].strip()
+        max_chars = match.group(1)
+        return path, max_chars
 
     @classmethod
     def _extract_create_input(cls, text: str) -> tuple[str, str]:

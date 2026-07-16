@@ -825,6 +825,76 @@ def test_build_input_file_read_alias(router: CommandRouter) -> None:
     assert router.build_input("file_read", "read readme") == {"path": "README.md"}
 
 
+# --- File-read character limit grammar (Phase 82) -----------------------------
+
+
+def test_build_input_file_read_with_chars_clause(router: CommandRouter) -> None:
+    result = router.build_input(
+        "file_read", "read file report.txt up to 8000 chars"
+    )
+    assert result == {"path": "report.txt", "max_chars": "8000"}
+
+
+def test_build_input_file_read_with_characters_clause(router: CommandRouter) -> None:
+    result = router.build_input(
+        "file_read", "read file report.txt up to 8000 characters"
+    )
+    assert result == {"path": "report.txt", "max_chars": "8000"}
+
+
+def test_build_input_file_read_chars_clause_is_case_insensitive(
+    router: CommandRouter,
+) -> None:
+    result = router.build_input(
+        "file_read", "read file report.txt UP TO 500 CHARS"
+    )
+    assert result == {"path": "report.txt", "max_chars": "500"}
+
+
+def test_build_input_file_read_without_clause_omits_max_chars_key(
+    router: CommandRouter,
+) -> None:
+    """Regression: the existing default grammar must remain completely
+    unchanged - no "max_chars" key at all, not even an empty one."""
+    result = router.build_input("file_read", "read file report.txt")
+    assert result == {"path": "report.txt"}
+    assert "max_chars" not in result
+
+
+def test_build_input_file_read_alias_unaffected_by_max_chars_grammar(
+    router: CommandRouter,
+) -> None:
+    """The fixed alias shortcut path is untouched by this phase."""
+    result = router.build_input("file_read", "read readme")
+    assert result == {"path": "README.md"}
+    assert "max_chars" not in result
+
+
+def test_build_input_file_read_path_containing_up_to_is_not_mis_split(
+    router: CommandRouter,
+) -> None:
+    """A filename that happens to contain the words "up to" must not be
+    truncated unless it forms a genuine, valid trailing limit clause."""
+    result = router.build_input(
+        "file_read", "read file notes_up_to_date.txt"
+    )
+    assert result == {"path": "notes_up_to_date.txt"}
+    assert "max_chars" not in result
+
+
+def test_build_input_file_read_malformed_clause_preserved_as_path(
+    router: CommandRouter,
+) -> None:
+    """A non-numeric trailing clause (e.g. "up to many chars") is left
+    as part of the path rather than dropped, silently rewritten, or
+    causing a crash."""
+    result = router.build_input(
+        "file_read", "read file report.txt up to many chars"
+    )
+    assert result == {"path": "report.txt up to many chars"}
+    assert "max_chars" not in result
+
+
 def test_build_input_file_create(router: CommandRouter) -> None:
     assert router.build_input("file_create", "create file a.txt with hello") == {
         "path": "a.txt",
