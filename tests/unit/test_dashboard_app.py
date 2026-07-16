@@ -2337,3 +2337,142 @@ class TestDashboardAppWithRealTk:
     def test_brain_prompt_studio_caption_discloses_no_api_call(self) -> None:
         lowered = BRAIN_PROMPT_STUDIO_CAPTION.lower()
         assert "never calls the claude api" in lowered
+
+    # --- Overview titled-section styling (Phase 88, Batch 1) --------------------
+
+    def test_build_titled_section_creates_a_label_frame_with_title_and_caption(
+        self, root: tk.Tk
+    ) -> None:
+        section, error_var = DashboardApp._build_titled_section(
+            root, "Example Section", caption="An example caption."
+        )
+        assert section.winfo_class() == "TLabelframe"
+        assert section.cget("text") == "Example Section"
+        assert isinstance(error_var, tk.StringVar)
+        assert error_var.get() == ""
+
+        texts = [
+            child.cget("text")
+            for child in section.winfo_children()
+            if child.winfo_class() == "TLabel"
+        ]
+        assert "An example caption." in texts
+
+    def test_build_titled_section_without_caption_omits_caption_label(
+        self, root: tk.Tk
+    ) -> None:
+        section, _ = DashboardApp._build_titled_section(root, "No Caption Section")
+        texts = [
+            child.cget("text")
+            for child in section.winfo_children()
+            if child.winfo_class() == "TLabel"
+        ]
+        # Only the (empty) error label should exist - no caption line.
+        assert texts == [""]
+
+    def test_overview_sections_use_titled_label_frames(self, root: tk.Tk) -> None:
+        """Phase 88, Batch 1: each of the Overview tab's four panels is
+        now a real ttk.LabelFrame with its own titled border, replacing
+        the previous bare bold Label floating above a plain Frame."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        section_titles = {
+            child.cget("text")
+            for child in app._overview_frame.winfo_children()
+            if child.winfo_class() == "TLabelframe"
+        }
+        assert section_titles == {
+            "System Status",
+            "Store Reachability",
+            "Summary Counts",
+            "Recent Activity",
+        }
+
+    def test_overview_content_frames_nested_inside_their_titled_section(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        assert app._system_status_frame.master.winfo_class() == "TLabelframe"
+        assert app._system_status_frame.master.cget("text") == "System Status"
+        assert app._reachability_frame.master.winfo_class() == "TLabelframe"
+        assert app._reachability_frame.master.cget("text") == "Store Reachability"
+        assert app._overview_counts_frame.master.winfo_class() == "TLabelframe"
+        assert app._overview_counts_frame.master.cget("text") == "Summary Counts"
+        assert app._activity_tree.master.winfo_class() == "TLabelframe"
+        assert app._activity_tree.master.cget("text") == "Recent Activity"
+
+    def test_overview_refresh_updates_titled_sections_with_fresh_data(
+        self, root: tk.Tk
+    ) -> None:
+        """Confirms refresh_all() still works exactly as before for the
+        Overview tab now that its panels are built via
+        _build_titled_section() - purely a presentational change, no
+        data path affected."""
+        read_model, memory, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+        assert "Total memories stored: 0" in [
+            label.cget("text") for label in app._overview_labels
+        ]
+
+        memory.save("new memory")
+        app.refresh_all()
+
+        assert "Total memories stored: 1" in [
+            label.cget("text") for label in app._overview_labels
+        ]
+
+    def test_overview_tab_no_write_widget_introduced(self, root: tk.Tk) -> None:
+        """Structural, behavioral proof that Batch 1's new titled
+        sections never introduced a button or other write-triggering
+        widget anywhere in the Overview tab."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        def _collect_buttons(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TButton":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_buttons(child))
+            return found
+
+        assert _collect_buttons(app._overview_frame) == []
+
+    def test_other_tabs_frames_remain_plain_frames_not_label_frames(
+        self, root: tk.Tk
+    ) -> None:
+        """Phase 88, Batch 1 scoped the new titled-section helper to the
+        Overview tab only - every other tab's existing panel frames
+        must remain plain ttk.Frame widgets, proving no other tab was
+        structurally touched."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        other_tab_frames = [
+            app._memory_breakdown_frame,
+            app._approval_breakdown_frame,
+            app._workflow_breakdown_frame,
+            app._inbox_breakdown_frame,
+            app._schedule_breakdown_frame,
+            app._quarantine_summary_frame,
+            app._brain_system_status_frame,
+            app._brain_memory_frame,
+            app._brain_approval_breakdown_frame,
+            app._brain_workflow_breakdown_frame,
+        ]
+        for frame in other_tab_frames:
+            assert frame.winfo_class() == "TFrame"
+
+    def test_window_title_and_overview_header_wording_unchanged(
+        self, root: tk.Tk
+    ) -> None:
+        """Phase 88, Batch 1 did not change WINDOW_TITLE or
+        OVERVIEW_HEADER - neither was directly connected to the
+        titled-section visual shell in a way that warranted a wording
+        change, and the existing read-only disclosure stays intact."""
+        assert WINDOW_TITLE == "Jarvis — Dashboard (read-only)"
+        assert OVERVIEW_HEADER == "Jarvis Online"
+        assert "read-only" in WINDOW_TITLE.lower()

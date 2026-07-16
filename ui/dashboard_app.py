@@ -12,7 +12,10 @@ pass across the Phase 62-66 series - no behavior changed; extended
 Phase 87, Batch 2 with a Brain tab surfacing real AI/reasoning
 configuration, memory count, and approval/workflow breakdowns, plus a
 static Known Limits section and a static Claude Prompt Studio
-discoverability section).
+discoverability section; extended Phase 88, Batch 1 with a shared
+_build_titled_section() helper, giving the Overview tab's four panels
+a real ttk.LabelFrame titled visual grouping - presentation only, no
+data path changed).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
@@ -810,7 +813,14 @@ class DashboardApp:
         panel has its own error variable so a failure reading one never
         blanks out another panel's own last-good state, mirroring this
         module's own established per-tab isolation convention, now
-        applied within this one tab's four sub-panels."""
+        applied within this one tab's four sub-panels.
+
+        Phase 88, Batch 1: each panel is now a real ttk.LabelFrame (via
+        _build_titled_section()) instead of a bare bold Label floating
+        above a plain Frame, giving each section a genuine titled
+        visual border. Every attribute name, data path, and refresh
+        method below is completely unchanged - this is presentation
+        only."""
         frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Overview")
         self._overview_frame = frame
@@ -820,58 +830,45 @@ class DashboardApp:
         ).pack(anchor="w", pady=(0, 6))
 
         # --- System Status ---------------------------------------------------
-        ttk.Label(frame, text="System Status", font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w"
+        system_status_section, self._system_status_error_var = (
+            self._build_titled_section(
+                frame, "System Status", caption=SYSTEM_STATUS_CAPTION
+            )
         )
-        ttk.Label(frame, text=SYSTEM_STATUS_CAPTION, wraplength=480).pack(anchor="w")
-        self._system_status_error_var = tk.StringVar(value="")
-        ttk.Label(
-            frame, textvariable=self._system_status_error_var, foreground="red"
-        ).pack(anchor="w")
-        self._system_status_frame = ttk.Frame(frame)
-        self._system_status_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        system_status_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._system_status_frame = ttk.Frame(system_status_section)
+        self._system_status_frame.pack(fill="x", anchor="w")
         self._system_status_labels: list[ttk.Label] = []
 
         # --- Store Reachability -----------------------------------------------
-        ttk.Label(
-            frame, text="Store Reachability", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w")
-        ttk.Label(frame, text=STORE_REACHABILITY_CAPTION, wraplength=480).pack(
-            anchor="w"
+        reachability_section, self._reachability_error_var = (
+            self._build_titled_section(
+                frame, "Store Reachability", caption=STORE_REACHABILITY_CAPTION
+            )
         )
-        self._reachability_error_var = tk.StringVar(value="")
-        ttk.Label(
-            frame, textvariable=self._reachability_error_var, foreground="red"
-        ).pack(anchor="w")
-        self._reachability_frame = ttk.Frame(frame)
-        self._reachability_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        reachability_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._reachability_frame = ttk.Frame(reachability_section)
+        self._reachability_frame.pack(fill="x", anchor="w")
         self._reachability_labels: list[ttk.Label] = []
 
         # --- Summary Counts (Phase 19-22, unchanged content) -------------------
-        ttk.Label(frame, text="Summary Counts", font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w"
+        overview_counts_section, self._overview_error_var = (
+            self._build_titled_section(frame, "Summary Counts")
         )
-        self._overview_error_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self._overview_error_var, foreground="red").pack(
-            anchor="w"
-        )
-        self._overview_counts_frame = ttk.Frame(frame)
-        self._overview_counts_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        overview_counts_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._overview_counts_frame = ttk.Frame(overview_counts_section)
+        self._overview_counts_frame.pack(fill="x", anchor="w")
         self._overview_labels: list[ttk.Label] = []
 
         # --- Recent Activity ----------------------------------------------------
-        ttk.Label(
-            frame, text="Recent Activity", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w")
-        ttk.Label(frame, text=ACTIVITY_CAPTION, wraplength=480).pack(anchor="w")
-        self._activity_error_var = tk.StringVar(value="")
-        ttk.Label(
-            frame, textvariable=self._activity_error_var, foreground="red"
-        ).pack(anchor="w")
+        activity_section, self._activity_error_var = self._build_titled_section(
+            frame, "Recent Activity", caption=ACTIVITY_CAPTION
+        )
+        activity_section.pack(fill="both", expand=True, pady=(0, 4))
 
         activity_columns = ("created_at", "domain", "summary")
         activity_tree = ttk.Treeview(
-            frame, columns=activity_columns, show="headings", height=8
+            activity_section, columns=activity_columns, show="headings", height=8
         )
         for column, heading in zip(activity_columns, ("Time", "Domain", "Summary")):
             activity_tree.heading(column, text=heading)
@@ -880,6 +877,46 @@ class DashboardApp:
         activity_tree.column("summary", width=360)
         activity_tree.pack(fill="both", expand=True, pady=(4, 4))
         self._activity_tree = activity_tree
+
+    @staticmethod
+    def _build_titled_section(
+        parent: ttk.Frame, title: str, *, caption: str | None = None
+    ) -> tuple[ttk.LabelFrame, tk.StringVar]:
+        """Build one titled, visually-grouped dashboard section (Phase
+        88, Batch 1).
+
+        Replaces the pre-Phase-88 pattern of a bare bold ttk.Label
+        heading floating above a plain ttk.Frame with a real
+        ttk.LabelFrame - a standard ttk widget that draws its own
+        titled border natively, giving each section genuine visual
+        grouping without any custom theming, image, or canvas drawing.
+        Purely presentational: introduces no new data path, no new
+        query, and no widget type beyond what ttk already ships.
+
+        Args:
+            parent: The tab frame this section belongs to.
+            title: The section's title, shown as the LabelFrame's own
+                native border label.
+            caption: An optional honesty-disclosure caption shown just
+                below the title, inside the section - the same fixed
+                caption text already used before Phase 88 (for example,
+                SYSTEM_STATUS_CAPTION).
+
+        Returns:
+            A (section, error_var) tuple. `section` is the
+            ttk.LabelFrame itself, not yet packed - the caller controls
+            its own fill/expand/pady exactly as it did for the plain
+            Frame it replaces. `error_var` is a fresh StringVar for
+            this section's own isolated error message, matching every
+            other per-panel error variable already established in this
+            module.
+        """
+        section = ttk.LabelFrame(parent, text=title, padding=(8, 6))
+        if caption is not None:
+            ttk.Label(section, text=caption, wraplength=460).pack(anchor="w")
+        error_var = tk.StringVar(value="")
+        ttk.Label(section, textvariable=error_var, foreground="red").pack(anchor="w")
+        return section, error_var
 
     @staticmethod
     def _render_label_lines(
