@@ -2182,6 +2182,53 @@ class TestDashboardAppWithRealTk:
             found.extend(TestDashboardAppWithRealTk._collect_label_texts(child))
         return found
 
+    def test_brain_sections_use_titled_label_frames(self, root: tk.Tk) -> None:
+        """Phase 88, Batch 2: each of the Brain tab's six sections is
+        now a real ttk.LabelFrame with its own titled border, replacing
+        the previous bare bold Label floating above a plain Frame -
+        the same helper Batch 1 already applied to Overview."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        section_titles = {
+            child.cget("text")
+            for child in app._brain_frame.winfo_children()
+            if child.winfo_class() == "TLabelframe"
+        }
+        assert section_titles == {
+            "AI / Reasoning",
+            "Memory",
+            "Approval Status Breakdown",
+            "Workflow Status Breakdown",
+            "Known Limits",
+            "Claude Prompt Studio",
+        }
+
+    def test_brain_content_frames_nested_inside_their_titled_section(
+        self, root: tk.Tk
+    ) -> None:
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        assert app._brain_system_status_frame.master.winfo_class() == "TLabelframe"
+        assert app._brain_system_status_frame.master.cget("text") == "AI / Reasoning"
+        assert app._brain_memory_frame.master.winfo_class() == "TLabelframe"
+        assert app._brain_memory_frame.master.cget("text") == "Memory"
+        assert (
+            app._brain_approval_breakdown_frame.master.winfo_class() == "TLabelframe"
+        )
+        assert (
+            app._brain_approval_breakdown_frame.master.cget("text")
+            == "Approval Status Breakdown"
+        )
+        assert (
+            app._brain_workflow_breakdown_frame.master.winfo_class() == "TLabelframe"
+        )
+        assert (
+            app._brain_workflow_breakdown_frame.master.cget("text")
+            == "Workflow Status Breakdown"
+        )
+
     def test_brain_tab_renders_ai_reasoning_information_from_read_model(
         self, root: tk.Tk
     ) -> None:
@@ -2255,7 +2302,7 @@ class TestDashboardAppWithRealTk:
         read_model, *_ = _make_real_stack()
         app = _build_app(root, read_model)
 
-        brain_tab_frame = app._brain_memory_frame.master
+        brain_tab_frame = app._brain_frame
         all_texts = "\n".join(self._collect_label_texts(brain_tab_frame))
         for limit in BRAIN_KNOWN_LIMITS:
             assert limit in all_texts
@@ -2266,7 +2313,7 @@ class TestDashboardAppWithRealTk:
         read_model, *_ = _make_real_stack()
         app = _build_app(root, read_model)
 
-        brain_tab_frame = app._brain_memory_frame.master
+        brain_tab_frame = app._brain_frame
         all_texts = "\n".join(self._collect_label_texts(brain_tab_frame))
         for command in BRAIN_PROMPT_STUDIO_COMMANDS:
             assert command in all_texts
@@ -2301,7 +2348,7 @@ class TestDashboardAppWithRealTk:
                 found.extend(_collect_buttons(child))
             return found
 
-        brain_tab_frame = app._brain_memory_frame.master
+        brain_tab_frame = app._brain_frame
         assert _collect_buttons(brain_tab_frame) == []
 
     def test_brain_status_failure_isolated_from_other_tabs(self, root: tk.Tk) -> None:
@@ -2441,13 +2488,17 @@ class TestDashboardAppWithRealTk:
 
         assert _collect_buttons(app._overview_frame) == []
 
-    def test_other_tabs_frames_remain_plain_frames_not_label_frames(
+    def test_non_overview_non_brain_tabs_frames_remain_plain_frames(
         self, root: tk.Tk
     ) -> None:
-        """Phase 88, Batch 1 scoped the new titled-section helper to the
-        Overview tab only - every other tab's existing panel frames
-        must remain plain ttk.Frame widgets, proving no other tab was
-        structurally touched."""
+        """Phase 88 scoped the new titled-section helper to the
+        Overview tab (Batch 1) and the Brain tab (Batch 2) only - every
+        other tab's existing panel frames must remain plain ttk.Frame
+        widgets, proving no other tab was structurally touched by
+        either batch. (Brain's own content frames are checked
+        separately below - they are still plain ttk.Frame too, just
+        now nested one level deeper inside a titled ttk.LabelFrame
+        section, exactly like Overview's own content frames.)"""
         read_model, *_ = _make_real_stack()
         app = _build_app(root, read_model)
 
@@ -2458,13 +2509,38 @@ class TestDashboardAppWithRealTk:
             app._inbox_breakdown_frame,
             app._schedule_breakdown_frame,
             app._quarantine_summary_frame,
-            app._brain_system_status_frame,
-            app._brain_memory_frame,
-            app._brain_approval_breakdown_frame,
-            app._brain_workflow_breakdown_frame,
         ]
         for frame in other_tab_frames:
             assert frame.winfo_class() == "TFrame"
+
+    def test_non_overview_non_brain_tabs_have_no_label_frame_sections(
+        self, root: tk.Tk
+    ) -> None:
+        """Structural proof that Memories, Approval History, Workflow
+        History, Inbox, Schedules, and Quarantine have no
+        ttk.LabelFrame anywhere - the titled-section helper was never
+        applied to any of them in either Phase 88 batch."""
+        read_model, *_ = _make_real_stack()
+        app = _build_app(root, read_model)
+
+        def _collect_label_frames(widget: tk.Widget) -> list[tk.Widget]:
+            found = []
+            if widget.winfo_class() == "TLabelframe":
+                found.append(widget)
+            for child in widget.winfo_children():
+                found.extend(_collect_label_frames(child))
+            return found
+
+        untouched_tab_frames = [
+            app._memory_tree.master,
+            app._approval_tree.master,
+            app._workflow_tree.master,
+            app._inbox_tree.master,
+            app._schedules_tree.master,
+            app._quarantine_tree.master,
+        ]
+        for tab_frame in untouched_tab_frames:
+            assert _collect_label_frames(tab_frame) == []
 
     def test_window_title_and_overview_header_wording_unchanged(
         self, root: tk.Tk

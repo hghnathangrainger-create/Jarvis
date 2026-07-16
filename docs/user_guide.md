@@ -281,6 +281,8 @@ Eight tabs, all read-only:
 
 The dashboard **cannot**: run any command, approve or decline anything, create/edit/enable/disable a schedule, delete or change a memory, restore or delete a quarantined file, empty the trash, clean up old quarantined files, or write anything to the database at all — all restore/delete actions remain CLI-only, and both still require YELLOW approval there. It refreshes on a timer (every 5 seconds) plus a manual "Refresh now" button — this is polling, not live/real-time updating, and the title bar itself says "(read-only)".
 
+**Visual shell (Phase 88):** the Overview and Brain tabs' sections are each a real, titled `ttk.LabelFrame` — a standard, built-in ttk widget with its own bordered heading — instead of a plain frame under a bold label, giving each section clearer visual grouping. This is presentation only: no data, query, or read-only behavior changed on either tab, and no other tab was touched. A dashboard-wide color/theme pass was considered and deliberately not shipped — it would apply to every tab at once rather than staying contained to one, and its benefit over Windows's own native look was unclear.
+
 ---
 
 ## 9. Safety Model: GREEN / YELLOW / RED

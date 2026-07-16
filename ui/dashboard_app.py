@@ -15,7 +15,12 @@ static Known Limits section and a static Claude Prompt Studio
 discoverability section; extended Phase 88, Batch 1 with a shared
 _build_titled_section() helper, giving the Overview tab's four panels
 a real ttk.LabelFrame titled visual grouping - presentation only, no
-data path changed).
+data path changed; extended Phase 88, Batch 2 with the same helper
+applied to the Brain tab's six sections - a dashboard-wide `ttk.Style`
+theme change was considered and deliberately not shipped, since it is
+process-global rather than containable to one tab and its benefit on
+Windows's native theme was unclear; see this module's own Batch 2
+completion report for the reasoning).
 
 Responsibilities:
     - Render DashboardReadModel's view models (MemoryRow, ApprovalRow,
@@ -880,10 +885,14 @@ class DashboardApp:
 
     @staticmethod
     def _build_titled_section(
-        parent: ttk.Frame, title: str, *, caption: str | None = None
-    ) -> tuple[ttk.LabelFrame, tk.StringVar]:
+        parent: ttk.Frame,
+        title: str,
+        *,
+        caption: str | None = None,
+        include_error_var: bool = True,
+    ) -> tuple[ttk.LabelFrame, tk.StringVar | None]:
         """Build one titled, visually-grouped dashboard section (Phase
-        88, Batch 1).
+        88, Batch 1; `include_error_var` added Batch 2).
 
         Replaces the pre-Phase-88 pattern of a bare bold ttk.Label
         heading floating above a plain ttk.Frame with a real
@@ -901,19 +910,33 @@ class DashboardApp:
                 below the title, inside the section - the same fixed
                 caption text already used before Phase 88 (for example,
                 SYSTEM_STATUS_CAPTION).
+            include_error_var: Whether to build this section its own
+                isolated error StringVar (the Overview tab's default,
+                unchanged since Batch 1 - one query per panel, one error
+                state per panel). Pass False when several sections share
+                one tab-level error variable instead, because they are
+                all populated from a single combined query - the Brain
+                tab's own established design (Phase 87, Batch 2): its
+                four dynamic sections all come from one
+                get_brain_status() call, so one shared error message
+                already covers all of them, and its two static sections
+                never fail at all. Added Batch 2 so the Brain tab could
+                adopt this helper without changing that design.
 
         Returns:
             A (section, error_var) tuple. `section` is the
             ttk.LabelFrame itself, not yet packed - the caller controls
             its own fill/expand/pady exactly as it did for the plain
-            Frame it replaces. `error_var` is a fresh StringVar for
-            this section's own isolated error message, matching every
-            other per-panel error variable already established in this
-            module.
+            Frame it replaces. `error_var` is a fresh StringVar for this
+            section's own isolated error message when
+            include_error_var is True (the default); otherwise None,
+            and no error label is created for this section at all.
         """
         section = ttk.LabelFrame(parent, text=title, padding=(8, 6))
         if caption is not None:
             ttk.Label(section, text=caption, wraplength=460).pack(anchor="w")
+        if not include_error_var:
+            return section, None
         error_var = tk.StringVar(value="")
         ttk.Label(section, textvariable=error_var, foreground="red").pack(anchor="w")
         return section, error_var
@@ -1264,9 +1287,19 @@ class DashboardApp:
         covers all four dynamic sections, since they come from one
         combined BrainStatus fetch rather than four independent
         queries; the two static sections are built once here and never
-        rebuilt on refresh, since they never change."""
+        rebuilt on refresh, since they never change.
+
+        Phase 88, Batch 2: all six sections are now real
+        ttk.LabelFrame widgets (via _build_titled_section(), the same
+        helper Batch 1 gave the Overview tab), each with its own
+        titled border - presentation only. The single shared
+        _brain_error_var stays exactly where and what it was before
+        this batch (built directly, not via the helper's own optional
+        per-section error var), so _refresh_brain() needed no change
+        at all."""
         frame = ttk.Frame(self._notebook, padding=(8, 8))
         self._notebook.add(frame, text="Brain")
+        self._brain_frame = frame
 
         ttk.Label(
             frame, text=BRAIN_HEADER, font=("TkDefaultFont", 14, "bold")
@@ -1279,56 +1312,66 @@ class DashboardApp:
         )
 
         # --- AI / Reasoning ----------------------------------------------------
-        ttk.Label(
-            frame, text="AI / Reasoning", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w", pady=(6, 0))
-        self._brain_system_status_frame = ttk.Frame(frame)
-        self._brain_system_status_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        ai_reasoning_section, _ = self._build_titled_section(
+            frame, "AI / Reasoning", include_error_var=False
+        )
+        ai_reasoning_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_system_status_frame = ttk.Frame(ai_reasoning_section)
+        self._brain_system_status_frame.pack(fill="x", anchor="w")
         self._brain_system_status_labels: list[ttk.Label] = []
 
         # --- Memory --------------------------------------------------------------
-        ttk.Label(frame, text="Memory", font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w", pady=(6, 0)
+        memory_section, _ = self._build_titled_section(
+            frame, "Memory", include_error_var=False
         )
-        self._brain_memory_frame = ttk.Frame(frame)
-        self._brain_memory_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        memory_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_memory_frame = ttk.Frame(memory_section)
+        self._brain_memory_frame.pack(fill="x", anchor="w")
         self._brain_memory_labels: list[ttk.Label] = []
 
         # --- Approval Status Breakdown -------------------------------------------
-        ttk.Label(
-            frame, text="Approval Status Breakdown", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w", pady=(6, 0))
-        self._brain_approval_breakdown_frame = ttk.Frame(frame)
-        self._brain_approval_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        approval_breakdown_section, _ = self._build_titled_section(
+            frame, "Approval Status Breakdown", include_error_var=False
+        )
+        approval_breakdown_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_approval_breakdown_frame = ttk.Frame(approval_breakdown_section)
+        self._brain_approval_breakdown_frame.pack(fill="x", anchor="w")
         self._brain_approval_breakdown_labels: list[ttk.Label] = []
 
         # --- Workflow Status Breakdown --------------------------------------------
-        ttk.Label(
-            frame, text="Workflow Status Breakdown", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w", pady=(6, 0))
-        ttk.Label(
-            frame, text=WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE, wraplength=480
-        ).pack(anchor="w")
-        self._brain_workflow_breakdown_frame = ttk.Frame(frame)
-        self._brain_workflow_breakdown_frame.pack(fill="x", anchor="w", pady=(0, 6))
+        workflow_breakdown_section, _ = self._build_titled_section(
+            frame,
+            "Workflow Status Breakdown",
+            caption=WORKFLOW_STATUS_BREAKDOWN_SCOPE_NOTE,
+            include_error_var=False,
+        )
+        workflow_breakdown_section.pack(fill="x", anchor="w", pady=(0, 6))
+        self._brain_workflow_breakdown_frame = ttk.Frame(workflow_breakdown_section)
+        self._brain_workflow_breakdown_frame.pack(fill="x", anchor="w")
         self._brain_workflow_breakdown_labels: list[ttk.Label] = []
 
         # --- Known Limits (static, built once) ------------------------------------
-        ttk.Label(
-            frame, text="Known Limits", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w", pady=(6, 0))
+        known_limits_section, _ = self._build_titled_section(
+            frame, "Known Limits", include_error_var=False
+        )
+        known_limits_section.pack(fill="x", anchor="w", pady=(0, 6))
         for limit in BRAIN_KNOWN_LIMITS:
-            ttk.Label(frame, text=f"- {limit}", wraplength=480).pack(anchor="w")
+            ttk.Label(known_limits_section, text=f"- {limit}", wraplength=460).pack(
+                anchor="w"
+            )
 
         # --- Claude Prompt Studio (static, built once) -----------------------------
-        ttk.Label(
-            frame, text="Claude Prompt Studio", font=("TkDefaultFont", 10, "bold")
-        ).pack(anchor="w", pady=(6, 0))
-        ttk.Label(frame, text=BRAIN_PROMPT_STUDIO_CAPTION, wraplength=480).pack(
-            anchor="w"
+        prompt_studio_section, _ = self._build_titled_section(
+            frame,
+            "Claude Prompt Studio",
+            caption=BRAIN_PROMPT_STUDIO_CAPTION,
+            include_error_var=False,
         )
+        prompt_studio_section.pack(fill="x", anchor="w", pady=(0, 6))
         for command in BRAIN_PROMPT_STUDIO_COMMANDS:
-            ttk.Label(frame, text=f"- {command}", wraplength=480).pack(anchor="w")
+            ttk.Label(
+                prompt_studio_section, text=f"- {command}", wraplength=460
+            ).pack(anchor="w")
 
     # --- refresh ---------------------------------------------------------------
 
