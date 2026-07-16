@@ -9,15 +9,17 @@ reachability, and a merged recent-activity feed; extended Phase 65,
 Batch 1 with an inbox source-type breakdown and a schedule
 enabled/disabled breakdown; extended Phase 66, Batch 1 with an honest
 quarantine summary; Phase 67 made a wording-only consistency pass
-across this docstring itself - no behavior changed).
+across this docstring itself - no behavior changed; extended Phase 87,
+Batch 1 with a Brain-status composition for the dashboard's future
+Brain tab).
 
 Responsibilities:
     - Define small, frozen view-model dataclasses shaped for dashboard
       display (MemoryRow, ApprovalRow, WorkflowRow, WorkflowTransitionRow,
       InboxRow, ScheduleRow, QuarantineRow, DashboardOverview,
-      DashboardSystemStatus, StoreReachability, ActivityRow), and their
-      real-count breakdown/summary counterparts added across Phases
-      63-66 (MemoryCategoryCount, ApprovalStatusCount,
+      DashboardSystemStatus, StoreReachability, ActivityRow, BrainStatus),
+      and their real-count breakdown/summary counterparts added across
+      Phases 63-66 (MemoryCategoryCount, ApprovalStatusCount,
       WorkflowStatusCount, InboxSourceTypeCount, ScheduleStatusCount,
       QuarantineSummary).
     - Define DashboardReadModel, which composes MemoryManager,
@@ -99,6 +101,21 @@ Does NOT:
       is never null, so every durable row already has a known path - and
       never reports a total size, since no size is ever stored and this
       class never inspects the filesystem to compute one.
+    - Report a tool registry size, or any git branch/commit/phase/test-
+      suite result, in get_brain_status() (Phase 87, Batch 1):
+      dashboard.py is a wholly separate process from main.py and never
+      constructs a ToolRegistry, and this class has no access to git or
+      test-run state at all - BrainStatus reports only the four fields
+      already reachable through this class's own pre-existing methods
+      (get_system_status(), self._memory.count(),
+      get_approval_status_breakdown(), get_workflow_status_breakdown()),
+      never a fabricated or estimated one.
+    - Import main, ToolRegistry, tools.builtin.jarvis_brain_tool,
+      CommandRouter, AIRouter, AIReasoningEngine, PromptBuilder,
+      subprocess, or git (Phase 87, Batch 1, reaffirming this module's
+      own pre-existing "Does NOT" scope above): get_brain_status() is a
+      pure composition of this class's own already-existing methods and
+      fields, never a new dependency on the CLI tool layer.
 
 This is the sole persistence-facing layer the dashboard UI depends on -
 the UI never imports a store directly.
@@ -701,6 +718,48 @@ class ActivityRow:
     domain: str
     summary: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BrainStatus:
+    """Jarvis's real, currently-known "brain" state, shaped for dashboard
+    display (Phase 87, Batch 1).
+
+    A pure composition of four already-existing DashboardReadModel
+    results/fields - get_system_status()'s AI/reasoning fields,
+    self._memory.count(), get_approval_status_breakdown(), and
+    get_workflow_status_breakdown(). No new store query, store method,
+    or database read is added for this: every value here was already
+    reachable through this class's own existing methods before Phase 87.
+
+    Deliberately excludes tool registry size: dashboard.py is a wholly
+    separate process from main.py and never constructs a ToolRegistry
+    (see dashboard.py's own module docstring) - showing a real count
+    would require duplicating main.py's entire tool-registration list
+    solely to produce one integer, which is not undertaken here. It also
+    never reports the current git branch, commit, phase, or test-suite
+    result - this class has no access to any of that, and none of it is
+    fabricated.
+
+    Attributes:
+        system_status: The same DashboardSystemStatus get_system_status()
+            already returns - carries available=False (with AI fields
+            None) if no Settings object was supplied at construction
+            time, exactly as get_system_status() itself would report.
+        memory_count: The total number of stored memories, from the same
+            MemoryManager.count() call get_overview() already makes.
+        approval_breakdown: The same tuple get_approval_status_breakdown()
+            already returns - a true, unbounded, all-time total per
+            known status, honest zeros included.
+        workflow_breakdown: The same tuple get_workflow_status_breakdown()
+            already returns - honestly scoped to the most recently
+            active workflows, honest zeros included.
+    """
+
+    system_status: DashboardSystemStatus
+    memory_count: int
+    approval_breakdown: tuple[ApprovalStatusCount, ...]
+    workflow_breakdown: tuple[WorkflowStatusCount, ...]
 
 
 class DashboardReadModel:
@@ -1377,3 +1436,21 @@ class DashboardReadModel:
 
         entries.sort(key=lambda entry: entry.created_at, reverse=True)
         return entries[:limit]
+
+    def get_brain_status(self) -> BrainStatus:
+        """Return Jarvis's real, currently-known "brain" state (Phase 87,
+        Batch 1).
+
+        A pure composition of get_system_status(), self._memory.count(),
+        get_approval_status_breakdown(), and get_workflow_status_breakdown() -
+        no new store query is made here.
+
+        Returns:
+            A BrainStatus built from those four already-existing results.
+        """
+        return BrainStatus(
+            system_status=self.get_system_status(),
+            memory_count=self._memory.count(),
+            approval_breakdown=self.get_approval_status_breakdown(),
+            workflow_breakdown=self.get_workflow_status_breakdown(),
+        )

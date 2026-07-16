@@ -1431,6 +1431,169 @@ def test_recent_activity_never_uses_ai_or_fabricated_text() -> None:
         assert forbidden not in source
 
 
+# --- get_brain_status (Phase 87, Batch 1) ---------------------------------------
+
+
+def test_brain_status_composes_real_system_status() -> None:
+    settings = _test_settings(ai_model="claude-test-model", ai_reasoning_enabled=True)
+    read_model, *_ = _make_read_model_with_settings(settings)
+
+    brain = read_model.get_brain_status()
+
+    assert brain.system_status == read_model.get_system_status()
+    assert brain.system_status.available is True
+    assert brain.system_status.ai_reasoning_enabled is True
+    assert brain.system_status.ai_model == "claude-test-model"
+
+
+def test_brain_status_system_status_honestly_unavailable_without_settings() -> None:
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    brain = read_model.get_brain_status()
+
+    assert brain.system_status.available is False
+    assert brain.system_status.ai_reasoning_enabled is None
+    assert brain.system_status.ai_model is None
+
+
+def test_brain_status_memory_count_matches_real_memory_manager_count() -> None:
+    read_model, memory, *_ = _make_read_model_with_settings(None)
+    memory.save("buy milk")
+    memory.save("call dentist")
+
+    brain = read_model.get_brain_status()
+
+    assert brain.memory_count == 2
+    assert brain.memory_count == memory.count()
+
+
+def test_brain_status_memory_count_is_honestly_zero_for_empty_store() -> None:
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    brain = read_model.get_brain_status()
+
+    assert brain.memory_count == 0
+
+
+def test_brain_status_approval_breakdown_matches_real_breakdown() -> None:
+    read_model, _, approvals, *_ = _make_read_model_with_settings(None)
+    approvals.record_request(
+        request_id="req-1", action="delete file", reason="r", security_tier="yellow"
+    )
+
+    brain = read_model.get_brain_status()
+
+    assert brain.approval_breakdown == read_model.get_approval_status_breakdown()
+
+
+def test_brain_status_approval_breakdown_includes_every_known_status_at_honest_zero() -> (
+    None
+):
+    from approval.approval_history_store import KNOWN_APPROVAL_STATUSES
+
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    brain = read_model.get_brain_status()
+
+    statuses = {row.status for row in brain.approval_breakdown}
+    assert statuses == set(KNOWN_APPROVAL_STATUSES)
+    assert all(row.count == 0 for row in brain.approval_breakdown)
+
+
+def test_brain_status_workflow_breakdown_matches_real_breakdown() -> None:
+    read_model, _, _, workflows, *_ = _make_read_model_with_settings(None)
+    workflows.record_transition(workflow_id="wf-1", status="workflow_started")
+
+    brain = read_model.get_brain_status()
+
+    assert brain.workflow_breakdown == read_model.get_workflow_status_breakdown()
+
+
+def test_brain_status_workflow_breakdown_includes_every_known_status_at_honest_zero() -> (
+    None
+):
+    from workflow.workflow_history_store import KNOWN_WORKFLOW_STATUSES
+
+    read_model, *_ = _make_read_model_with_settings(None)
+
+    brain = read_model.get_brain_status()
+
+    statuses = {row.status for row in brain.workflow_breakdown}
+    assert statuses == set(KNOWN_WORKFLOW_STATUSES)
+    assert all(row.count == 0 for row in brain.workflow_breakdown)
+
+
+def test_brain_status_never_mutates_any_store() -> None:
+    read_model, memory, approvals, workflows, inbox, schedules, quarantine = (
+        _make_read_model_with_settings(None)
+    )
+    memory.save("existing memory")
+    before = (
+        memory.count(),
+        inbox.count(),
+        len(schedules.list_all()),
+        len(quarantine.list_recent()),
+    )
+
+    read_model.get_brain_status()
+
+    after = (
+        memory.count(),
+        inbox.count(),
+        len(schedules.list_all()),
+        len(quarantine.list_recent()),
+    )
+    assert before == after
+
+
+def test_brain_status_has_no_tool_registry_field() -> None:
+    """Phase 87, Batch 1: tool registry size is deliberately not
+    reported anywhere on BrainStatus - dashboard.py never constructs a
+    ToolRegistry, and no field name resembling one is present."""
+    from dataclasses import fields
+
+    from dashboard.read_model import BrainStatus
+
+    field_names = {field.name for field in fields(BrainStatus)}
+    for forbidden in ("tool_count", "tool_registry", "registry", "tools"):
+        assert forbidden not in field_names
+
+
+def test_brain_status_reports_no_git_or_phase_or_test_suite_state() -> None:
+    """Phase 87, Batch 1: BrainStatus has no branch/commit/phase/test-
+    result field of any kind - this class has no access to any of that
+    and never fabricates one."""
+    from dataclasses import fields
+
+    from dashboard.read_model import BrainStatus
+
+    field_names = {field.name for field in fields(BrainStatus)}
+    for forbidden in (
+        "branch",
+        "commit",
+        "commit_hash",
+        "phase",
+        "test_result",
+        "test_suite_result",
+        "git",
+    ):
+        assert forbidden not in field_names
+
+
+def test_brain_status_uses_no_new_store_query() -> None:
+    """Structural proof: get_brain_status() only calls this class's own
+    pre-existing methods/fields - never a new store method."""
+    source = inspect.getsource(read_model_module.DashboardReadModel.get_brain_status)
+    assert "self.get_system_status()" in source
+    assert "self._memory.count()" in source
+    assert "self.get_approval_status_breakdown()" in source
+    assert "self.get_workflow_status_breakdown()" in source
+    # No direct store access beyond the already-existing _memory.count():
+    # everything else here goes through this class's own methods.
+    for forbidden in ("self._approvals.", "self._workflows.", "._registry", "_tool"):
+        assert forbidden not in source
+
+
 # --- structural: no write path -------------------------------------------------
 
 #: Method names, on any of the six stores, that imply a mutation. If
@@ -1538,7 +1701,15 @@ def test_read_model_module_imports_no_execution_component() -> None:
     """Structural proof that dashboard/read_model.py cannot reach
     CommandRouter, ToolExecutor, the live ApprovalManager, WorkflowEngine,
     AIReasoningEngine, AIRouter, or WebSearchTool - it only imports the
-    five approved read-side managers/stores."""
+    five approved read-side managers/stores.
+
+    Extended Phase 87, Batch 1: get_brain_status() must remain a pure
+    composition of this class's own pre-existing methods, never a new
+    dependency on main.py, ToolRegistry, the CLI tool layer, or any
+    process/AI-provider/VCS mechanism - so this now also collects each
+    ImportFrom's own module path (not just the imported symbol names),
+    and checks the new forbidden names those Batch 1 instructions name
+    explicitly."""
     source = inspect.getsource(read_model_module)
     tree = ast.parse(source)
 
@@ -1546,6 +1717,8 @@ def test_read_model_module_imports_no_execution_component() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             imported_names.update(alias.name for alias in node.names)
+            if node.module:
+                imported_names.add(node.module)
         elif isinstance(node, ast.Import):
             imported_names.update(alias.name for alias in node.names)
 
@@ -1561,5 +1734,16 @@ def test_read_model_module_imports_no_execution_component() -> None:
         # comes from InboxStore.count_since() only - this read model must
         # never import or depend on the CLI's own last-seen marker store.
         "ScheduledInboxNoticeStore",
+        # Phase 87, Batch 1: get_brain_status() must never cross into the
+        # CLI tool layer, main.py's composition root, an AI-provider
+        # prompt-building path, or any process/VCS mechanism.
+        "main",
+        "ToolRegistry",
+        "tools.registry",
+        "JarvisBrainStatusTool",
+        "tools.builtin.jarvis_brain_tool",
+        "PromptBuilder",
+        "subprocess",
+        "git",
     }
     assert imported_names & forbidden == set()
