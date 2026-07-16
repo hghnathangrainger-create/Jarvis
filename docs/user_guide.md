@@ -361,7 +361,7 @@ jarvis> [NEEDS APPROVAL] ...
   Risk tier:  YELLOW (sensitive - needs your approval)
 Approve this action? [y]es / [n]o: y
 jarvis> [APPROVED] You approved 'move file'.
-jarvis> [OK] Moved 'draft.txt' to 'final.txt'.
+jarvis> [OK] Moved 'draft.txt' to 'final.txt' (128 bytes).
 ```
 `move file` and `rename file` are the same command — `draft.txt` no longer exists afterward; only `final.txt` does. If `final.txt` already existed, the move is refused — even after approval — and `draft.txt` is left exactly where it was.
 

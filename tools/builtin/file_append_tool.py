@@ -2,7 +2,10 @@
 file_append_tool.py
 
 A guarded write tool that APPENDS text to an existing text file
-(Phase 4, Batch 2).
+(Phase 4, Batch 2; extended Phase 85, Batch 2 so the success
+confirmation also discloses the file's real, resulting total byte
+size after the append completes, alongside the existing characters-
+added count).
 
 FileAppendTool is a YELLOW tool: appending to a file changes state, so its
 action is classified YELLOW and it runs only after explicit approval through
@@ -86,10 +89,14 @@ class FileAppendTool(BaseTool):
                 content: the text to append (required, non-empty).
 
         Returns:
-            A successful ToolResult when the text is appended, or a failed
-            result if the path is missing, the file does not exist, the target
-            is a directory, the file appears binary, or the content is missing,
-            empty, or too large.
+            A successful ToolResult when the text is appended, whose
+            output and metadata disclose both the characters just
+            added and the file's real, resulting total byte size -
+            read from the file after the append completes, since that
+            is its actual, resulting state (Phase 85, Batch 2) - or a
+            failed result if the path is missing, the file does not
+            exist, the target is a directory, the file appears binary,
+            or the content is missing, empty, or too large.
         """
         raw_path = request.input_data.get("path")
         if not isinstance(raw_path, str) or not raw_path.strip():
@@ -131,16 +138,18 @@ class FileAppendTool(BaseTool):
         except OSError as exc:
             return self.fail(f"Could not append to file: {exc}")
 
+        size = file_path.stat().st_size
         return ToolResult(
             tool_name=self.name,
             success=True,
             output=(
                 f"Appended to file: {file_path} "
-                f"({len(content)} characters added)."
+                f"({len(content)} characters added; {size} bytes total)."
             ),
             metadata={
                 "path": str(file_path),
                 "chars_appended": str(len(content)),
+                "size_bytes": str(size),
                 "operation": "append",
             },
         )
