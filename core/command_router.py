@@ -167,6 +167,25 @@ _JARVIS_BRAIN_EXACT_COMMANDS: frozenset[str] = frozenset(
     {"jarvis brain status", "show jarvis brain"}
 )
 
+#: Leading phrases for the five "Claude Prompt Studio" modes (Phase
+#: 86, Batch 2), each mapping to PreparePromptTool's own "mode" input.
+#: None is a superset-string of another - they diverge at their second
+#: word ("implementation"/"review"/"brainstorm"/"critique"/"compare"),
+#: mirroring _FILE_SEARCH_NAME_PREFIXES/_FILE_SEARCH_CONTENT_PREFIXES's
+#: own established "divergent second word" reasoning exactly - so
+#: dispatch order among these five does not affect correctness.
+#: Confirmed directly against every other exact/prefix table in this
+#: module: no existing command anywhere starts with "prepare".
+_PREPARE_PROMPT_PREFIX_TO_MODE: dict[str, str] = {
+    "prepare implementation prompt for": "implementation",
+    "prepare review prompt for": "review",
+    "prepare brainstorm prompt for": "brainstorm",
+    "prepare critique prompt for": "critique",
+    "prepare compare prompt for": "compare",
+}
+
+_PREPARE_PROMPT_PREFIXES: tuple[str, ...] = tuple(_PREPARE_PROMPT_PREFIX_TO_MODE)
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -768,6 +787,17 @@ class CommandRouter:
             "jarvis_brain"
         ):
             return "jarvis_brain"
+
+        # Claude Prompt Studio (Phase 86, Batch 2): read-only and GREEN.
+        # Prefix match only, on a fixed set of five mode-specific
+        # phrases - never confused with any other command family, and
+        # the trailing free-text goal is never validated or interpreted
+        # here, only extracted in build_input() below.
+        if (
+            self._file_prefix(lowered, _PREPARE_PROMPT_PREFIXES) is not None
+            and self._registry.has_tool("prepare_prompt")
+        ):
+            return "prepare_prompt"
 
         # Quarantine listing (Phase 36): read-only and GREEN. Exact
         # phrases only, mirroring the config check immediately above -
@@ -1673,6 +1703,13 @@ class CommandRouter:
                 "schedule_id": self._extract_memory_id(text, "disable schedule")
             }
 
+        if tool_name == "prepare_prompt":
+            mode, goal = self._extract_prepare_prompt_input(text)
+            result: dict[str, object] = {"goal": goal}
+            if mode:
+                result["mode"] = mode
+            return result
+
         # schedule_list takes no input
         # info takes no input
         # help takes no input
@@ -1881,6 +1918,40 @@ class CommandRouter:
         if lowered_trailing.endswith(" as"):
             return query, trailing[: -len(" as")].strip(), ""
         return query, trailing.strip(), ""
+
+    @classmethod
+    def _extract_prepare_prompt_input(cls, text: str) -> tuple[str, str]:
+        """Extract (mode, goal) from a "prepare <mode> prompt for <goal>"
+        command (Phase 86, Batch 2).
+
+        Reuses _file_prefix() to find which of the five fixed mode
+        prefixes matched (they never overlap - see
+        _PREPARE_PROMPT_PREFIX_TO_MODE's own docstring), then treats
+        everything after that prefix as the raw, unparsed, verbatim
+        goal text - exactly the same "extract trailing free text
+        as-is, never interpret it" discipline every other flexible
+        command in this module already uses (e.g.
+        match_memory_query_summary()'s own "raw query" extraction).
+        The goal is never validated, truncated, or scanned for
+        embedded instructions here - PreparePromptTool embeds it
+        verbatim as inert text in the generated prompt.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A tuple of (mode, goal). mode is "" if no known prefix
+            matched (defensive; unreachable via match()'s own gating).
+            goal may be empty, in which case PreparePromptTool itself
+            reports the problem - this method never validates it.
+        """
+        lowered = text.casefold()
+        prefix = cls._file_prefix(lowered, _PREPARE_PROMPT_PREFIXES)
+        if prefix is None:
+            return "", ""  # defensive; unreachable via match()'s own gating
+        mode = _PREPARE_PROMPT_PREFIX_TO_MODE[prefix]
+        goal = text[len(prefix) :].strip().strip("'\"").strip()
+        return mode, goal
 
     @classmethod
     def _extract_file_search_input(cls, text: str) -> tuple[str, str]:

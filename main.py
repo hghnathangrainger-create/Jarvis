@@ -103,6 +103,7 @@ from tools.builtin import (
     MemoryForgetTool,
     MemoryTool,
     MemoryUpdateTool,
+    PreparePromptTool,
     QuarantineListTool,
     ScheduleCreateTool,
     ScheduleDisableTool,
@@ -302,15 +303,20 @@ def build_orchestrator() -> JarvisOrchestrator:
     # and `workflow_history` instances constructed above for other
     # tools' use - never opens a new database connection, never
     # constructs a new store, never calls AI or a subprocess.
-    registry.register_tool(
-        JarvisBrainStatusTool(
-            registry,
-            settings,
-            memory,
-            approval_history,
-            workflow_history,
-        )
+    jarvis_brain = JarvisBrainStatusTool(
+        registry,
+        settings,
+        memory,
+        approval_history,
+        workflow_history,
     )
+    registry.register_tool(jarvis_brain)
+
+    # PreparePromptTool (Phase 86, Batch 2): reuses the exact same
+    # jarvis_brain instance just registered above (via its own
+    # get_context() method) - never a new store/manager connection,
+    # never AI, never a subprocess, never git.
+    registry.register_tool(PreparePromptTool(jarvis_brain))
 
     executor = ToolExecutor(
         registry=registry,

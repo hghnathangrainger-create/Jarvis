@@ -145,6 +145,11 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     # History
     ("History: approval history", "show approval history"),
     ("History: workflow history", "show workflow history"),
+    # Claude Prompt Studio
+    (
+        "Claude Prompt Studio: prepare implementation prompt",
+        "prepare implementation prompt for a better memory search",
+    ),
 )
 
 

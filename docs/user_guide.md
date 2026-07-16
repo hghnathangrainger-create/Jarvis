@@ -223,6 +223,18 @@ All five workflows above are fixed, deterministic sequences of existing tools �
 
 These show durable **history** only — not a live list of things currently awaiting your decision (see §10).
 
+### Claude Prompt Studio (Phase 86, Batch 2 — GREEN, read-only)
+
+| Command | Does |
+|---|---|
+| `prepare implementation prompt for <goal>` | Assembles a well-structured, Claude-ready implementation prompt around your free-text goal. |
+| `prepare review prompt for <goal>` | Same, for a code/plan review request. |
+| `prepare brainstorm prompt for <goal>` | Same, for open-ended idea generation. |
+| `prepare critique prompt for <goal>` | Same, for a structured strengths/weaknesses/risks critique. |
+| `prepare compare prompt for <goal>` | Same, for a side-by-side comparison of options ending in a recommendation. |
+
+Every generated prompt is **local text only, printed to the CLI for you to copy and paste into an actual Claude conversation yourself** — Jarvis never calls the Claude API, any other AI provider, or sends the generated text anywhere. Each prompt includes: your goal verbatim; a real "Jarvis Context" section (AI configuration, real memory/approval/workflow counts, tool registry size — the same data `jarvis brain status` reports); a fixed, hand-maintained "Standing Project Rules" section (including the `dashboard_test.txt` rule); a "Safety / Scope Rules" section; and an explicit **"fill in yourself"** placeholder for the current phase, commit hash, branch, and latest test-suite result — Jarvis has no live git/test-state tracking, so it never fabricates these, ever.
+
 ---
 
 ## 7. Inbox, Scheduled Summaries, and Startup Notices

@@ -48,6 +48,14 @@ Read-only tools (GREEN) - these never change any state:
       Batch 1). Never calls AI, a subprocess, or the web; has no live
       knowledge of the current git branch, commit, or test suite
       result.
+    - PreparePromptTool: assembles a well-structured, Claude-ready
+      prompt (implementation/review/brainstorm/critique/compare) for
+      the user to copy and paste into an actual Claude conversation
+      manually (Phase 86, Batch 2 - "Claude Prompt Studio"). Never
+      calls the Claude API, any other AI provider, a subprocess, or
+      git; every generated prompt includes an explicit "fill in
+      yourself" placeholder for the current phase/commit/branch/test
+      result instead of fabricating it.
 
 Guarded read tools (YELLOW) - read-only from Jarvis's own state's point of
 view, but classified YELLOW because they reach an arbitrary, externally-
@@ -118,6 +126,7 @@ from tools.builtin.jarvis_brain_tool import JarvisBrainStatusTool
 from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
+from tools.builtin.prepare_prompt_tool import PreparePromptTool
 from tools.builtin.quarantine_list_tool import QuarantineListTool
 from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
@@ -133,6 +142,7 @@ __all__ = [
     "HealthCheckTool",
     "HelpTool",
     "JarvisBrainStatusTool",
+    "PreparePromptTool",
     "QuarantineListTool",
     "EchoTool",
     "InfoTool",

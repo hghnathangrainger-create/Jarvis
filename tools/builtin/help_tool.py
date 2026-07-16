@@ -5,7 +5,8 @@ A safe tool that lists Jarvis's currently supported commands (Phase 43;
 updated Phase 84 to surface the optional grammar clauses Phases 81-83
 shipped: schedule naming, file-read character limits, and result-count
 limits for file/memory list and search; updated Phase 86, Batch 1 to
-document the new "jarvis brain status" command).
+document the new "jarvis brain status" command; updated Phase 86,
+Batch 2 to document the new "Claude Prompt Studio" command family).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -121,6 +122,15 @@ _HELP_LINES: tuple[str, ...] = (
     "declined actions / show approval <id> / view approval <id> - approval history",
     "  show workflow history / show recent workflows / show workflow <id> / view workflow "
     "<id> - workflow history",
+    "",
+    "Claude Prompt Studio (Phase 86, Batch 2):",
+    "  prepare implementation prompt for <goal> / prepare review prompt for <goal> / "
+    "prepare brainstorm prompt for <goal> / prepare critique prompt for <goal> / "
+    "prepare compare prompt for <goal> - assembles a well-structured, Claude-ready "
+    "prompt for you to copy and paste manually; includes real Jarvis context and an "
+    "honest fill-in-yourself placeholder for the current phase/commit/branch/test "
+    "result. Never calls the Claude API or any AI provider, and never sends the "
+    "prompt anywhere.",
 )
 
 
