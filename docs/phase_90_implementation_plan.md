@@ -911,6 +911,138 @@ After `ToolExecutor.execute(...)` returns a real `ToolResult`: on success, the r
 
 This turn remains planning clarification only - Sections 1-24 are unchanged, Section 25 (A through K) supersedes any conflicting Batch 2 wording in earlier sections, and Batch 2 implementation does not begin until Nathan explicitly approves it after reviewing this completed section.
 
+## 26. Batch 2 Final Safety Gate — Unsupported Requests and Execution-Time Divergence
+
+**Sections 1–25 above are preserved unchanged.** This section **supersedes only** the conflicting structured-output rules in §25.B and any Batch 2 contract that assumed every valid request must select a tool.
+
+### A. Required unsupported-request outcome
+
+§25.B's schema had no valid way for the model to say the single allowlisted capability cannot satisfy the user's request - every schema-valid response would otherwise have to select `project_state_show`, even for a wholly unrelated request. That is unsafe and dishonest, and is corrected here.
+
+**The Batch 2 model-output schema is replaced with exactly one of these two objects** (superseding §25.B's schema, which carried no `decision` key):
+
+Execute outcome:
+```json
+{
+  "decision": "execute",
+  "capability_id": "project_state_show",
+  "arguments": {}
+}
+```
+
+Unsupported outcome:
+```json
+{
+  "decision": "unsupported",
+  "capability_id": null,
+  "arguments": {}
+}
+```
+
+Exactly three top-level keys are required - `decision`, `capability_id`, `arguments` - no others are accepted. Allowed `decision` values are exactly `"execute"` and `"unsupported"`.
+
+**Cross-field rules.** For `decision == "execute"`: `capability_id` must be a string; it must equal a real `CapabilityId` value; it must be present in `CAPABILITY_CATALOG`; in Batch 2 the only accepted value is `"project_state_show"`; `arguments` must pass the selected adapter's exact argument validation (§25.C).
+
+For `decision == "unsupported"`: `capability_id` must be JSON `null`; `arguments` must be exactly an empty object; no plan is constructed; no security preflight runs; no tool executes; no approval is created; no store is mutated; the fixed response returned is exactly: `"Jarvis could not find an allowlisted capability that can safely complete that request."`
+
+**Rejected** (all fall under §25.B's existing parser-failure contract, unchanged): unknown `decision` values; missing `decision`; `execute` with a null `capability_id`; `unsupported` with a non-null `capability_id`; `unsupported` with any non-empty `arguments`; any other inconsistent field combination.
+
+**The unsupported outcome is a successful parse and a valid planning decision, not a parser failure.** It is represented and handled distinctly from every §25.B reject-list failure (§F below).
+
+### B. Exact parsed-decision contract
+
+One new parser-result contract, added only because Batch 2 implementation requires it to represent the two-outcome decision from §A:
+
+```python
+class ToolSelectionDecision(Enum):
+    EXECUTE = "execute"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedToolSelection:
+    decision: ToolSelectionDecision
+    capability_id: CapabilityId | None
+    arguments: dict[str, object]
+```
+
+The parser returns a `ParsedToolSelection` only after every JSON, duplicate-key, key-set, type, cross-field, size (§D), catalog, and argument rule has passed. `arguments` is a dict newly built by the parser itself for this call - never a reference to a dict object supplied by, or shared with, any other layer (the decoder's own `object_pairs_hook`, per §25.B, already constructs a fresh dict per object; the parser must not hand that same dict reference onward without an explicit copy if it performs any further transformation on it).
+
+`StructuredPlan` (§25.D) is constructed only for a `ParsedToolSelection` with `decision is ToolSelectionDecision.EXECUTE`. A `ToolSelectionDecision.UNSUPPORTED` decision creates no `StructuredPlan` of any kind. No free-text model-supplied "reason" field is added anywhere in Batch 2, and raw model output is never exposed to the user in any response, success or failure.
+
+### C. Trusted planning instruction
+
+The model must receive a fixed, Jarvis-authored planning instruction stating: exactly one capability is available; its id is `project_state_show`; it may be selected only when showing the current manually-recorded ProjectState record can satisfy the request; otherwise the model must return the exact `unsupported` schema from §A; output must be JSON only, with no Markdown beyond the one permitted outer fence, and no explanation or extra prose.
+
+**Inspection finding**, performed directly against the real, current code before any implementation, per this section's own requirement:
+
+- `AIReasoningRequest` (`ai/reasoning_models.py`) carries exactly `user_input`, `context_block`, `session_id` - **no field exists for a caller to supply or extend a system/trusted instruction.**
+- `AIReasoningEngine.reason()` (`ai/reasoning_engine.py`) unconditionally passes one fixed, module-level constant, `_SYSTEM_INSTRUCTION`, as `system_instruction` on every call it makes, regardless of what `AIReasoningRequest` contains. This same fixed instruction is shared, today, by every existing AI-summary feature (file/memory/web-search/webpage summaries) and by Batch 1's own `ask jarvis:` handler. **There is no existing path through `AIReasoningRequest`/`AIReasoningEngine` for a caller to supply a different or additional trusted instruction for one specific call.**
+- One layer down, `AIRouter.route(*, system_instruction: str, user_message: str, context: AIContextBlock | None, session_id: int | None)` (`ai/router.py`) **already accepts an arbitrary trusted instruction string as a plain parameter, per call** - this is the exact mechanism `AIReasoningEngine.reason()` itself uses internally to supply its own fixed instruction. `PromptBuilder.build(*, system_instruction: str, ...)` places whatever string it is given into the trusted "system" block of the resulting `AIRequest`, with no `ContentTrust` gating on `system_instruction` at all (the `ContentTrust`/`AIContextBlock`/`_TRUSTED_ORIGIN_KEY` sentinel machinery governs only the `context` parameter, never `system_instruction`).
+
+**Conclusion: the existing, unmodified `AIRouter.route(system_instruction=...)` path already carries a fixed trusted planning instruction, without touching any trust-boundary enforcement code (`AIContextBlock`'s construction guards, `PromptBuilder`'s injection scanner, and its untrusted-context framing are all untouched).** This is not a blocking limitation - a real, already-existing, already-parameterized path exists - but it does mean Batch 2's capability-selection call is made by calling the same, already-constructed `AIRouter` instance's `route()` method **directly**, rather than through `AIReasoningEngine.reason()`, whose own hardcoded `_SYSTEM_INSTRUCTION` must not be altered, branched on, or parameterized for this one narrow purpose (doing so would be a shared, cross-feature change to a component every existing AI-summary workflow and Batch 1's `ask jarvis:` also depend on - exactly the kind of broader, undisclosed change this amendment exists to prevent). This narrowly supersedes any earlier wording in §20/§24/§25 that described Batch 2 as reusing "`AIReasoningEngine`" for its capability-selection call specifically: `AIRouter`, `PromptBuilder`, the provider boundary, response validation, and the disclosure convention are all still reused completely unchanged, exactly as already required - only the one hardcoded-instruction call site (`AIReasoningEngine.reason()` itself) is bypassed for this specific call, in favor of the lower-layer method that already supports it. `main.py`'s wiring passes the same, already-constructed `AIRouter` instance to the new planning module (never a second instance) alongside the existing `AIReasoningEngine` still used unchanged for Batch 1.
+
+The capability instruction is supplied exclusively through this trusted `system_instruction` path. It is never mixed into retrieved memory text, the manually-maintained ProjectState text, or any other `ContextItem` - every `ContextItem` supplied to this call remains `ContentTrust.UNTRUSTED`, unchanged from Batch 1 (§25.E). No protected AI trust boundary is modified or weakened by this finding.
+
+### D. Raw model-output size limit
+
+Before fence removal or JSON parsing, model output exceeding 2,000 characters is rejected outright. The valid Batch 2 object is tiny (well under 100 characters in either shape from §A); unbounded output is unnecessary, and a fixed limit prevents excessive parser, log, or error-handling load from a misbehaving or adversarial response.
+
+Boundary behavior: output of exactly 2,000 characters proceeds to normal validation; output of 2,001 characters or more is rejected before fence stripping or JSON parsing are ever attempted. On size rejection: execute zero tools; create zero approvals; mutate zero stores; never echo the raw output; return a fixed, bounded validation error. Whitespace surrounding otherwise-valid output may still be ignored exactly as §25.B already allows, but the 2,000-character check is applied to the raw, untrimmed string returned by the provider, before any trimming occurs.
+
+### E. Execution-time classification divergence
+
+`SecurityManager`'s preflight classification (§25.F) is advisory to the intelligence layer's own gating decision only, never authoritative over `ToolExecutor`, which independently classifies again at the moment of execution (§25.F.11, unchanged).
+
+**Inspection finding**, performed directly against the real `ToolExecutor.execute()`/`ToolResult` contract (`tools/executor.py`, `tools/base_tool.py`) before any implementation, per this section's own requirement - `ToolResult` carries exactly `tool_name`, `success`, `output`, `error`, `requires_confirmation`, `blocked`, `metadata`; it carries **no** field naming the tier that was actually applied. Each divergence case is represented as follows, using only these real, existing fields:
+
+| Case | Real representation |
+|---|---|
+| Confirmation is required (execution-time reclassifies GREEN → YELLOW) | `result.requires_confirmation is True`, `result.success is False`; `tool.run()` was never called |
+| Execution was blocked (execution-time reclassifies GREEN → RED) | `result.blocked is True`, `result.success is False`; `tool.run()` was never called |
+| The tool did not actually execute | Either of the two rows above, or (structurally near-impossible in Batch 2's single-process, synchronous request/response flow, but honestly represented if it ever occurred) the tool having been deregistered between preflight and execution, surfacing as `result.success is False` with an error naming the tool unregistered and both `requires_confirmation`/`blocked` False |
+| Execution failed (the tool itself ran and failed, or raised) | `result.success is False`, `result.blocked is False`, `result.requires_confirmation is False`, `result.error` set to the tool's own honest failure message |
+
+There is no `SecurityTier` returned on `ToolResult` to compare against the preflight's own recorded tier directly - divergence is detected structurally, from `requires_confirmation`/`blocked` alone, never invented as a new field that does not exist today.
+
+**Batch 2's required handling**, for any of the first three rows above: do not create an approval request (Batch 2 has no approval flow at all, per §25.G); do not retry; do not replan; do not claim execution succeeded; return an honest refusal or failure message distinguishing "this needs confirmation" from "this was blocked" using the real fields above; leave every store unchanged except whatever audit event `ToolExecutor` itself already, unconditionally emits (unchanged, pre-existing behavior). For the fourth row (an ordinary tool-level failure), report the real failure honestly, per §25.G, unchanged.
+
+**Batch 2 must never convert an unexpected YELLOW result into an approval flow.** Approval integration for this workflow shape belongs exclusively to a future batch, mirroring how Batch 3's own approval/verification machinery (§24.C) is scoped to the separate `ask jarvis: ... and confirm it` write-workflow, not this one.
+
+### F. Grounded-response rule
+
+For a `ParsedToolSelection` with `decision is ToolSelectionDecision.EXECUTE` that reaches real execution: the substantive successful response comes only from the real `ToolResult.output` - no second AI call ever summarizes, rewrites, reinterprets, or embellishes it; a short, fixed label may be prepended (mirroring Batch 1's own `_ASK_JARVIS_LABEL` convention); if `ToolResult` reports failure (§E, row 4), that real failure is reported honestly; execution is never claimed unless `ToolExecutor` itself returned `success is True`.
+
+For a `ParsedToolSelection` with `decision is ToolSelectionDecision.UNSUPPORTED`: the fixed message from §A is used verbatim; no `StructuredPlan` is constructed; no security preflight runs; no `ToolExecutor` call is made; no approval is created; no store is mutated; there is no fallback to Batch 1's `ask jarvis:` advisory answering and no fall-through to the generic unmatched-command handler - an `unsupported` decision is its own complete, honest, terminal outcome.
+
+For any parser (§25.B, §26.A/D), catalog (§25.C), registry, or preflight (§25.F, §26.E) failure: a distinct, bounded failure response is used - never presented as an `unsupported` decision unless the model's response was itself a genuinely valid, schema-conformant `unsupported` object (§A); raw model output or exception internals are never exposed in any response.
+
+### G. Revised Batch 2 tests
+
+The following are added to §25.J's acceptance-test matrix (all of §25.J's original items remain required, unchanged):
+
+**Structured decision tests:** valid `execute` decision; valid `unsupported` decision; unknown `decision` value; missing `decision`; `execute` with null `capability_id`; `execute` with non-string `capability_id`; `unsupported` with non-null `capability_id`; `unsupported` with non-empty `arguments`; any other inconsistent field combination; `unsupported` produces no `StructuredPlan`; `execute` produces exactly one `StructuredPlanStep`; parsed `arguments` are copied into a newly-constructed dict, never a shared reference.
+
+**Output-bound tests:** raw output of exactly 2,000 characters reaches normal parsing validation; raw output of 2,001+ characters is rejected before fence stripping; oversized output is never echoed in any error; oversized output executes zero tools and creates zero approvals.
+
+**Unsupported-behavior tests:** an unrelated natural request, with a fake provider configured to return the valid `unsupported` schema, produces the fixed honest unsupported response; zero `StructuredPlan` construction; zero security preflight; zero tool execution; zero approvals; zero store mutation; no fallback to Batch 1 `ask jarvis:` behavior; no fallback to the generic unmatched-command response.
+
+**Trusted-instruction tests:** the exact capability id `project_state_show` appears in the trusted planning instruction passed as `system_instruction`; the rule to return `unsupported` when the capability cannot satisfy the request appears in that same instruction; the JSON-only/no-prose rules appear in it; memory and ProjectState context remain framed as untrusted (unchanged from Batch 1); adversarial memory content cannot alter the schema or the capability catalog (a memory record containing a fake `capability_id`/schema override has no effect); model output cannot add a capability through context injection; no capability authority is ever sourced from an untrusted `ContextItem`.
+
+**Execution-time-divergence tests:** preflight returns GREEN but the execution-time result requires confirmation (`requires_confirmation is True`) - no approval created, no success claimed, zero retry, zero replan, honest refusal returned; preflight GREEN but execution is blocked (`blocked is True`) - same guarantees; preflight GREEN but the tool itself reports failure (`success is False`, both flags False) - honest failure reported, no second AI call is made after execution in any of these three cases.
+
+**Regression tests retained from §25:** duplicate top-level keys rejected; duplicate nested keys rejected; malformed JSON rejected; unknown capability rejected; a registered-but-not-allowlisted tool rejected; a catalogued-but-unregistered tool rejected; forced-YELLOW preflight rejected; forced-RED preflight rejected; real GREEN execution through the real `ToolExecutor`; `ask jarvis:` remains advisory and unchanged; existing deterministic commands remain unchanged; the unmatched-request fallback remains unchanged; no direct `tool.run()` call anywhere in Batch 2 code; zero retries; zero replans.
+
+### H. Batch 2 implementation scope after this amendment
+
+Once §26 is approved, Batch 2 remains strictly limited to: one explicit command, `ask jarvis to: <request>`; one allowlisted capability, `project_state_show`; one maximum executable step; GREEN only; a valid `unsupported` outcome (§A); strict JSON with the exact three-key decision schema; deterministic capability and argument validation; a real `SecurityManager` preflight; real `ToolExecutor` execution; zero approvals; zero retries; zero replans; no `WorkflowEngine`; no verification; no `intelligence_trace`; no automatic memory writes; no change to Batch 1's advisory `ask jarvis:` behavior; no expansion of the capability catalog beyond `project_state_show`.
+
+Expected Batch 2 files remain those listed in §25.I, with one narrow, explicitly-justified addition proven necessary by §C's inspection: the new `intelligence/planning.py` module calls `AIRouter.route()` directly (the same, already-constructed instance `main.py` already builds for `AIReasoningEngine`, passed through unchanged) rather than routing this one call through `AIReasoningEngine`. This touches no file beyond what §25.I already listed as new/modified - `AIRouter`/`PromptBuilder`/`ai/reasoning_engine.py` themselves are not modified in any way - and is protected by the trusted-instruction regression tests in §G above.
+
+### I. Planning-only stop gate
+
+This turn is documentation only. Sections 1–25 are unchanged; §26 (A through I) supersedes only the conflicting Batch 2 wording named in its own preamble.
+
 ---
 
 **This is a planning document only. No production code has been written. Batch 1 does not begin until Nathan explicitly approves it after reviewing this plan.**
