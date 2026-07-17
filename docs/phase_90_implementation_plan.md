@@ -701,6 +701,216 @@ The kit cannot truthfully contain its own final commit hash before it is committ
 
 Natural request with lexical + recency context selection; context provenance/`context_id` presence; context budget exhaustion (whole-item omission vs. per-item truncation); ProjectState stale/manual labeling and `[FILL IN]`/`"not recorded yet"` honesty; malformed AI JSON; unknown capability id; unknown/extra argument; invalid argument type; a real tool that exists in `ToolRegistry` but is not in `CAPABILITY_CATALOG`; GREEN preflight + real execution (Batch 2 slice); YELLOW no-approval store-unchanged proof; approval → restart → resume → verification (full C.17 chain); declined/expired approval stops cleanly; exact-value verification mismatch (`FAILED`); verify-step-itself-fails (`UNAVAILABLE`); RED forced-plan refusal; provider unavailable/failure honesty; deterministic-command backward compatibility; zero-retry/zero-replan proof; `intelligence_trace` redaction and bounds.
 
+## 25. Batch 2 Contract Gate — Explicit Tool Intent and Exact Planning Contracts
+
+**Sections 1–24 above are preserved unchanged.** This section clarifies Batch 2 only and **supersedes** any conflicting Batch 2 wording in Sections 1–24 (in particular, wherever earlier sections left the Batch 2 trigger phrase implicit or assumed it reused the bare `"ask jarvis:"` prefix). Its purpose is to remove any ambiguity between Batch 1's already-shipped, unchanged advisory `ask jarvis:` behavior and Batch 2's real tool-selection behavior.
+
+### A. Exact user-facing routing boundary
+
+Two separate, distinctly-triggered commands exist side by side:
+
+1. **`ask jarvis: <request>`** (Batch 1, already shipped, commit `8462446`) — context-aware advisory answer only. No tool selection, no tool execution, no approval. Behavior is exactly as implemented in Batch 1 and is **not modified in any way by Batch 2**.
+2. **`ask jarvis to: <request>`** (new, Batch 2) — a natural-language tool-intent request: structured AI capability selection, deterministic validation, at most one allowlisted GREEN capability (per §B.9, unchanged), and real execution through the existing, unmodified `ToolExecutor`.
+
+Exact grammar requirements for the new command:
+- The colon after `to` is mandatory: `"ask jarvis to"` (no colon) does not match.
+- Matching is case-insensitive, mirroring `match_ask_jarvis`'s own `casefold()` convention exactly.
+- An empty or whitespace-only trailing request (`"ask jarvis to:"` with nothing meaningful after the colon) returns an honest, fixed error message and performs **no** AI call and **no** tool execution of any kind - mirroring Batch 1's own empty-request handling exactly.
+- Near misses must not match: `"ask jarvis to"` (no colon), `"ask jarvis"` (unrelated to this new command), `"jarvis, ask to: X"`, and `"ask jarvis: to X"` (a legitimate Batch 1 request whose own text happens to start with the word "to") must all fail to match the new command's grammar.
+
+**Collision proof.** `"ask jarvis to:"` is never a prefix of `"ask jarvis:"`, and `"ask jarvis:"` is never a prefix of `"ask jarvis to:"`, in either direction: comparing character-by-character after the shared `"ask jarvis"` stem, the very next character diverges immediately (`:` for the Batch 1 phrase vs. a space beginning `" to:"` for the Batch 2 phrase) - confirmed by direct string comparison, not assumed. This means dispatch order between the two matchers is **not** a correctness requirement on its own (neither can ever swallow the other), unlike the genuine Batch 1 §A.7 collision risk which required a real, resolved check against every *other* existing table. That existing check is re-confirmed here for the new phrase specifically: no exact/prefix table anywhere in `core/command_router.py` contains the word `"ask"` other than the Batch 1 `_ASK_JARVIS_PREFIX` entry itself (re-grepped as part of this amendment), so the new phrase cannot collide with any command family other than its own Batch 1 sibling, which is already proven non-colliding above.
+
+**Exact dispatch-chain position.** The new matcher (`CommandRouter.match_ask_jarvis_to`, or equivalently-named) is checked in `JarvisOrchestrator.handle_request()` immediately **before** the existing `match_ask_jarvis` check, in the same final special-handler cluster, still immediately before the generic `_handle_request_core` fallback. Because the two phrases are proven non-colliding above, this ordering choice is a matter of narrative grouping (newer command checked first, alongside its sibling) rather than a correctness necessity - but it is fixed here, explicitly, so Batch 2 implementation does not need to re-derive or guess it.
+
+**Backward compatibility.** Every existing deterministic command, every existing special matcher (including Batch 1's own `ask jarvis:`), and the generic fallback retain their current dispatch order and behavior, completely unchanged - the new matcher is purely additive, exactly mirroring how Batch 1's own matcher was added relative to the commands that already existed before it.
+
+**Documentation.** `tools/builtin/help_tool.py` and `docs/user_guide.md` are updated **in Batch 2 itself**, not deferred - this is a new user-facing command, following the same same-batch documentation discipline Batch 1 (and Phases 86/87/89 before it) already established.
+
+### B. Exact Batch 2 structured AI output
+
+The structured model output schema is **exactly** the one already fixed in §B.10 (unchanged by this section) - restated here only to make explicit that it now governs responses to the new `ask jarvis to:` command, not `ask jarvis:`:
+
+```json
+{
+  "capability_id": "project_state_show",
+  "arguments": {}
+}
+```
+
+Exactly two top-level keys - `capability_id` and `arguments` - both required. No other keys are accepted.
+
+**The parser must reject:**
+- malformed JSON;
+- empty output;
+- leading or trailing prose;
+- multiple JSON objects;
+- nested Markdown blocks;
+- more than one outer code fence;
+- unknown top-level keys;
+- missing keys;
+- unknown capability IDs;
+- capability IDs not present in `CAPABILITY_CATALOG`;
+- unknown argument names;
+- missing required arguments;
+- invalid argument types;
+- oversized string arguments;
+- duplicate JSON keys at any object level.
+
+**Duplicate keys must never be silently overwritten by the JSON decoder.** Python's `json.loads()` silently keeps only the *last* occurrence of a repeated key by default - exactly the silent-overwrite behavior this contract forbids. The parser therefore never calls plain `json.loads(text)`; it calls `json.loads(text, object_pairs_hook=_reject_duplicate_keys)`, where `_reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]` raises a parse-rejection error the first time it observes a key already present in the dict it is building, and otherwise returns the built dict unchanged. Because `object_pairs_hook` is invoked by the decoder for **every** JSON object encountered - top-level and nested alike - this single hook rejects a duplicate key at any nesting depth, not only at the top level, with no separate recursive check needed.
+
+**Exactly one optional outer triple-backtick fence** may be stripped, and only that: with no language tag, or with the `json` language tag, appearing as the first and last non-whitespace content of the raw text. Nothing else may be repaired, guessed, coerced, extracted, or normalized into an executable request - no extraction of "the first JSON-looking substring," no stripping of explanatory prose around the object, no coercion of a stringified number into an int, no truncation of an oversized string argument to make it fit.
+
+**Any parsing or validation failure** (any single item in the reject-list above) must: execute zero tools; create zero approvals; mutate zero stores; return an honest, bounded error naming *which* rule failed (e.g. "unknown capability", "duplicate key", "argument too long") without echoing raw, potentially-adversarial model output back verbatim; never fall back to a guessed capability; and never silently reroute into Batch 1's `ask jarvis:` advisory answering - a failed `ask jarvis to:` request stays a failed `ask jarvis to:` request, it never quietly becomes a different command's behavior.
+
+### C. Exact capability catalog for Batch 2
+
+`CAPABILITY_CATALOG` contains **exactly one entry**:
+
+| Field | Value |
+|---|---|
+| `capability_id` | `CapabilityId.PROJECT_STATE_SHOW` |
+| `tool_name` | `"project_state_show"` (the real, already-registered `ToolRegistry` name) |
+| `arguments` | `()` - none accepted |
+| `allowed_strategy` | `ExecutionStrategy.SINGLE_TOOL` |
+| `max_execution_tier` | `SecurityTier.GREEN` |
+| `verification_strategy_id` | `None` |
+| `internal_only` | `False` - the real tool is already reachable directly via `"show jarvis project state"` (Phase 89); intelligence-layer *selection* of it is possible only through this one catalog entry, never through any other path |
+
+`ToolRegistry` is explicitly **not** the intelligence allowlist - it is only Phase 1's general tool-execution registry, already used for many tools Batch 2 must never expose to AI selection. Execution requires **both**, checked independently: (1) the capability exists in `CAPABILITY_CATALOG`, and (2) its mapped real tool name still exists in `ToolRegistry` (`ToolRegistry.has_tool(adapter.tool_name)`, per §B.8, unchanged). A real, registered tool that is absent from `CAPABILITY_CATALOG` (every tool other than `project_state_show` in Batch 2) must be rejected the moment a structured response names it, before any further processing - the catalog check happens first, since a tool that fails the catalog check has no adapter to even look up in the registry.
+
+### D. Exact revised Batch 2 contracts
+
+Decorative or currently-unconsumed contracts from §6 are removed. The final Batch 2 shape, exactly:
+
+```python
+class CapabilityId(Enum):
+    PROJECT_STATE_SHOW = "project_state_show"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityArgumentSpec:
+    name: str
+    type_name: str
+    required: bool
+
+
+class ExecutionStrategy(Enum):
+    SINGLE_TOOL = "single_tool"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityAdapter:
+    capability_id: CapabilityId
+    tool_name: str
+    description: str
+    arguments: tuple[CapabilityArgumentSpec, ...]
+    allowed_strategy: ExecutionStrategy
+    max_execution_tier: SecurityTier
+    verification_strategy_id: str | None
+    internal_only: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStrategyDecision:
+    strategy: ExecutionStrategy
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredPlanStep:
+    step_number: int
+    description: str
+    capability_id: CapabilityId
+    tool_name: str
+    arguments: dict[str, object]
+    security_tier: SecurityTier
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredPlan:
+    goal: str
+    context_ids_supplied: tuple[str, ...]
+    steps: tuple[StructuredPlanStep, ...]
+```
+
+`context_ids_supplied` means only, and exactly, that those `ContextItem.context_id` values were included in the context supplied to the reasoning prompt for this request - it is never described as "used by," "consulted by," or otherwise implying the AI's reasoning process actually drew on any particular item; the AI's own internal reasoning is opaque and unverifiable, so this field records only a plain fact about what was supplied, not a causal claim about what was read. `goal` may remain the verbatim natural request text for V1 - no AI-derived paraphrase or extracted constraint list is invented, since the strict schema in §B (above) never asks the model to return one.
+
+**Removed entirely, not merely deprioritized** (superseding any earlier §6 mention): `risk_tier_hint`, `approval_required_hint` (already removed by §B.11), free-text `success_condition`, `max_retries`, `max_replans`, any retry contract, and any verification contract - none of these describe real Batch 2 behavior; verification remains exclusively a Batch 3 concept (§C.15-C.17), and Batch 2's own recovery policy is the unconditional zero/zero already fixed by §C.14 for Batch 3, applied identically here (Batch 2 has exactly one step, so "zero retries, zero replans" means simply: on any failure, stop and report - there is nothing to retry or replan into in the first place).
+
+**`InterpretedIntent` has no real Batch 2 consumer.** The minimal contract set above - `StructuredPlan`/`StructuredPlanStep` built directly from the parsed, validated `{capability_id, arguments}` response - requires no separate intermediate "interpreted intent" object; `goal` is carried directly on `StructuredPlan` itself. Introducing `InterpretedIntent` now, with no code path that reads it, would be exactly the "decorative type" this amendment exists to prevent. **`intelligence/intent.py` is therefore deferred, not created in Batch 2** - a future batch may introduce it if a genuine multi-step or multi-turn intent-tracking consumer emerges, but that consumer does not exist today.
+
+### E. Context provenance in the planning prompt
+
+Direct inspection of Batch 1's real, shipped `build_ai_context_block()` (`intelligence/context.py`, commit `8462446`): each supplied item is rendered into the combined text as `f"\n----- {item.context_id} -----\n{item.text}"` - so **`context_id` is already present**, verbatim, as every item's own delimiter label. `source` is not rendered as a separately-labeled field in that text, but it does not need to be: `source` is already encoded inside `context_id` itself by construction (`"memory:<id>"` vs. `"project_state:current"`, per §A.1), so nothing about `source` is lost. Bounded text: yes, unchanged, per the existing §A.5 budgets. Clear untrusted framing: yes - `PromptBuilder.build()` wraps the whole combined block in its existing `_UNTRUSTED_CONTEXT_HEADER`/`_UNTRUSTED_CONTEXT_FOOTER` markers before it ever reaches the model, exactly as it already does for Batch 1's `ask jarvis:` requests; this framing happens at the `PromptBuilder` layer, not inside `build_ai_context_block()` itself, and Batch 2 does not change that division of responsibility.
+
+**Conclusion: no change to `intelligence/context.py` is required for Batch 2.** The planner never needs to parse `context_id`s back out of the combined prompt text (which would be a fragile, unnecessary round-trip through untrusted-adjacent formatting) - it already has direct, structural access to the real `AssembledContext` object `ContextAssembler.assemble()` returned for this request, and populates `StructuredPlan.context_ids_supplied` as `tuple(item.context_id for item in assembled_context.items)` directly from that object's own `.items`, independent of anything the AI returns. This is deterministic, requires no new parsing, and cannot be spoofed by adversarial model output, since the AI's response never influences this field at all.
+
+This conclusion leaves every one of the following genuinely untouched, as required: Batch 1's context budgets (§A.5), the deterministic memory-selection algorithm (§A.4), source selection (§A.3), trust classification (§A.1/§A.3 - every item remains `ContentTrust.UNTRUSTED`), and `ask jarvis:` advisory behavior (unmodified, per §A above).
+
+### F. Deterministic security preflight
+
+After strict parsing (§B) and catalog validation (§C) both succeed, in exact order:
+
+1. Resolve the `CapabilityAdapter` for the validated `capability_id` from `CAPABILITY_CATALOG`.
+2. Verify its `tool_name` still exists in `ToolRegistry` (`has_tool()`) - a defensive check for a catalog entry whose real tool was since removed.
+3. Build the real tool input only through the adapter's own deterministic builder (never by hand-assembling a dict from the raw model output).
+4. Retrieve the real tool instance via `ToolRegistry.get_tool(adapter.tool_name)`.
+5. Construct the real request shape (`ToolRequest`) that tool's own `action_for()` expects.
+6. Call that real tool's own `action_for(request)` - never a guessed or hard-coded action string.
+7. Classify the returned action string through the real, unmodified `SecurityManager.classify_action()`.
+8. Require the actual resulting tier to be `SecurityTier.GREEN`.
+9. If the actual tier is `YELLOW` or `RED`, reject immediately: zero execution, zero approval creation - Batch 2 has no approval flow of any kind, so a `YELLOW` result is not paused for confirmation, it is simply refused.
+10. Store the real, already-computed `SecurityTier` on `StructuredPlanStep.security_tier` - a recorded fact from step 7, never a separate guess or hint field (§B.11's own reasoning, applied identically here).
+11. Only then call `ToolExecutor.execute(...)`, which independently re-classifies the same action from scratch, exactly as it already does for every other tool call in the system.
+
+This preflight is **advisory to the intelligence layer's own gating decision only** - it is never authoritative over, and can never replace, `ToolExecutor`'s own real-time classification. `tool.run()` is never called directly by any Batch 2 code; the only execution path is through the real, unmodified `ToolExecutor`.
+
+### G. Execution and grounded response
+
+Batch 2 permits, unconditionally: exactly one plan step; exactly one capability (`PROJECT_STATE_SHOW`, per §C); GREEN only; zero retries; zero replans; no `WorkflowEngine` involvement of any kind (a single-step GREEN execution needs no multi-step engine); no approval creation; no verification requirement (`verification_strategy_id` is `None` for this one capability, per §C).
+
+After `ToolExecutor.execute(...)` returns a real `ToolResult`: on success, the response is **grounded in that real `ToolResult.output`** - the AI is never asked to invent, paraphrase, or re-summarize what the tool actually returned; the response may wrap `ToolResult.output` with a short, fixed disclosure sentence (mirroring Batch 1's own fixed-label convention, e.g. `_ASK_JARVIS_LABEL`), but the substantive content is the tool's own real output, verbatim, never an AI re-telling of it. On failure, the response reports the real `ToolResult`'s own failure honestly (its `.error`, or a generic message if none), never claiming a tool ran when `ToolExecutor` never returned success, and never claiming execution happened at all when parsing/validation/preflight rejected the request before `ToolExecutor` was ever called.
+
+`intelligence_trace` remains deferred to Batch 3 (per §C.12/§D.19) - Batch 2 does not modify `JarvisResponse` to add this field, and does not populate any equivalent of it anywhere.
+
+### H. Provider and parser failure behavior
+
+**AI disabled, unavailable, or failing:** execute zero tools; create zero approvals; mutate zero stores; return an honest "unavailable"/"failed" message - mirroring Batch 1's own `_ASK_JARVIS_AI_REASONING_NOT_ENABLED_MESSAGE`/`_ASK_JARVIS_AI_REASONING_UNAVAILABLE_MESSAGE` pattern, with new, distinct wording for the `ask jarvis to:` command specifically (never reusing Batch 1's exact strings, since these are a different command with a different failure surface).
+
+**Malformed or invalid structured output** (any §B reject-list item): execute zero tools; create zero approvals; mutate zero stores; return a specific, bounded validation-failure message naming which check failed.
+
+**`ask jarvis to:` never falls back to:** guessed tool execution (no "best effort" interpretation of a malformed response); Batch 1's advisory `ask jarvis:` output (a failed tool-intent request is never silently answered as if it had been an advisory question instead); or the generic unmatched-command fallback message after an AI attempt was already made (once `ask jarvis to:` matches, the request is committed to this workflow's own honest success/failure reporting - it never reverts to looking like an unrecognized command after the fact).
+
+### I. Exact Batch 2 files
+
+**New:** `intelligence/capability_catalog.py` (§C/§D), `intelligence/structured_output.py` (§B), `intelligence/planning.py` (§D/§E/§F/§G orchestration of the above into a `StructuredPlan` and its execution).
+
+**Not created in Batch 2:** `intelligence/intent.py` / `InterpretedIntent` - deferred per §D, no real consumer exists yet.
+
+**Modified:** `core/command_router.py` (new `match_ask_jarvis_to`, per §A); `core/orchestrator.py` (new dispatch branch and handler, per §A/§F/§G/§H); `main.py` (wiring the capability catalog/structured-output parser/planner into the orchestrator, mirroring how `ContextAssembler` was wired in Batch 1); `tools/builtin/help_tool.py` and `docs/user_guide.md` (new command documentation, per §A); relevant tests (per §J).
+
+**Not modified:** `intelligence/context.py` (per §E's conclusion - no change required); `workflow/engine.py`; `tools/executor.py` (`ToolExecutor`'s own implementation); `security/security_manager.py`; `approval/approval_manager.py`; `planner/plan_models.py`; Batch 1's context budgets/retrieval algorithm (§A.4/§A.5, both unchanged); any dashboard code.
+
+### J. Required Batch 2 acceptance tests
+
+**Routing:** exact `ask jarvis to:` match; case-insensitive match; empty request; near misses; `ask jarvis:` remains advisory and unchanged; existing deterministic commands unchanged; unmatched-request fallback unchanged.
+
+**Parser:** valid bare JSON; valid single-fenced JSON; malformed JSON; extra leading/trailing prose; unknown top-level key; missing required key; duplicate top-level key; duplicate nested key; unknown capability id; extra/unrecognized argument; wrong argument type; oversized string argument; multiple code fences; multiple JSON objects; zero coercion of any kind (proving, e.g., a numeric-looking string argument is rejected, not silently cast).
+
+**Catalog:** only `PROJECT_STATE_SHOW` is selectable; a real, `ToolRegistry`-registered-but-not-catalogued tool is rejected when named; a catalogued-but-since-unregistered tool is rejected; exact zero-argument validation for `project_state_show`.
+
+**Security:** a real GREEN preflight succeeds; a forced-YELLOW preflight (a test double capability/tool pinned to YELLOW) is rejected with zero execution/approval; a forced-RED preflight is rejected identically; `ToolExecutor` is proven to still independently classify (e.g. via a regression-style forced-plan test mirroring §C.18's own `_RedTool` tripwire precedent); no code path calls `tool.run()` directly.
+
+**Execution:** a real `project_state_show` execution through the real, unmodified `ToolExecutor`; the response is proven grounded in the real `ToolResult.output` (not an AI paraphrase); `ToolResult` failure is reported honestly; AI provider unavailable; AI provider failure; malformed model output; zero approvals created in any scenario; zero store mutation in any scenario; at most one execution ever occurs per request; zero retries; zero replans.
+
+**Context:** `context_ids_supplied` on the real `StructuredPlan` contains exactly the real `context_id`s from the real `AssembledContext` used for that request; no id is fabricated or derived from item content; every supplied context item remains `ContentTrust.UNTRUSTED` throughout (unchanged from Batch 1).
+
+**Help and documentation:** both commands are documented distinctly - `ask jarvis:` as advisory-only/no-tools, `ask jarvis to:` as selecting at most one allowlisted GREEN tool - with no wording that could cause either to be mistaken for the other's behavior.
+
+### K. Batch 2 stop gate
+
+This turn remains planning clarification only - Sections 1-24 are unchanged, Section 25 (A through K) supersedes any conflicting Batch 2 wording in earlier sections, and Batch 2 implementation does not begin until Nathan explicitly approves it after reviewing this completed section.
+
 ---
 
 **This is a planning document only. No production code has been written. Batch 1 does not begin until Nathan explicitly approves it after reviewing this plan.**
