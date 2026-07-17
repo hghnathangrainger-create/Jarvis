@@ -124,6 +124,8 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "prepare brainstorm prompt for",
         "prepare critique prompt for",
         "prepare compare prompt for",
+        "show jarvis project state",
+        "update jarvis project state:",
     ],
 )
 def test_output_includes_every_documented_command_family(expected_phrase: str) -> None:
@@ -167,6 +169,19 @@ def test_output_documents_claude_prompt_studio_command_family() -> None:
     assert "prepare compare prompt for" in result.output
     assert "never calls the Claude API or any AI provider" in result.output
     assert "never sends the prompt anywhere" in result.output
+
+
+def test_output_documents_project_state_command_family() -> None:
+    """Phase 89, Batch 1: documented in the same batch the command
+    family shipped, deliberately avoiding the exact Phase-57/58-class
+    gap (a real command missing from HelpTool's own _HELP_LINES)."""
+    result = _run(HelpTool())
+    assert "show jarvis project state" in result.output
+    assert "update jarvis project state:" in result.output
+    assert "not recorded yet" in result.output
+    assert "Never auto-detected from git, a subprocess, or the filesystem." in (
+        result.output
+    )
 
 
 def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (

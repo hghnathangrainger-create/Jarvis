@@ -235,6 +235,15 @@ These show durable **history** only — not a live list of things currently awai
 
 Every generated prompt is **local text only, printed to the CLI for you to copy and paste into an actual Claude conversation yourself** — Jarvis never calls the Claude API, any other AI provider, or sends the generated text anywhere. Each prompt includes: your goal verbatim; a real "Jarvis Context" section (AI configuration, real memory/approval/workflow counts, tool registry size — the same data `jarvis brain status` reports); a fixed, hand-maintained "Standing Project Rules" section (including the `dashboard_test.txt` rule); a "Safety / Scope Rules" section; and an explicit **"fill in yourself"** placeholder for the current phase, commit hash, branch, and latest test-suite result — Jarvis has no live git/test-state tracking, so it never fabricates these, ever.
 
+### Project State (Phase 89, Batch 1)
+
+| Command | Tier | Does |
+|---|---|---|
+| `show jarvis project state` | GREEN | Reports the manually-maintained project-state record (branch, phase, commit, suite result, focus, last updated), or "not recorded yet" for any field never set. |
+| `update jarvis project state: <field>=<value>` | YELLOW (approval required) | Sets one field of that record. Accepted fields: `branch`, `phase`, `commit`, `suite` (stored as `suite_result`), `focus`. Everything after the first `=` is stored verbatim as the new value, including its own `=` or `:` characters. |
+
+This record is **entirely manual** — Jarvis never inspects git, runs a subprocess, or scans the filesystem to populate or verify any field; every value is exactly what you last typed, and `last_updated` means only "when this stored record was last written," never a live git/test-run timestamp. It exists so a future Claude Prompt Studio prompt (see above) can include this real, dated context instead of a bare `[FILL IN]` placeholder — that Prompt Studio integration itself is a later phase, not yet built.
+
 ---
 
 ## 7. Inbox, Scheduled Summaries, and Startup Notices

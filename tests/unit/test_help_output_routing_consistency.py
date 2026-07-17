@@ -150,6 +150,12 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
         "Claude Prompt Studio: prepare implementation prompt",
         "prepare implementation prompt for a better memory search",
     ),
+    # Project State
+    ("Project State: show jarvis project state", "show jarvis project state"),
+    (
+        "Project State: update jarvis project state",
+        "update jarvis project state: branch=main",
+    ),
 )
 
 

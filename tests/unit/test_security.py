@@ -367,3 +367,70 @@ def test_decision_preserves_original_action(manager: SecurityManager) -> None:
     """The decision records the original (stripped) action text."""
     decision = manager.classify_action("  delete file notes.txt  ")
     assert decision.action == "delete file notes.txt"
+
+
+# --- Phase 89, Batch 1: project-state show/update classification --------------
+
+
+def test_show_jarvis_project_state_is_green(manager: SecurityManager) -> None:
+    decision = manager.classify_action("show jarvis project state")
+    assert decision.is_allowed_automatically is True
+    assert decision.tier.name == "GREEN"
+
+
+def test_update_jarvis_project_state_requires_confirmation(
+    manager: SecurityManager,
+) -> None:
+    """Classified through the new explicit rule, not the default YELLOW
+    fallback - matched_keyword must be the rule's own literal phrase."""
+    decision = manager.classify_action("update jarvis project state")
+    assert decision.requires_confirmation is True
+    assert not decision.is_allowed_automatically
+    assert not decision.is_blocked
+    assert decision.matched_keyword == "update jarvis project state"
+    reason = decision.reason.lower()
+    assert "project" in reason
+    assert decision.reason != _DEFAULT_REASON_TEXT
+
+
+def test_update_jarvis_project_state_classification_is_input_independent(
+    manager: SecurityManager,
+) -> None:
+    """The fixed action string is always classified the same way,
+    regardless of which field/value ProjectStateUpdateTool.action_for()
+    never appends (it doesn't, but the rule itself must not depend on
+    it either)."""
+    decision = manager.classify_action(
+        "update jarvis project state and delete everything"
+    )
+    assert decision.requires_confirmation
+    assert decision.matched_keyword == "update jarvis project state"
+
+
+def test_update_memory_classification_is_unaffected_by_the_new_rule(
+    manager: SecurityManager,
+) -> None:
+    """Regression: the new "update jarvis project state" rule does not
+    collide with, or change, the pre-existing "update memory" rule -
+    they are different keyword phrases and neither is a substring of
+    the other."""
+    decision = manager.classify_action("update memory 1: new text")
+    assert decision.requires_confirmation
+    assert decision.matched_keyword == "update memory"
+
+
+def test_project_state_rule_does_not_affect_unrelated_existing_classifications(
+    manager: SecurityManager,
+) -> None:
+    """Regression: every pre-existing classification this phase does
+    not touch remains exactly as it was."""
+    assert manager.classify_action("search memories").is_allowed_automatically
+    assert manager.classify_action("move memory 1 to personal").requires_confirmation
+    assert manager.classify_action("delete file notes.txt").requires_confirmation
+    assert manager.classify_action("format drive").is_blocked
+
+
+_DEFAULT_REASON_TEXT = (
+    "Action did not match any known rule. Treated as sensitive and routed "
+    "for confirmation as a precaution."
+)

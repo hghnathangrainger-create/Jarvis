@@ -164,6 +164,13 @@ _RULES: tuple[_Rule, ...] = (
     _Rule("forget memory", SecurityTier.YELLOW, "Forgetting a memory removes it and must be confirmed."),
     _Rule("update memory", SecurityTier.YELLOW, "Updating a memory changes stored content and must be confirmed."),
     _Rule("move memory", SecurityTier.YELLOW, "Moving a memory to another category changes it and must be confirmed."),
+    # Phase 89, Batch 1: updating the manually-maintained project-state
+    # record changes stored content, just like "update memory" above -
+    # an explicit rule is added rather than relying on the default
+    # YELLOW fallback, so the reason is always specific and auditable.
+    # Does not collide with "update memory" (a different, longer
+    # keyword phrase) or any other existing rule.
+    _Rule("update jarvis project state", SecurityTier.YELLOW, "Updating the project-state record changes stored content and must be confirmed."),
     _Rule("delete file", SecurityTier.YELLOW, "Deleting a file changes state and should be confirmed."),
     _Rule("delete folder", SecurityTier.YELLOW, "Deleting a folder changes state and should be confirmed."),
     # Phase 38: restoring a quarantined file changes the filesystem (a

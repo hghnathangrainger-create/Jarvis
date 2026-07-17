@@ -822,3 +822,67 @@ class PausedWorkflowState(Base):
             f"<PausedWorkflowState workflow_id={self.workflow_id!r} "
             f"request_id={self.request_id!r}>"
         )
+
+
+class ProjectState(Base):
+    """A single-row, durable, manually-maintained record of Jarvis's
+    project context (Phase 89, Batch 1).
+
+    Unlike every other table in this project except
+    ScheduledInboxNoticeState and PendingApprovalState, exactly one row
+    of this table is ever expected to exist -
+    project_state/project_state_store.py's own store enforces this
+    single-row, upsert-in-place shape; the model itself does not use a
+    fixed/singleton primary key value, mirroring
+    ScheduledInboxNoticeState's own established reasoning (SQLAlchemy's
+    autoincrement identity is sufficient given the store never creates
+    a second row).
+
+    Every field here is manually provided by Nathan through the
+    "update jarvis project state: <field>=<value>" command - Jarvis
+    never inspects git, a subprocess, or the filesystem to populate any
+    of them, and never fabricates a value for a field that has not yet
+    been recorded (None, reported honestly as "not recorded yet" by
+    ProjectStateShowTool).
+
+    Attributes:
+        id: Auto-incrementing primary key. Exactly one row is ever
+            written by the owning store.
+        branch: The current git branch name, as manually recorded by
+            Nathan, or None if never recorded.
+        phase: The latest closed phase, as manually recorded, or None.
+        commit: The latest closed commit hash, as manually recorded,
+            or None.
+        suite_result: The latest full test-suite result, as manually
+            recorded, or None. Called "suite" in the CLI grammar - the
+            one field name that differs between grammar and column,
+            matching JarvisBrainStatusTool's/PromptContext's own
+            naming for the same real-world concept.
+        focus: The current focus/next goal, as manually recorded, or
+            None.
+        last_updated: When this stored record was last written by
+            ProjectStateStore.update() (UTC) - meaning only "when
+            Nathan/Jarvis last updated this stored record," never a
+            live git/test-run timestamp. None if the row has never
+            been written to.
+    """
+
+    __tablename__ = "project_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    phase: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    commit: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    suite_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    focus: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_updated: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by id and last_updated.
+        """
+        return f"<ProjectState id={self.id} last_updated={self.last_updated!r}>"

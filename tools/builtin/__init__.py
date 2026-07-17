@@ -56,6 +56,12 @@ Read-only tools (GREEN) - these never change any state:
       git; every generated prompt includes an explicit "fill in
       yourself" placeholder for the current phase/commit/branch/test
       result instead of fabricating it.
+    - ProjectStateShowTool: reports Jarvis's manually-maintained
+      project-state record - branch, phase, commit, suite result, and
+      focus (Phase 89, Batch 1). Every field is exactly what Nathan
+      last recorded via ProjectStateUpdateTool, or an honest "not
+      recorded yet"; never auto-detected from git, a subprocess, or
+      the filesystem.
 
 Guarded read tools (YELLOW) - read-only from Jarvis's own state's point of
 view, but classified YELLOW because they reach an arbitrary, externally-
@@ -95,6 +101,11 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - ScheduleEnableTool: re-enables a schedule by id (Phase 21).
     - ScheduleDisableTool: disables a schedule by id (Phase 21) - the
       only way to stop a schedule from running; there is no delete tool.
+    - ProjectStateUpdateTool: updates one field (branch, phase, commit,
+      suite, focus) of Jarvis's manually-maintained project-state
+      record (Phase 89, Batch 1). Never inspects git, a subprocess, or
+      the filesystem - every value comes only from what Nathan
+      explicitly typed.
 
 No built-in tool edits in place, installs software, runs commands, or
 controls the computer. FileMoveTool, FileDeleteTool, and FileRestoreTool
@@ -127,6 +138,8 @@ from tools.builtin.memory_forget_tool import MemoryForgetTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.memory_update_tool import MemoryUpdateTool
 from tools.builtin.prepare_prompt_tool import PreparePromptTool
+from tools.builtin.project_state_show_tool import ProjectStateShowTool
+from tools.builtin.project_state_update_tool import ProjectStateUpdateTool
 from tools.builtin.quarantine_list_tool import QuarantineListTool
 from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
@@ -143,6 +156,8 @@ __all__ = [
     "HelpTool",
     "JarvisBrainStatusTool",
     "PreparePromptTool",
+    "ProjectStateShowTool",
+    "ProjectStateUpdateTool",
     "QuarantineListTool",
     "EchoTool",
     "InfoTool",

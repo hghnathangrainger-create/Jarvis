@@ -74,6 +74,7 @@ from notice.scheduled_inbox_notice_store import ScheduledInboxNoticeStore
 from observability.logger import EventLogger
 from observability.logging_setup import configure_console_logging
 from planner.planner import Planner
+from project_state.project_state_store import ProjectStateStore
 from quarantine.quarantine_store import QuarantineStore
 from security.audit_log import AuditLog
 from security.security_manager import SecurityManager
@@ -104,6 +105,8 @@ from tools.builtin import (
     MemoryTool,
     MemoryUpdateTool,
     PreparePromptTool,
+    ProjectStateShowTool,
+    ProjectStateUpdateTool,
     QuarantineListTool,
     ScheduleCreateTool,
     ScheduleDisableTool,
@@ -317,6 +320,16 @@ def build_orchestrator() -> JarvisOrchestrator:
     # get_context() method) - never a new store/manager connection,
     # never AI, never a subprocess, never git.
     registry.register_tool(PreparePromptTool(jarvis_brain))
+
+    # Durable, manually-maintained project-state record (Phase 89,
+    # Batch 1): a single row Nathan updates by hand via "update jarvis
+    # project state: <field>=<value>" - never populated from git, a
+    # subprocess, or the filesystem. ProjectStateShowTool (GREEN) and
+    # ProjectStateUpdateTool (YELLOW) both read/write the same store
+    # instance; neither constructs a second one.
+    project_state_store = ProjectStateStore(session_factory)
+    registry.register_tool(ProjectStateShowTool(project_state_store))
+    registry.register_tool(ProjectStateUpdateTool(project_state_store))
 
     executor = ToolExecutor(
         registry=registry,

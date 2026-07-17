@@ -6,7 +6,9 @@ updated Phase 84 to surface the optional grammar clauses Phases 81-83
 shipped: schedule naming, file-read character limits, and result-count
 limits for file/memory list and search; updated Phase 86, Batch 1 to
 document the new "jarvis brain status" command; updated Phase 86,
-Batch 2 to document the new "Claude Prompt Studio" command family).
+Batch 2 to document the new "Claude Prompt Studio" command family;
+updated Phase 89, Batch 1 to document the new "jarvis project state"
+show/update command family).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -131,6 +133,15 @@ _HELP_LINES: tuple[str, ...] = (
     "honest fill-in-yourself placeholder for the current phase/commit/branch/test "
     "result. Never calls the Claude API or any AI provider, and never sends the "
     "prompt anywhere.",
+    "",
+    "Project State (Phase 89, Batch 1):",
+    "  show jarvis project state - reports the manually-maintained project-state "
+    "record (branch, phase, commit, suite result, focus), or 'not recorded yet' "
+    "for any field never set. Never auto-detected from git, a subprocess, or the "
+    "filesystem.",
+    "  update jarvis project state: <field>=<value> - sets one field (branch, "
+    "phase, commit, suite, focus) of that record (approval required); everything "
+    "after the first '=' is stored verbatim as the new value.",
 )
 
 

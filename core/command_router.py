@@ -186,6 +186,24 @@ _PREPARE_PROMPT_PREFIX_TO_MODE: dict[str, str] = {
 
 _PREPARE_PROMPT_PREFIXES: tuple[str, ...] = tuple(_PREPARE_PROMPT_PREFIX_TO_MODE)
 
+#: Exact phrase for ProjectStateShowTool (Phase 89, Batch 1), mirroring
+#: _JARVIS_BRAIN_EXACT_COMMANDS's own established pattern - a single
+#: fixed, no-argument request, matched exactly, never a prefix. No
+#: existing command anywhere contains "project state" (confirmed by
+#: direct grep, not assumed), so this cannot collide with any existing
+#: entry.
+_PROJECT_STATE_SHOW_EXACT_COMMANDS: frozenset[str] = frozenset(
+    {"show jarvis project state"}
+)
+
+#: Fixed prefix for ProjectStateUpdateTool (Phase 89, Batch 1). Unlike
+#: the five Claude Prompt Studio prefixes above, there is only one
+#: prefix here - the field name is parsed from the trailing
+#: "<field>=<value>" text in build_input(), not selected by which of
+#: several prefixes matched. No existing command anywhere starts with
+#: "update jarvis project state".
+_PROJECT_STATE_UPDATE_PREFIX = "update jarvis project state:"
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -798,6 +816,24 @@ class CommandRouter:
             and self._registry.has_tool("prepare_prompt")
         ):
             return "prepare_prompt"
+
+        # Jarvis project state (Phase 89, Batch 1): read-only and GREEN.
+        # Exact phrase only, mirroring the jarvis-brain check above -
+        # never a prefix/substring match.
+        if (
+            lowered.strip() in _PROJECT_STATE_SHOW_EXACT_COMMANDS
+            and self._registry.has_tool("project_state_show")
+        ):
+            return "project_state_show"
+
+        # Jarvis project state update (Phase 89, Batch 1): YELLOW,
+        # requires approval. Prefix match on the one fixed phrase -
+        # the trailing "<field>=<value>" text is never validated or
+        # interpreted here, only extracted in build_input() below.
+        if lowered.startswith(
+            _PROJECT_STATE_UPDATE_PREFIX
+        ) and self._registry.has_tool("project_state_update"):
+            return "project_state_update"
 
         # Quarantine listing (Phase 36): read-only and GREEN. Exact
         # phrases only, mirroring the config check immediately above -
@@ -1710,11 +1746,15 @@ class CommandRouter:
                 result["mode"] = mode
             return result
 
+        if tool_name == "project_state_update":
+            return self._build_project_state_update_input(text)
+
         # schedule_list takes no input
         # info takes no input
         # help takes no input
         # health_check takes no input
         # jarvis_brain takes no input
+        # project_state_show takes no input
         return {}
 
     @staticmethod
@@ -2326,6 +2366,49 @@ class CommandRouter:
             result["memory_id"] = memory_id
         if content:
             result["content"] = content
+        return result
+
+    @classmethod
+    def _build_project_state_update_input(cls, text: str) -> dict[str, object]:
+        """Parse an "update jarvis project state: <field>=<value>"
+        command into project_state_update tool input (Phase 89, Batch 1).
+
+        Everything after the fixed prefix is treated as
+        "<field>=<value>": the field is taken up to the first "=" and
+        the value is everything after that first "=", so a value
+        containing its own "=" or ":" is never truncated or misparsed
+        - the same "extract trailing free text as-is, never interpret
+        it" discipline every other flexible command in this module
+        already uses (e.g. _extract_prepare_prompt_input's own raw
+        goal extraction). Neither the field name nor the value is
+        validated, normalised, or mapped here - that is
+        ProjectStateUpdateTool's own job.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            A dict with "field"/"value" keys, present only when
+            non-empty - missing pieces are left absent so the tool
+            reports the problem clearly, never guessed.
+        """
+        stripped = text.strip()
+        lowered = stripped.casefold()
+        if not lowered.startswith(_PROJECT_STATE_UPDATE_PREFIX):
+            return {}  # defensive; unreachable via match()'s own gating
+
+        remainder = stripped[len(_PROJECT_STATE_UPDATE_PREFIX) :].strip()
+        if "=" not in remainder:
+            return {}
+
+        field, value = remainder.split("=", 1)
+        result: dict[str, object] = {}
+        field = field.strip()
+        if field:
+            result["field"] = field
+        value = value.strip()
+        if value:
+            result["value"] = value
         return result
 
     @classmethod
