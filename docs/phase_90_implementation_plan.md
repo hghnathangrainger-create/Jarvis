@@ -466,4 +466,241 @@ Confirmed untouched, untracked, and uncommitted throughout this planning pass �
 
 ---
 
+## 24. Planning Gate Amendment — Safety and Integration Corrections
+
+**Sections 1–23 above are preserved unchanged as the original planning record.** External architecture review identified blocking contradictions and missing safety contracts in that record. This section **supersedes** every conflicting decision named below; anywhere this section is silent, Sections 1–23 still govern. Two items required direct, targeted repository inspection beyond what Sections 1–23 already established — `workflow/workflow_models.py` (`WorkflowResult`, `WorkflowStepOutcome`) and `approval/approval_models.py` (`ApprovalRequest`) were read in full during this amendment pass to ground item C.12 in real fields rather than assumption.
+
+### A. Corrected Batch 1 context contracts
+
+**A.1 — `ContextItem` gains a stable, deterministic `context_id`, and `source` becomes a bounded enum.** Supersedes the `ContextItem` shape in §6.
+
+```python
+class ContextSource(Enum):
+    MEMORY = "memory"
+    PROJECT_STATE = "project_state"
+    # Batch 2/3 add new members only when a real consumer exists for them -
+    # never speculatively, per the original plan's own "no decorative types" rule.
+
+@dataclass(frozen=True, slots=True)
+class ContextItem:
+    context_id: str            # deterministic, see format below
+    source: ContextSource
+    source_record_id: str | None   # e.g. the real memory id as a string; None for the singleton ProjectState item
+    text: str
+    trust: ContentTrust         # always ContentTrust.UNTRUSTED for every ContextItem in Batch 1 (see A.3)
+    relevance_reason: str
+```
+
+`context_id` format: `f"{source.value}:{source_record_id}"` when a real record id exists (e.g. `"memory:42"`), or `f"{source.value}:current"` for the singleton ProjectState item (e.g. `"project_state:current"`, since exactly one ProjectState record can ever exist per Phase 89's own singleton-store invariant). **Proof of no secret/raw content**: the id is built *only* from the fixed enum value string and a real, already-non-secret numeric id or the fixed literal `"current"` — it is never derived from `.text`, never from any memory content, project-state field value, or credential. This is provable by construction: the format string takes only `source` and `source_record_id` as inputs, never `text`.
+
+The live request itself is **not** a `ContextItem` — it remains `AssembledContext.request_text` exactly as in the original §6 design, since it is the one `ContentTrust.JARVIS_TRUSTED` piece of the whole assembly and keeping it structurally separate (never itemized) makes that trust boundary impossible to blur by construction.
+
+**A.2 — `AssembledContext.excluded_reason` (singular, `str | None`) is replaced with `notes: tuple[str, ...]`.** Supersedes the corresponding field in §6.
+
+```python
+@dataclass(frozen=True, slots=True)
+class AssembledContext:
+    request_text: str
+    items: tuple[ContextItem, ...]
+    total_chars: int
+    truncated: bool
+    notes: tuple[str, ...]   # e.g. ("no matching or recent memories found", "project state has no recorded focus")
+```
+
+This allows multiple, independently true omissions/truncations to be reported honestly at once (e.g. "no memories matched" and "project state was never recorded" can both be true in the same assembly) rather than forcing a single reason to stand in for several.
+
+**A.3 — Batch 1 context sources are exactly three, and tool/security data is explicitly excluded.** Supersedes §8's "eligible sources" list for Batch 1 specifically (Batch 2/3 introduce their own, separately-governed mechanisms below — not via `ContextItem`).
+
+Batch 1's vertical slice draws from exactly: (1) the live request (`request_text`, trusted, not itemized); (2) memory items selected per A.4; (3) one singleton `ProjectState` item per A.6. **Tool capability names/descriptions and security/approval rules are never represented as `ContextItem`s in any batch** — they are deterministic internal authority, governed entirely by the new capability-catalog mechanism in §24.B, never AI-reinterpretable free text. Paused-workflow status is deferred entirely out of Batch 1 — no concrete Batch 1 vertical-slice requirement consumes it, and inventing a placeholder relevance rule for a source nothing yet needs would be exactly the "types/sources added for decoration" the original plan already disclaimed.
+
+**A.4 — Exact deterministic memory-selection algorithm.** Supersedes §8's "deterministic only... substring search" description, which the original plan left too vague to prove genuine relevance (a raw multi-word natural-language sentence passed whole to `MemoryManager.search()` as a single substring query would almost never match real memory content).
+
+- **Query derivation**: lowercase the raw request, split on non-alphanumeric characters, drop any token in a small, fixed, hand-maintained stopword tuple — `("the", "a", "an", "is", "are", "was", "were", "what", "have", "has", "had", "i", "my", "me", "you", "your", "it", "do", "does", "did", "can", "could", "and", "or", "to", "for", "on", "in", "of", "about", "currently", "current")` — and drop any remaining token shorter than 4 characters. Take up to the first 5 surviving tokens, in their original left-to-right order, as the query terms. If zero terms survive, skip lexical search entirely and go straight to recency fallback.
+- **Lexical pass**: for each query term, in order, call `MemoryManager.search(term, limit=5)`. Merge results across terms in term order; deduplicate by memory id, first occurrence wins (preserving whichever term found it first). Stop adding once the memory-item budget (5, see A.5) is reached.
+- **Recency fallback**: if the memory-item count after the lexical pass is still below the budget (including the zero-terms case), fill the remaining slots with `MemoryManager.list_recent(limit=<remaining slots>)`, skipping any id already included from the lexical pass.
+- **Merge order**: lexical matches first (in term order), recency-fallback matches appended after.
+- **Dedup rule**: by memory id, first occurrence kept.
+- **Zero-match behavior**: if both passes return nothing (e.g. an empty memory store), this is not an error — record a `notes` entry (`"no matching or recent memories found"`) and continue assembling the rest of the context.
+- **Search-failure behavior**: if either `MemoryManager` call raises, catch it, record a `notes` entry (`"memory retrieval failed: <short, non-sensitive reason>"`), and continue with whatever other sources succeeded — one source's failure never aborts the whole assembly, mirroring this project's own established per-source isolation discipline (e.g. the dashboard read model's per-panel isolation).
+- **No AI selects memories in Batch 1** — the entire algorithm above is deterministic string processing only.
+
+**A.5 — Exact context budgets.** Supersedes §8's "maximum memories: 10" / character-limit language, which reused the ingestion module's own 4000/20,000 constants without adjusting them for this narrower, single-turn feature.
+
+| Item | Value |
+|---|---|
+| Maximum total `ContextItem`s | 6 (up to 5 memory + up to 1 ProjectState) |
+| Maximum memory items | 5 (deliberately tighter than `ai/memory_selection.py`'s existing ceiling-of-10 precedent, since that ceiling was sized for a dedicated memory-summary command, not a multi-source assembly that must also reserve room for ProjectState) |
+| Maximum characters per item | 500 |
+| Maximum total assembled-context characters | 3000 |
+| Does `request_text` count toward the budget? | No — the budget governs only `items`; the live request is bounded only by whatever the user actually typed, unchanged from today. |
+| Do labels/framing count? | No — the budget counts each `ContextItem.text`'s own raw length only; `PromptBuilder`'s header/footer framing is applied afterward and is that module's own, separate, already-existing concern. |
+| Source priority | ProjectState is always attempted first (cheap, singleton, ≤1 item) and reserves 500 characters off the top of the 3000 total; the remaining 2500 characters are available for up to 5 memory items at 500 characters each. |
+| Truncation vs. whole-item omission | Per-item truncation (reusing `ai/memory_ingestion.py`'s existing truncate-with-notice pattern) applies when one item's own text exceeds its 500-character cap. Whole-item omission applies only when even a fully truncated item would exceed the *remaining* total budget — in that case the item is dropped entirely and a `notes` entry records how many items were omitted this way. |
+| Unused-reservation behavior | If ProjectState's real content is under 500 characters (typical), the unused remainder is **not** reallocated to memory items in Batch 1 — a deliberate, simple, fixed-reservation policy; dynamic budget-sharing is a plausible future refinement, not required for V1. |
+
+**A.6 — Phase 89 honesty is reused verbatim, not reinvented.** The single ProjectState `ContextItem.text` embeds the exact same disclosures Phase 89 Batch 2 already established for Prompt Studio's "Project Context" section: every included field is labeled manually recorded, not auto-detected, possibly stale; `last_updated` is shown as the real timestamp or `"not recorded yet"`; any individual field never recorded shows the same `[FILL IN]` placeholder `ai/prompt_studio.py`'s `ProjectStateContext`/`_field_or_fill_in` already produces. This is a direct reuse of that existing formatting logic, not new wording.
+
+**A.7 — Exact Batch 1 command grammar and dispatch position.**
+
+- Exact phrase: `"ask jarvis: <request>"` (colon required, mirroring the `"update jarvis project state:"` colon-prefix convention Phase 89 already established for unambiguous prefix/remainder splitting). The literal wording is grep-verified against every existing exact-phrase/prefix table in `core/command_router.py` as the *first concrete step of Batch 1 implementation itself* — not asserted here without that check.
+- Empty-request behavior: `"ask jarvis:"` with nothing (or only whitespace) after the colon returns an honest failure ("Please include what you'd like to ask after 'ask jarvis:'") — it never proceeds to context assembly or AI reasoning with an empty goal.
+- Near-miss behavior: `"ask jarvis"` (no colon), `"ask jarvis about X"`, and `"jarvis, ask: X"` must not match — only the exact, case-insensitive `"ask jarvis:"` prefix matches, proven by dedicated near-miss tests mirroring this project's established "near-misses do not accidentally route" convention.
+- Dispatch-chain position: added as the **last** of `core/orchestrator.py`'s special matchers, checked immediately before the existing generic fallback (`_handle_request_core`). Since no existing deterministic command or special matcher starts with `"ask jarvis:"` (per the grep check above), this cannot shadow or steal priority from any of them — any request not starting with this exact prefix falls through to the existing, completely unchanged deterministic path.
+- HelpTool/`docs/user_guide.md`: updated **in Batch 1 itself**, not deferred — following this project's own established Phase 86/87/89 discipline of documenting a new command in the same batch it ships, to avoid recreating the Phase-58-class "shipped but undocumented" gap.
+
+### B. Bounded capability-adapter architecture for Batch 2
+
+**B.8 — `ToolRegistry.has_tool()` is a final existence check, never an input-schema validator.** A new, narrow, hand-maintained allowlist governs what the intelligence layer may even consider:
+
+```python
+class CapabilityId(Enum):
+    PROJECT_STATE_SHOW = "project_state_show"
+    # Batch 3 adds: PROJECT_STATE_UPDATE_FOCUS, PROJECT_STATE_VERIFY_FOCUS
+
+@dataclass(frozen=True, slots=True)
+class CapabilityArgumentSpec:
+    name: str
+    type_name: str        # one of a small fixed set for V1: "str" | "int" | "bool"
+    required: bool
+
+@dataclass(frozen=True, slots=True)
+class CapabilityAdapter:
+    capability_id: CapabilityId
+    tool_name: str                          # the real, registered ToolRegistry name
+    description: str                        # user-facing only, never sent as an instruction
+    arguments: tuple[CapabilityArgumentSpec, ...]
+    build_tool_input: Callable[[dict[str, object]], dict[str, object]]  # deterministic, validated builder
+    allowed_strategy: ExecutionStrategy
+    max_execution_tier: SecurityTier         # highest tier this batch may execute for this capability
+    verification_strategy_id: str | None     # None until Batch 3 defines a real one
+    internal_only: bool                      # True: never reachable via CommandRouter, only via this catalog
+```
+
+A single, hand-maintained `CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter]` is the *only* source of truth for what the intelligence layer may select. `ToolRegistry.has_tool(adapter.tool_name)` is still checked at the moment of execution as a defensive final existence check (a catalog entry could in principle reference a tool later removed from the registry), but the catalog — not the full registry — governs selectability. **Not every registered tool is exposed to intelligence planning in V1.**
+
+**B.9 — Batch 2 is narrowed to exactly one real GREEN capability.** Supersedes §9's "max plan steps: 5" for Batch 2 specifically (Batch 3 gets its own, separately justified limit in C.13).
+
+`CAPABILITY_CATALOG` in Batch 2 contains exactly one entry: `PROJECT_STATE_SHOW`, `tool_name="project_state_show"`, `arguments=()` (it takes no input), `max_execution_tier=SecurityTier.GREEN`, `verification_strategy_id=None`. Batch 2 execution limits: **max plan steps = 1; max executable capabilities = 1; GREEN only; no multi-step execution; no YELLOW execution; no retry; no replan.** `project_state_show` is chosen because it requires zero arguments (no argument-validation complexity needed yet — deliberately deferred to Batch 3, where it's actually required), it is already fully tested and stable (Phase 89), and it directly supports the exact vertical slice already named in §14.
+
+**B.10 — Strict structured-output parser.** AI prose never directly becomes executable input. Exact Batch 2 response schema:
+
+```json
+{"capability_id": "project_state_show", "arguments": {}}
+```
+
+Rules: exactly two top-level keys, both required — `capability_id` (string, must exactly match a `CapabilityId` value present in the *current batch's* `CAPABILITY_CATALOG`; any other value, including a real but non-catalogued tool name, is rejected) and `arguments` (a JSON object, possibly empty; every key must match a `CapabilityArgumentSpec.name` for the selected capability; unknown keys are rejected; missing required keys are rejected; a string argument longer than 500 characters is rejected, not truncated, since silently mutating AI-supplied input before validation is never acceptable). The parser may strip exactly one leading/trailing triple-backtick fence (with or without a `json` language tag) as its *only* pre-processing step, since models habitually wrap JSON in markdown fences — anything else non-conforming (extra prose, multiple fences, nested blocks) is rejected outright, never guessed at. Argument types are checked exactly against `type_name` with no coercion (a string `"5"` is never silently accepted for an `int`-typed argument). **Any failure at any stage of parsing/validation executes zero tools, creates zero approvals, and returns an honest, specific failure message — never a "best guess" repaired plan.**
+
+**B.11 — Intent is advisory until deterministic validation succeeds; hint fields are removed, not just labeled non-authoritative.** Supersedes `StructuredPlanStep.risk_tier_hint`/`approval_required_hint` in §6 — on reflection, keeping fields that are simultaneously present and "non-authoritative" invites exactly the confusion this amendment exists to close, so they are **deleted**, not retained-but-caveated.
+
+AI-derived `goal`/`constraints`/`ExecutionStrategyDecision`/`capability_id`/`arguments` remain advisory right up until B.10's parser and the catalog check both succeed. Only then does a real preflight run: look up the real tool via `ToolRegistry.get_tool(adapter.tool_name)`, build the real `ToolRequest` via `adapter.build_tool_input(validated_arguments)`, call the tool's own real `action_for(request)`, and classify via the real `SecurityManager.classify_action(...)`. `StructuredPlanStep` now stores the real, already-computed `SecurityDecision` (or its `.tier`) obtained from *this* preflight call — a real fact, not a guess needing a separate hint field. `ToolExecutor` still independently re-classifies at actual execution time, completely unchanged, exactly as it already does for every other tool call in the system; the preflight exists only for the intelligence layer's own internal gating decision (e.g. "is this GREEN enough to execute in Batch 2"), never as a substitute for `ToolExecutor`'s own authoritative, real-time classification.
+
+### C. Corrected Batch 3 execution, approval, and verification
+
+**C.12 — The `WorkflowEngine` contradiction, resolved by direct inspection, not assertion.**
+
+Directly confirmed by reading `workflow/workflow_models.py` and `approval/approval_models.py` in full during this amendment:
+- `WorkflowEngine.run()`/`resume()` return a `WorkflowResult(plan: Plan, workflow_id: str, step_outcomes: tuple[WorkflowStepOutcome, ...], session_id: int | None, message: str)`, with `.overall_status` and `.pending_approval_request` computed properties.
+- Each `WorkflowStepOutcome(step: PlanStep, status: StepStatus, tool_result: ToolResult | None, approval_request: ApprovalRequest | None)` carries the **real, complete `ToolResult`** for every step actually attempted, including its `output` and `metadata` — this is already returned, already available, for free, after `run()`/`resume()` returns.
+- `ApprovalRequest.metadata: dict[str, str]` is real, string-keyed/valued, and already durably persisted via `PendingApprovalStore`.
+- `Plan`/`PlanStep` (including each step's own `tool_input`) are already durably persisted as JSON via `PausedWorkflowStore.plan_steps_json`, and already fully reconstructed by the existing, unchanged `reload_paused()`/`resume()` path after a restart.
+
+**This resolves the contradiction: no new persistence and no `WorkflowEngine` change are needed at all.** The design is genuinely **Option A**, with one clarification of what "unchanged" means precisely:
+
+- Verification is encoded as an explicit **second `PlanStep`** (a read-back capability, C.15). `workflow/engine.py` itself is not touched in any way.
+- The "expected value" for verification is never separately persisted anywhere new — it is simply the write step's own real, already-durable `tool_input["value"]` (`WorkflowResult.step_outcomes[0].step.tool_input["value"]`), available identically whether the workflow ran synchronously or was reconstructed from `plan_steps_json` after a restart.
+- No "intelligence-origin marker" or "verifier id" needs to be persisted anywhere either: Batch 3 supports **exactly one** plan shape (C.13), so after any `run()`/`resume()` call returns, my own orchestrator-level code recognizes that shape purely structurally — by checking whether `step_outcomes[0].step.tool_name` and `step_outcomes[-1].step.tool_name` match the two allowlisted Batch-3 capabilities' real tool names. No new field, anywhere, is required for this recognition.
+- The one small, additive, new piece of logic lives entirely in `core/orchestrator.py` (already a file the original plan approved for Batch 3 changes): a new branch, appended at the end of the existing `execute_approved()` method, that — *after* the existing, completely unchanged resume logic produces its `WorkflowResult`/response — checks for the recognized plan shape and, only if matched, runs verification (C.15) and attaches `intelligence_trace`. Any resumed workflow that is *not* this shape (i.e., every one of the 5 existing fixed workflows) takes the exact same code path it does today, provably unchanged, since the new branch is purely additive and conditioned on a shape only Phase 90's own plans can ever produce.
+
+**C.13 — Batch 3 is narrowed to exactly one YELLOW vertical slice, two executable steps, two allowlisted capabilities.** Supersedes §9's generic 5-step/5-tool ceiling for Batch 3 specifically.
+
+`ask jarvis: update my project focus to X and confirm it` is the only supported Batch 3 request shape. `CAPABILITY_CATALOG` gains exactly two new entries: `PROJECT_STATE_UPDATE_FOCUS` (`tool_name="project_state_update"`, `arguments=(CapabilityArgumentSpec("value", "str", required=True),)`, `build_tool_input` fixes `field="focus"` and passes the validated `value` through, `max_execution_tier=SecurityTier.YELLOW`, `internal_only=False`) and `PROJECT_STATE_VERIFY_FOCUS` (`tool_name="project_state_verify"`, a new internal-only tool, see C.15, `arguments=()`, `max_execution_tier=SecurityTier.GREEN`, `internal_only=True`). **Maximum executable plan steps: 2. No other capability is allowlisted. No arbitrary YELLOW tool and no generic multi-step plan is enabled in this phase.**
+
+**C.14 — V1 recovery limits are 0, not "1 as an optional enhancement."** Supersedes §9's "max retries per step: 0 default, optional 1" and §6's `RetryReplanDecision`/`ContinuationDecision.RETRY_STEP`/`REPLAN`.
+
+`max retries per step = 0`; `max total retries = 0`; `max replans = 0`, unconditionally, for all of Batch 2 and Batch 3 — the "optional single-retry enhancement" named in the original §9/§19 is **removed as a V1 possibility entirely**, not merely deprioritized. On any execution or verification failure: stop; report the exact distinction between execution failure and verification failure (§C.16); never rerun a write step; never silently construct a replacement plan. `RetryReplanDecision`/`ContinuationDecision.RETRY_STEP`/`ContinuationDecision.REPLAN` are **removed** from the contracts entirely, since they no longer describe any real V1 behavior — `ContinuationDecision` is reduced to exactly `{CONTINUE, STOP}`, and `RetryReplanDecision` is removed in favor of a plain `stopped: bool` / `reason: str` pair on `StepExecutionRecord` where needed. Future bounded retry/replanning remains a named, deferred future extension (§19), not a V1 contract.
+
+**C.15 — Typed verification, never free-text/substring matching. A new, internal-only, structured-metadata verifier tool.** Supersedes §6's `success_condition: str` free-text field and §11's "output satisfies the step's own declared success_condition string" language for the Batch 3 write+verify slice specifically.
+
+Direct inspection confirms `ProjectStateShowTool.run()` (Phase 89) returns only a human-readable text blob via `self.ok(...)` — `ToolResult.metadata` is empty. It provides no structured per-field values today, and per this amendment's explicit instruction, its human-readable output is **not** parsed for verification. Instead, Batch 3 adds one new, small, GREEN, **internal-only** tool:
+
+```python
+# tools/builtin/project_state_verify_tool.py
+class ProjectStateVerifyTool(BaseTool):
+    # name -> "project_state_verify"
+    # action_for -> "show jarvis project state" (the same, already-GREEN action string
+    #   ProjectStateShowTool itself uses - semantically the same read-only action,
+    #   reused rather than duplicated, needing zero new SecurityManager rule)
+    # run(request) -> ToolResult(
+    #     success=True,
+    #     output=<a short, human-readable status line, for audit-trail/log readability only>,
+    #     metadata={
+    #         "branch": <real value or "">, "phase": <real value or "">,
+    #         "commit": <real value or "">, "suite_result": <real value or "">,
+    #         "focus": <real value or "">, "last_updated": <real value or "not recorded yet">,
+    #     },
+    # )
+```
+
+It takes the exact same `ProjectStateStore` dependency `ProjectStateShowTool` already takes (read-only, `.get()` only — no new store, no new dependency wiring beyond reusing the existing instance), is registered in `ToolRegistry` under the new name `"project_state_verify"` so it produces a **real, audited plan step** through the unmodified `WorkflowEngine`/`ToolExecutor` path, and is marked `internal_only=True` in `CAPABILITY_CATALOG` — it is never given a `CommandRouter` grammar entry, so it is not reachable as a user-typed command, only ever selectable as the fixed second step of the one Batch 3 plan shape. `tools/builtin/project_state_show_tool.py` itself is **not modified** — Phase 89's already-shipped, already-tested tool stays exactly as it is.
+
+Verification comparison, computed after `run()`/`resume()` returns a `WorkflowResult`: `expected = step_outcomes[0].step.tool_input["value"]` (the real, already-durable submitted value) compared for **exact string equality** against `actual = step_outcomes[-1].tool_result.metadata.get("focus")` (the real, freshly-read, structured value) — never a substring or fuzzy match.
+
+**C.16 — `VerificationResult` uses a typed outcome, not `verified: bool`.** Supersedes `VerificationResult` in §6.
+
+```python
+class VerificationOutcome(Enum):
+    VERIFIED = "verified"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"       # the verify step itself did not execute/succeed
+    NOT_REQUIRED = "not_required"     # e.g. Batch 2's GREEN-only 1-step plans, which have nothing to verify
+
+@dataclass(frozen=True, slots=True)
+class VerificationResult:
+    outcome: VerificationOutcome
+    verifier_id: str      # fixed for V1: "project_state_focus_exact_match" (the only verifier this phase defines)
+    evidence: str          # short, real, already-non-secret value only (e.g. the real focus string) - never fabricated
+    detail: str | None
+```
+
+`UNAVAILABLE` is distinct from `FAILED`: `FAILED` means the verify step ran and the values genuinely differ; `UNAVAILABLE` means the verify step itself could not produce a real answer (e.g. `tool_result.success is False`). Execution failure (`ToolResult.success is False` on the *write* step) is reported as its own distinct outcome, never conflated with either verification state.
+
+**C.17 — Approval/restart persistence, proven from real fields, not asserted.** Directly enabled by C.12's findings: the plan **can** pause for YELLOW approval (via the existing, unchanged `ApprovalManager.create_request()` call `WorkflowEngine` already makes), survive a restart (via the existing, unchanged `PausedWorkflowStore`/`reload_paused()` chain, since `Plan`/`PlanStep` — including the write step's own `tool_input["value"]` — round-trip through `plan_steps_json` unchanged), resume (via the existing, unchanged `WorkflowEngine.resume()`), run its verification step as the plan's own second step, and return an honest result. **No new durable field is required anywhere**: the expected value lives in the already-durable `PlanStep.tool_input`; the "which verifier/is this an intelligence plan" question is answered by structural plan-shape recognition (C.12), never a stored marker; the `workflow_id` `WorkflowEngine` already generates serves as the natural trace-correlation id. Nothing depends on the transient `StructuredPlan` object or the in-memory `JarvisResponse` surviving a restart — both are freely reconstructible (or simply absent, and replaced by direct inspection of the real `WorkflowResult`) after one.
+
+**C.18 — RED handling.** `CAPABILITY_CATALOG` never contains a RED-tier entry in any batch. B.11's preflight rejects any capability whose real, live `SecurityDecision.tier` is RED *before* a plan is ever handed to `WorkflowEngine`. `ToolExecutor`'s own existing, unmodified RED-first check remains the second, authoritative line of defense regardless. A forced-plan regression test (constructing a real `Plan` that references a RED-classified action directly, bypassing the intelligence layer's own preflight) proves `ToolExecutor` still blocks it and `tool.run()` is never reached — mirroring this project's existing `_RedTool` tripwire test pattern.
+
+### D. Trace and privacy policy
+
+**D.19 — Exact `intelligence_trace` contents.** Supersedes the bare `intelligence_trace: tuple[str, ...]` mention in §6 with concrete bounds.
+
+Never included: raw `ToolRequest`/`tool_input` dictionaries; full file contents; memory contents beyond what the ordinary response already shows the user; API keys or secret-like values; unbounded user-supplied text. Limits: at most one trace entry per executed plan step (≤1 for Batch 2, ≤2 for Batch 3 — already small by construction); at most 200 characters per entry. Allowed content per entry: step number, the capability's `tool_name` (already non-secret), approval state, and — for a verification entry — only the `VerificationOutcome` enum value (e.g. `"confirmed"`/`"could not confirm"`), never `VerificationResult.evidence`'s full string unless that exact value is already independently visible in the ordinary response text. `StepExecutionRecord` may transiently hold validated arguments in memory for the duration of one request (needed to construct the real `ToolRequest`), but raw arguments are never copied into `JarvisResponse.intelligence_trace` and never logged verbatim.
+
+### E. Revised hard limits (supersedes §9 for Batches 2 and 3)
+
+| | Batch 1 | Batch 2 | Batch 3 |
+|---|---|---|---|
+| Tool execution | none | 1 step, 1 allowlisted GREEN capability | exactly 2 steps: 1 allowlisted YELLOW + 1 allowlisted GREEN verifier |
+| Retries per step / total | n/a | 0 / 0 | 0 / 0 |
+| Replans | n/a | 0 | 0 |
+| Approval | n/a | n/a (GREEN only) | reuses `ApprovalManager` unchanged |
+
+Any generic five-step, multi-capability architecture remains a named, deferred future extension after Phase 90 V1 is proven — not part of this phase.
+
+### F. Continuation Kit finalization honesty (supersedes §17's finalization description)
+
+The kit cannot truthfully contain its own final commit hash before it is committed. Exact sequence: (1) once Batch 3's implementation is complete and its full validation suite is green, record that commit hash and suite result, explicitly labeled the **implementation baseline**; (2) write `docs/JARVIS_CONTINUATION_KIT.md` referencing that already-real baseline; (3) commit the kit and the final `docs/phase_90_completion_report.md` as a separate, later, docs-only commit, which necessarily produces a different, later hash; (4) the closure report states both hashes distinctly — "implementation baseline: `<hash-B>`" and "documentation commit: `<hash-C>`" — and never implies either one is the other. This mirrors exactly the relationship already visible in this very document today (planning commit `bc2bbaa` describing the separate, earlier implementation baseline `04a0f84`).
+
+### G. Revised batch file lists (supersedes §20 for the items below; everything in §20 not restated here is unchanged)
+
+**Batch 1** — new: `intelligence/__init__.py`, `intelligence/context.py` (per §A). Modified: `core/command_router.py`, `core/orchestrator.py`, `main.py`, `tools/builtin/help_tool.py`, `docs/user_guide.md`. Tests: `tests/unit/test_context_assembly.py`, `tests/unit/test_context_query_routing.py`, `tests/unit/test_orchestrator_context_query.py`, plus updates to `tests/unit/test_help_tool.py` and `tests/unit/test_help_output_routing_consistency.py`.
+
+**Batch 2** — new: `intelligence/intent.py`, `intelligence/planning.py`, `intelligence/capability_catalog.py`, `intelligence/structured_output.py` (per §B). Modified: `core/command_router.py`, `core/orchestrator.py`, `main.py`; HelpTool/`docs/user_guide.md` only if a genuinely new user-facing phrase is introduced (to be determined at implementation time). Tests: capability-catalog unit tests, structured-output parser tests (malformed JSON, unknown capability, unknown/extra argument, wrong type, fence-stripping), preflight/`SecurityManager` integration tests, orchestrator/CommandRouter tests.
+
+**Batch 3** — new: `intelligence/verification.py`, `intelligence/execution.py` (per §C), `tools/builtin/project_state_verify_tool.py` (per C.15), `docs/JARVIS_CONTINUATION_KIT.md`, `docs/phase_90_completion_report.md`. Modified: `core/request_models.py` (one new optional `intelligence_trace` field), `core/orchestrator.py` (additive branch in `execute_approved()`, per C.12), `main.py` (wiring the new internal tool + capability catalog). **Never modified** (reaffirmed): `workflow/engine.py`, `workflow/paused_workflow_store.py`, `approval/*.py`, `tools/builtin/project_state_show_tool.py`, `tools/builtin/project_state_update_tool.py`, `security/security_manager.py`.
+
+### Revised end-to-end acceptance scenarios (supersedes §16's list)
+
+Natural request with lexical + recency context selection; context provenance/`context_id` presence; context budget exhaustion (whole-item omission vs. per-item truncation); ProjectState stale/manual labeling and `[FILL IN]`/`"not recorded yet"` honesty; malformed AI JSON; unknown capability id; unknown/extra argument; invalid argument type; a real tool that exists in `ToolRegistry` but is not in `CAPABILITY_CATALOG`; GREEN preflight + real execution (Batch 2 slice); YELLOW no-approval store-unchanged proof; approval → restart → resume → verification (full C.17 chain); declined/expired approval stops cleanly; exact-value verification mismatch (`FAILED`); verify-step-itself-fails (`UNAVAILABLE`); RED forced-plan refusal; provider unavailable/failure honesty; deterministic-command backward compatibility; zero-retry/zero-replan proof; `intelligence_trace` redaction and bounds.
+
+---
+
 **This is a planning document only. No production code has been written. Batch 1 does not begin until Nathan explicitly approves it after reviewing this plan.**
