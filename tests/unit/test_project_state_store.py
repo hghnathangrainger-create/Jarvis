@@ -11,6 +11,18 @@ test_scheduled_inbox_notice_store.py's own established pattern exactly:
 a second write never creates a second row, and only the requested
 field changes.
 
+sqlalchemy-dependent imports are guarded by a try/except ImportError
+(rather than this repo's more common `pytest.importorskip("sqlalchemy")`
+placed before further imports) so this file collects cleanly under
+Ruff's default rule set: an import statement following a bare
+importorskip() call is flagged E402 ("module level import not at top
+of file"), since importorskip() is itself a plain statement, not an
+import. Every import this module needs is inside the try block, so
+none of them follows a non-import statement, and the module still
+skips cleanly (via pytestmark) when sqlalchemy is not installed -
+exactly the same "SQLAlchemy-optional" behaviour, just expressed
+without triggering E402.
+
 Run with:
     pytest tests/unit/test_project_state_store.py
 """
@@ -22,19 +34,29 @@ import inspect
 
 import pytest
 
-sqlalchemy = pytest.importorskip("sqlalchemy")
+try:
+    from sqlalchemy import create_engine
 
-from sqlalchemy import create_engine
+    import project_state.project_state_store as store_module
+    from project_state.project_state_store import (
+        UPDATABLE_FIELDS,
+        ProjectStateRecord,
+        ProjectStateStore,
+    )
+    from storage.database import (
+        create_session_factory,
+        initialize_database,
+        session_scope,
+    )
+    from storage.models import ProjectState
 
-from project_state.project_state_store import (
-    UPDATABLE_FIELDS,
-    ProjectStateRecord,
-    ProjectStateStore,
+    _SQLALCHEMY_AVAILABLE = True
+except ImportError:
+    _SQLALCHEMY_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(
+    not _SQLALCHEMY_AVAILABLE, reason="sqlalchemy not installed"
 )
-from storage.database import create_session_factory, initialize_database, session_scope
-from storage.models import ProjectState
-
-import project_state.project_state_store as store_module
 
 
 def _make_store() -> ProjectStateStore:

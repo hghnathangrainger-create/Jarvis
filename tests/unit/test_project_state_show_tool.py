@@ -13,6 +13,13 @@ classifies GREEN through the real SecurityManager; and the tool never
 imports/uses any AI provider, subprocess, git, or self-coding-shaped
 dependency.
 
+sqlalchemy-dependent imports are guarded by a try/except ImportError
+(rather than this repo's more common `pytest.importorskip("sqlalchemy")`
+placed before further imports) so this file collects cleanly under
+Ruff's default rule set - see test_project_state_store.py's own module
+docstring for the full reasoning. The module still skips cleanly (via
+pytestmark) when sqlalchemy is not installed.
+
 Run with:
     pytest tests/unit/test_project_state_show_tool.py
 """
@@ -24,17 +31,23 @@ import inspect
 
 import pytest
 
-sqlalchemy = pytest.importorskip("sqlalchemy")
+try:
+    from sqlalchemy import create_engine
 
-from sqlalchemy import create_engine
+    import tools.builtin.project_state_show_tool as show_tool_module
+    from project_state.project_state_store import ProjectStateStore
+    from security.security_manager import SecurityManager
+    from storage.database import create_session_factory, initialize_database
+    from tools.base_tool import ToolRequest
+    from tools.builtin.project_state_show_tool import ProjectStateShowTool
 
-from project_state.project_state_store import ProjectStateStore
-from security.security_manager import SecurityManager
-from storage.database import create_session_factory, initialize_database
-from tools.base_tool import ToolRequest
-from tools.builtin.project_state_show_tool import ProjectStateShowTool
+    _SQLALCHEMY_AVAILABLE = True
+except ImportError:
+    _SQLALCHEMY_AVAILABLE = False
 
-import tools.builtin.project_state_show_tool as show_tool_module
+pytestmark = pytest.mark.skipif(
+    not _SQLALCHEMY_AVAILABLE, reason="sqlalchemy not installed"
+)
 
 
 def _store() -> ProjectStateStore:
