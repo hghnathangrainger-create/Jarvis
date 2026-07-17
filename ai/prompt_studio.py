@@ -25,13 +25,20 @@ Does NOT:
       AIRouter/AIReasoningEngine/PromptBuilder.
     - Access git, a subprocess, or the filesystem in any way.
     - Fabricate the current phase, commit, branch, or test-suite
-      result - no such state is tracked anywhere in this app, so every
-      generated prompt includes an explicit "fill in yourself"
-      placeholder for it instead of guessing or inventing one.
+      result - no such state is tracked anywhere in this app. Extended
+      Phase 89, Batch 2: a "Project Context" section now shows
+      Nathan's own manually-recorded ProjectState values (see
+      project_state/project_state_store.py) when present, always
+      labeled as manually recorded and possibly stale - any field
+      never recorded still shows the "[FILL IN]" placeholder it always
+      has, since this module still has no live git/test-state access
+      of any kind.
     - Interpret the user's free-text goal in any way. It is embedded
       verbatim as plain, inert text - never parsed for embedded
       instructions, never treated as anything other than user-provided
-      content to hand to Claude.
+      content to hand to Claude. The same applies to every
+      ProjectStateContext field: each is embedded verbatim as inert
+      text, never interpreted.
 """
 
 from __future__ import annotations
@@ -119,11 +126,12 @@ _SAFETY_SCOPE_RULES: tuple[str, ...] = (
     "in this prompt.",
 )
 
-_FILL_IN_YOURSELF_FIELDS: tuple[str, ...] = (
-    "Latest closed phase",
-    "Latest commit hash",
-    "Current branch",
-    "Latest full test-suite result",
+#: Shown once, directly under the "Project Context" heading, so every
+#: reader sees the same honesty disclosure regardless of which fields
+#: happen to be recorded (Phase 89, Batch 2).
+_PROJECT_CONTEXT_WARNING = (
+    "Project state below was manually recorded and may be stale - "
+    "never auto-detected from git, a subprocess, or the filesystem."
 )
 
 
@@ -161,6 +169,46 @@ class PromptContext:
     tool_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectStateContext:
+    """Nathan's own manually-recorded project-state fields to include
+    in a generated prompt's "Project Context" section (Phase 89,
+    Batch 2).
+
+    Every field here is exactly what Nathan last recorded through the
+    CLI's "update jarvis project state: <field>=<value>" command (see
+    project_state/project_state_store.py) - never inspected from git,
+    a subprocess, or the filesystem, and always potentially stale,
+    since Jarvis has no way to verify any of it still reflects
+    reality. A field that has never been recorded is None here -
+    never guessed or fabricated - and build_prompt() renders the fixed
+    "[FILL IN]" placeholder for it instead, exactly as it already did
+    before this dataclass existed.
+
+    Attributes:
+        branch: The current git branch, as manually recorded, or None
+            if never recorded.
+        phase: The latest closed phase, as manually recorded, or None.
+        commit: The latest closed commit hash, as manually recorded,
+            or None.
+        suite_result: The latest full test-suite result, as manually
+            recorded, or None.
+        focus: The current focus/next goal, as manually recorded, or
+            None.
+        last_updated: A pre-formatted "when this record was last
+            updated" string (the caller's responsibility to format,
+            matching ProjectStateShowTool's own display convention),
+            or None if no ProjectState record exists at all yet.
+    """
+
+    branch: str | None
+    phase: str | None
+    commit: str | None
+    suite_result: str | None
+    focus: str | None
+    last_updated: str | None
+
+
 def known_modes() -> tuple[str, ...]:
     """Return the fixed set of supported prompt modes.
 
@@ -170,7 +218,42 @@ def known_modes() -> tuple[str, ...]:
     return tuple(_MODE_LABELS)
 
 
-def build_prompt(*, mode: str, goal: str, context: PromptContext | None) -> str:
+def _field_or_fill_in(value: str | None) -> str:
+    """Render one Project Context field: its real value, or "[FILL IN]".
+
+    Args:
+        value: The field's manually-recorded value, or None if never
+            recorded.
+
+    Returns:
+        value if set, otherwise the fixed "[FILL IN]" placeholder -
+        the exact same placeholder text this module has always used.
+    """
+    return value if value else "[FILL IN]"
+
+
+def _last_updated_or_not_recorded(value: str | None) -> str:
+    """Render the Project Context's last-updated line honestly.
+
+    Args:
+        value: The pre-formatted last-updated string, or None if no
+            ProjectState record exists at all yet.
+
+    Returns:
+        value if set, otherwise "not recorded yet" - distinct wording
+        from "[FILL IN]", since this describes the record's own
+        existence rather than one field Nathan would fill in himself.
+    """
+    return value if value else "not recorded yet"
+
+
+def build_prompt(
+    *,
+    mode: str,
+    goal: str,
+    context: PromptContext | None,
+    project_state: ProjectStateContext | None = None,
+) -> str:
     """Deterministically assemble a Claude-ready prompt as plain text.
 
     Never calls any AI provider, never sends this text anywhere - the
@@ -185,6 +268,14 @@ def build_prompt(*, mode: str, goal: str, context: PromptContext | None) -> str:
         context: Real Jarvis state to include in a "Jarvis Context"
             section, or None to omit that section entirely (never a
             fabricated placeholder in its place).
+        project_state: Nathan's own manually-recorded project-state
+            fields to include in a "Project Context" section (Phase
+            89, Batch 2), or None if the caller has none to supply.
+            Unlike Jarvis Context above, this section is never omitted
+            - even when project_state is None (or has every field
+            unset), the section still renders, with "[FILL IN]"/"not
+            recorded yet" honestly shown for each absent field, so a
+            missing value is never silently skipped.
 
     Returns:
         The full, assembled prompt as one plain-text string.
@@ -226,6 +317,31 @@ def build_prompt(*, mode: str, goal: str, context: PromptContext | None) -> str:
             ]
         )
 
+    resolved_project_state = project_state or ProjectStateContext(
+        branch=None,
+        phase=None,
+        commit=None,
+        suite_result=None,
+        focus=None,
+        last_updated=None,
+    )
+    lines.extend(
+        [
+            "## Project Context",
+            _PROJECT_CONTEXT_WARNING,
+            f"- Current branch: {_field_or_fill_in(resolved_project_state.branch)}",
+            f"- Latest closed phase: {_field_or_fill_in(resolved_project_state.phase)}",
+            "- Latest commit hash: "
+            f"{_field_or_fill_in(resolved_project_state.commit)}",
+            "- Latest full test-suite result: "
+            f"{_field_or_fill_in(resolved_project_state.suite_result)}",
+            f"- Current focus: {_field_or_fill_in(resolved_project_state.focus)}",
+            "- Project state last updated: "
+            f"{_last_updated_or_not_recorded(resolved_project_state.last_updated)}",
+            "",
+        ]
+    )
+
     lines.append(
         "## Standing Project Rules (static, hand-maintained - verify "
         "against the live repository before relying on specifics)"
@@ -235,13 +351,6 @@ def build_prompt(*, mode: str, goal: str, context: PromptContext | None) -> str:
 
     lines.append("## Safety / Scope Rules")
     lines.extend(f"- {rule}" for rule in _SAFETY_SCOPE_RULES)
-    lines.append("")
-
-    lines.append(
-        "## Fill in yourself before sending (Jarvis has no live "
-        "access to this - never fabricated):"
-    )
-    lines.extend(f"- {field}: [FILL IN]" for field in _FILL_IN_YOURSELF_FIELDS)
     lines.append("")
 
     lines.append("## Requested Output Format")

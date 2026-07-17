@@ -3,7 +3,9 @@ prepare_prompt_tool.py
 
 A safe, read-only tool that assembles a well-structured, Claude-ready
 prompt for the user to copy and paste into an actual Claude
-conversation themselves (Phase 86, Batch 2 - "Claude Prompt Studio").
+conversation themselves (Phase 86, Batch 2 - "Claude Prompt Studio";
+extended Phase 89, Batch 2 to include Nathan's own manually-recorded
+project-state fields in a "Project Context" section).
 
 PreparePromptTool is a GREEN tool: it only calls ai/prompt_studio.py's
 deterministic, AI-free assembly function and returns the resulting
@@ -24,12 +26,21 @@ Safety note:
     change to this or any other repository, never accesses git or a
     subprocess to determine the current branch/commit/phase, and never
     fabricates that state - every generated prompt includes an
-    explicit "fill in yourself" placeholder for it instead.
+    explicit "fill in yourself" placeholder for any project-state field
+    Nathan has not manually recorded (see project_state/project_state_
+    store.py), and clearly labels any field he has recorded as
+    manually-entered and possibly stale.
 """
 
 from __future__ import annotations
 
-from ai.prompt_studio import PromptContext, build_prompt, known_modes
+from ai.prompt_studio import (
+    ProjectStateContext,
+    PromptContext,
+    build_prompt,
+    known_modes,
+)
+from project_state.project_state_store import ProjectStateStore
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.builtin.jarvis_brain_tool import JarvisBrainStatusTool
 
@@ -41,22 +52,40 @@ class PreparePromptTool(BaseTool):
     the generated prompt anywhere - it is returned as local text only.
     """
 
-    def __init__(self, brain_status_tool: JarvisBrainStatusTool) -> None:
-        """Initialise the tool with the already-built JarvisBrainStatusTool.
+    def __init__(
+        self,
+        brain_status_tool: JarvisBrainStatusTool,
+        project_state_store: ProjectStateStore,
+    ) -> None:
+        """Initialise the tool with already-built dependencies only.
 
-        Reusing the whole tool (rather than its individual Settings/
-        store/manager dependencies directly) means this tool's own
-        "Jarvis Context" section always reflects exactly the same real
-        data "jarvis brain status" itself reports, via
-        JarvisBrainStatusTool.get_context() - a structured method call,
-        never a text-scrape of that tool's own formatted output.
+        Reusing the whole JarvisBrainStatusTool (rather than its
+        individual Settings/store/manager dependencies directly) means
+        this tool's own "Jarvis Context" section always reflects
+        exactly the same real data "jarvis brain status" itself
+        reports, via JarvisBrainStatusTool.get_context() - a
+        structured method call, never a text-scrape of that tool's own
+        formatted output.
+
+        ProjectStateStore is taken directly (Phase 89, Batch 2) rather
+        than routed through JarvisBrainStatusTool, since project state
+        is an unrelated concern to that tool's own AI/memory/approval/
+        workflow scope - adding it there would broaden that tool's
+        purpose for no benefit. This tool calls only
+        ProjectStateStore.get(), which already returns a structured
+        ProjectStateRecord snapshot - never a parse of
+        ProjectStateShowTool's own formatted text output.
 
         Args:
             brain_status_tool: The application's already-constructed
                 JarvisBrainStatusTool (Phase 86, Batch 1). Only
                 get_context() is ever called.
+            project_state_store: The application's already-constructed
+                ProjectStateStore (Phase 89, Batch 1). Only get() is
+                ever called - this tool never writes to it.
         """
         self._brain_status_tool = brain_status_tool
+        self._project_state_store = project_state_store
 
     @property
     def name(self) -> str:
@@ -134,7 +163,10 @@ class PreparePromptTool(BaseTool):
         goal = raw_goal.strip()
 
         context: PromptContext = self._brain_status_tool.get_context()
-        prompt = build_prompt(mode=mode, goal=goal, context=context)
+        project_state = self._project_state_context()
+        prompt = build_prompt(
+            mode=mode, goal=goal, context=context, project_state=project_state
+        )
 
         return ToolResult(
             tool_name=self.name,
@@ -144,4 +176,44 @@ class PreparePromptTool(BaseTool):
                 "operation": "prepare_prompt",
                 "mode": mode,
             },
+        )
+
+    def _project_state_context(self) -> ProjectStateContext:
+        """Build a ProjectStateContext from the real, stored record.
+
+        Reuses ProjectStateStore.get()'s own structured
+        ProjectStateRecord snapshot directly - never a parse of
+        ProjectStateShowTool's own formatted text output. The
+        last_updated timestamp is pre-formatted here into the exact
+        same "YYYY-MM-DD HH:MM:SS UTC" style ProjectStateShowTool's own
+        display already uses, since ai/prompt_studio.py itself has no
+        datetime-formatting concern of its own.
+
+        Returns:
+            A ProjectStateContext with every field None (never
+            fabricated) if no ProjectState record exists yet;
+            otherwise one reflecting the real, currently-stored values.
+        """
+        record = self._project_state_store.get()
+        if record is None:
+            return ProjectStateContext(
+                branch=None,
+                phase=None,
+                commit=None,
+                suite_result=None,
+                focus=None,
+                last_updated=None,
+            )
+        last_updated = (
+            f"{record.last_updated.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            if record.last_updated is not None
+            else None
+        )
+        return ProjectStateContext(
+            branch=record.branch,
+            phase=record.phase,
+            commit=record.commit,
+            suite_result=record.suite_result,
+            focus=record.focus,
+            last_updated=last_updated,
         )

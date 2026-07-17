@@ -13,12 +13,24 @@ cleanly; action_for() is fixed and classifies GREEN through the real
 SecurityManager; and the tool never imports/uses any AI provider,
 subprocess, or self-coding-shaped dependency.
 
+Extended Phase 89, Batch 2: real ProjectState values flow into
+generated prompts via a structured ProjectStateStore.get() call, never
+a text-scrape of ProjectStateShowTool's own formatted output; an empty
+store produces honest placeholders; no mutation ever occurs. A
+dependency-free _FakeProjectStateStore/_FakeProjectStateRecord pair is
+used here (mirroring this file's own established
+_FakeMemoryManager/_FakeApprovalHistoryStore/_FakeWorkflowHistoryStore
+convention) rather than a real, SQLAlchemy-backed ProjectStateStore -
+this file has never depended on SQLAlchemy and there is no need to
+start now just to fake one small store.
+
 Run with:
     pytest tests/unit/test_prepare_prompt_tool.py
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -74,8 +86,49 @@ def _brain_status_tool() -> JarvisBrainStatusTool:
     )
 
 
-def _tool() -> PreparePromptTool:
-    return PreparePromptTool(_brain_status_tool())
+class _FakeProjectStateRecord:
+    """A trivial, dependency-free stand-in for ProjectStateRecord -
+    only the plain attributes PreparePromptTool._project_state_context()
+    reads are present."""
+
+    def __init__(
+        self,
+        *,
+        branch: str | None = None,
+        phase: str | None = None,
+        commit: str | None = None,
+        suite_result: str | None = None,
+        focus: str | None = None,
+        last_updated: datetime | None = None,
+    ) -> None:
+        self.branch = branch
+        self.phase = phase
+        self.commit = commit
+        self.suite_result = suite_result
+        self.focus = focus
+        self.last_updated = last_updated
+
+
+class _FakeProjectStateStore:
+    """A trivial stand-in for ProjectStateStore - only get() is used,
+    and it never mutates anything (there is no update() method here at
+    all, so any accidental write attempt would fail loudly)."""
+
+    def __init__(self, record: _FakeProjectStateRecord | None = None) -> None:
+        self._record = record
+        self.get_call_count = 0
+
+    def get(self) -> _FakeProjectStateRecord | None:
+        self.get_call_count += 1
+        return self._record
+
+
+def _tool(
+    project_state_store: _FakeProjectStateStore | None = None,
+) -> PreparePromptTool:
+    return PreparePromptTool(
+        _brain_status_tool(), project_state_store or _FakeProjectStateStore()
+    )
 
 
 def _request(**input_data: object) -> ToolRequest:
@@ -125,9 +178,109 @@ def test_context_reflects_the_exact_brain_status_tool_instance_injected() -> Non
     brain_status_tool it was constructed with - not a disconnected
     copy - so its own real counts are reflected."""
     brain_status = _brain_status_tool()
-    tool = PreparePromptTool(brain_status)
+    tool = PreparePromptTool(brain_status, _FakeProjectStateStore())
     result = tool.run(_request(mode="implementation", goal="anything"))
     assert "Total memories stored: 5" in result.output
+
+
+# --- Project Context reuses ProjectStateStore.get(), never a text-scrape --------
+
+
+def test_real_project_state_values_flow_into_the_generated_prompt() -> None:
+    record = _FakeProjectStateRecord(
+        branch="phase-4-ai-reasoning-and-write-actions",
+        phase="Phase 88",
+        commit="d5c582d",
+        suite_result="4204 passed, 3 skipped, 0 failed",
+        focus="manual project context",
+        last_updated=datetime(2026, 7, 17, 8, 0, 0),
+    )
+    tool = _tool(_FakeProjectStateStore(record))
+    result = tool.run(_request(mode="implementation", goal="anything"))
+
+    assert "Current branch: phase-4-ai-reasoning-and-write-actions" in result.output
+    assert "Latest closed phase: Phase 88" in result.output
+    assert "Latest commit hash: d5c582d" in result.output
+    assert (
+        "Latest full test-suite result: 4204 passed, 3 skipped, 0 failed"
+        in result.output
+    )
+    assert "Current focus: manual project context" in result.output
+    assert "Project state last updated: 2026-07-17 08:00:00 UTC" in result.output
+    assert "[FILL IN]" not in result.output
+
+
+def test_empty_project_state_produces_honest_placeholders() -> None:
+    tool = _tool(_FakeProjectStateStore(record=None))
+    result = tool.run(_request(mode="implementation", goal="anything"))
+
+    assert "Current branch: [FILL IN]" in result.output
+    assert "Latest closed phase: [FILL IN]" in result.output
+    assert "Latest commit hash: [FILL IN]" in result.output
+    assert "Latest full test-suite result: [FILL IN]" in result.output
+    assert "Current focus: [FILL IN]" in result.output
+    assert "Project state last updated: not recorded yet" in result.output
+
+
+def test_partially_populated_project_state_mixes_real_values_and_placeholders() -> (
+    None
+):
+    record = _FakeProjectStateRecord(
+        branch="main", last_updated=datetime(2026, 7, 17, 8, 0, 0)
+    )
+    tool = _tool(_FakeProjectStateStore(record))
+    result = tool.run(_request(mode="review", goal="anything"))
+
+    assert "Current branch: main" in result.output
+    assert "Project state last updated: 2026-07-17 08:00:00 UTC" in result.output
+    assert "Latest closed phase: [FILL IN]" in result.output
+    assert "Latest commit hash: [FILL IN]" in result.output
+
+
+def test_project_state_get_is_called_exactly_once_per_run() -> None:
+    """Confirms the tool calls ProjectStateStore.get() itself - a
+    structured method call - rather than parsing any other tool's
+    formatted text output."""
+    store = _FakeProjectStateStore()
+    tool = _tool(store)
+    tool.run(_request(mode="implementation", goal="anything"))
+    assert store.get_call_count == 1
+
+
+def test_no_mutation_occurs() -> None:
+    """The fake store's only method is get() - there is no update()
+    method to accidentally call, so any attempt to mutate would raise
+    an AttributeError rather than silently succeeding."""
+    record = _FakeProjectStateRecord(branch="main")
+    store = _FakeProjectStateStore(record)
+    tool = _tool(store)
+    tool.run(_request(mode="implementation", goal="anything"))
+    # The same record instance, unchanged.
+    assert store.get() is record
+    assert record.branch == "main"
+
+
+def test_does_not_import_project_state_show_tool() -> None:
+    """Structural proof this tool never scrapes/parses
+    ProjectStateShowTool's own formatted text output - it only ever
+    calls ProjectStateStore.get() directly."""
+    import ast
+    import inspect
+
+    import tools.builtin.prepare_prompt_tool as module
+
+    tree = ast.parse(inspect.getsource(module))
+    imported_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported_names.update(alias.name for alias in node.names)
+            if node.module:
+                imported_names.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported_names.update(alias.name for alias in node.names)
+
+    forbidden = {"ProjectStateShowTool", "tools.builtin.project_state_show_tool"}
+    assert imported_names & forbidden == set()
 
 
 # --- output is local text only --------------------------------------------------

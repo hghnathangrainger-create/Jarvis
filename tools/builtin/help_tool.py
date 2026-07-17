@@ -8,7 +8,8 @@ limits for file/memory list and search; updated Phase 86, Batch 1 to
 document the new "jarvis brain status" command; updated Phase 86,
 Batch 2 to document the new "Claude Prompt Studio" command family;
 updated Phase 89, Batch 1 to document the new "jarvis project state"
-show/update command family).
+show/update command family; updated Phase 89, Batch 2 to describe
+Claude Prompt Studio's new manually-recorded Project Context section).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -125,14 +126,17 @@ _HELP_LINES: tuple[str, ...] = (
     "  show workflow history / show recent workflows / show workflow <id> / view workflow "
     "<id> - workflow history",
     "",
-    "Claude Prompt Studio (Phase 86, Batch 2):",
+    "Claude Prompt Studio (Phase 86, Batch 2; Project Context added Phase 89, "
+    "Batch 2):",
     "  prepare implementation prompt for <goal> / prepare review prompt for <goal> / "
     "prepare brainstorm prompt for <goal> / prepare critique prompt for <goal> / "
     "prepare compare prompt for <goal> - assembles a well-structured, Claude-ready "
-    "prompt for you to copy and paste manually; includes real Jarvis context and an "
-    "honest fill-in-yourself placeholder for the current phase/commit/branch/test "
-    "result. Never calls the Claude API or any AI provider, and never sends the "
-    "prompt anywhere.",
+    "prompt for you to copy and paste manually; includes real Jarvis context and your "
+    "manually-recorded project state (see 'show jarvis project state' below) for the "
+    "current phase/commit/branch/focus/test result, labeled as manually recorded and "
+    "possibly stale; any field you have not recorded still shows an honest "
+    "fill-in-yourself placeholder. Never calls the Claude API or any AI provider, and "
+    "never sends the prompt anywhere.",
     "",
     "Project State (Phase 89, Batch 1):",
     "  show jarvis project state - reports the manually-maintained project-state "

@@ -315,21 +315,24 @@ def build_orchestrator() -> JarvisOrchestrator:
     )
     registry.register_tool(jarvis_brain)
 
-    # PreparePromptTool (Phase 86, Batch 2): reuses the exact same
-    # jarvis_brain instance just registered above (via its own
-    # get_context() method) - never a new store/manager connection,
-    # never AI, never a subprocess, never git.
-    registry.register_tool(PreparePromptTool(jarvis_brain))
-
     # Durable, manually-maintained project-state record (Phase 89,
     # Batch 1): a single row Nathan updates by hand via "update jarvis
     # project state: <field>=<value>" - never populated from git, a
     # subprocess, or the filesystem. ProjectStateShowTool (GREEN) and
     # ProjectStateUpdateTool (YELLOW) both read/write the same store
-    # instance; neither constructs a second one.
+    # instance; neither constructs a second one. Constructed before
+    # PreparePromptTool below (Phase 89, Batch 2) so it can reuse this
+    # same instance too.
     project_state_store = ProjectStateStore(session_factory)
     registry.register_tool(ProjectStateShowTool(project_state_store))
     registry.register_tool(ProjectStateUpdateTool(project_state_store))
+
+    # PreparePromptTool (Phase 86, Batch 2; extended Phase 89, Batch 2
+    # with project-state context): reuses the exact same jarvis_brain
+    # and project_state_store instances just constructed above (via
+    # get_context() and get() respectively) - never a new store/
+    # manager connection, never AI, never a subprocess, never git.
+    registry.register_tool(PreparePromptTool(jarvis_brain, project_state_store))
 
     executor = ToolExecutor(
         registry=registry,
