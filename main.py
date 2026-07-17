@@ -67,6 +67,7 @@ from config.settings import load_settings
 from core.command_router import CommandRouter
 from core.orchestrator import JarvisOrchestrator
 from inbox.inbox_store import InboxStore
+from intelligence.context import ContextAssembler
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
@@ -334,6 +335,17 @@ def build_orchestrator() -> JarvisOrchestrator:
     # manager connection, never AI, never a subprocess, never git.
     registry.register_tool(PreparePromptTool(jarvis_brain, project_state_store))
 
+    # ContextAssembler (Phase 90, Batch 1): powers the explicit "ask
+    # jarvis: <request>" Context Intelligence command. Reuses the exact
+    # same `memory`/`project_state_store` instances already constructed
+    # above - never a second MemoryManager/ProjectStateStore connection.
+    # Registers no tool of its own: it is never reachable through
+    # CommandRouter's ordinary match()/build_input() path, only through
+    # JarvisOrchestrator's own dedicated "ask jarvis:" dispatch branch.
+    context_assembler = ContextAssembler(
+        memory_manager=memory, project_state_store=project_state_store
+    )
+
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,
@@ -441,6 +453,10 @@ def build_orchestrator() -> JarvisOrchestrator:
         # save a durable copy of its own successful advisory summary.
         inbox_store=inbox_store,
         logger=logger,
+        # Phase 90, Batch 1: the same ContextAssembler instance already
+        # built above (not a second one) powers the explicit "ask
+        # jarvis: <request>" Context Intelligence command.
+        context_assembler=context_assembler,
     )
 
 

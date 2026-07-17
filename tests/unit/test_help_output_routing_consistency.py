@@ -156,6 +156,8 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
         "Project State: update jarvis project state",
         "update jarvis project state: branch=main",
     ),
+    # Jarvis Intelligence
+    ("Jarvis Intelligence: ask jarvis", "ask jarvis: what is my current focus"),
 )
 
 

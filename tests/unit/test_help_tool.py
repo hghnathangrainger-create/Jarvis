@@ -126,6 +126,7 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "prepare compare prompt for",
         "show jarvis project state",
         "update jarvis project state:",
+        "ask jarvis:",
     ],
 )
 def test_output_includes_every_documented_command_family(expected_phrase: str) -> None:
@@ -182,6 +183,16 @@ def test_output_documents_project_state_command_family() -> None:
     assert "Never auto-detected from git, a subprocess, or the filesystem." in (
         result.output
     )
+
+
+def test_output_documents_ask_jarvis_command() -> None:
+    """Phase 90, Batch 1: documented in the same batch the command
+    shipped, deliberately avoiding the exact Phase-57/58-class gap (a
+    real command missing from HelpTool's own _HELP_LINES)."""
+    result = _run(HelpTool())
+    assert "ask jarvis: <request>" in result.output
+    assert "(advisory; requires AI_REASONING_ENABLED)" in result.output
+    assert "Executes no tool and creates no approval" in result.output
 
 
 def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (

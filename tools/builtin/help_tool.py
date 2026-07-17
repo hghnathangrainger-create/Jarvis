@@ -9,7 +9,9 @@ document the new "jarvis brain status" command; updated Phase 86,
 Batch 2 to document the new "Claude Prompt Studio" command family;
 updated Phase 89, Batch 1 to document the new "jarvis project state"
 show/update command family; updated Phase 89, Batch 2 to describe
-Claude Prompt Studio's new manually-recorded Project Context section).
+Claude Prompt Studio's new manually-recorded Project Context section;
+updated Phase 90, Batch 1 to document the new "ask jarvis: <request>"
+Context Intelligence command).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -146,6 +148,14 @@ _HELP_LINES: tuple[str, ...] = (
     "  update jarvis project state: <field>=<value> - sets one field (branch, "
     "phase, commit, suite, focus) of that record (approval required); everything "
     "after the first '=' is stored verbatim as the new value.",
+    "",
+    "Jarvis Intelligence (Phase 90, Batch 1):",
+    "  ask jarvis: <request> - automatically assembles a small, bounded set of "
+    "relevant stored memories and your manually-recorded project state, then "
+    "asks the AI reasoning engine to advise on your request (advisory; "
+    "requires AI_REASONING_ENABLED). Executes no tool and creates no approval - "
+    "if AI reasoning is not enabled or is unavailable, this reports that "
+    "honestly instead of guessing an answer.",
 )
 
 

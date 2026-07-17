@@ -61,6 +61,7 @@ from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
+from intelligence.context import ContextAssembler, build_ai_context_block
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -171,6 +172,28 @@ _WEBPAGE_SUMMARY_AI_REASONING_NOT_ENABLED_MESSAGE = (
 )
 _WEBPAGE_SUMMARY_AI_REASONING_UNAVAILABLE_MESSAGE = (
     "AI reasoning could not produce a summary for this webpage right now."
+)
+
+#: Advisory label for an "ask jarvis: <request>" response's message
+#: (Phase 90, Batch 1). Distinct from every other summary label for the
+#: same reason each of those is distinct from the others: this marks a
+#: response whose entire content *is* the AI's own advisory output about
+#: a bounded, automatically-assembled context (memory + manually-recorded
+#: ProjectState), not an annotation appended to an already-decided
+#: response, and not a file/memory/web-search/webpage summary of a
+#: single, explicitly-named source.
+_ASK_JARVIS_LABEL = "[AI advisory response - based on automatically assembled context]"
+_ASK_JARVIS_EMPTY_REQUEST_MESSAGE = (
+    "Please include what you'd like to ask after 'ask jarvis:'"
+)
+_ASK_JARVIS_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so I can't answer this request."
+)
+_ASK_JARVIS_AI_REASONING_UNAVAILABLE_MESSAGE = (
+    "AI reasoning could not produce an answer for this request right now."
+)
+_ASK_JARVIS_CONTEXT_NOT_AVAILABLE_MESSAGE = (
+    "Context assembly is not available, so I can't answer this request."
 )
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
@@ -451,6 +474,7 @@ class JarvisOrchestrator:
         web_search_provider: WebSearchProvider | None = None,
         inbox_store: InboxStore | None = None,
         logger: _AuditLogger | None = None,
+        context_assembler: ContextAssembler | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -510,6 +534,14 @@ class JarvisOrchestrator:
                 The verdict is always evaluated; when logger is omitted,
                 nothing is recorded, matching how approval_manager behaves
                 without an audit_logger.
+            context_assembler: An optional ContextAssembler, used only by
+                the explicit "ask jarvis: <request>" Context Intelligence
+                workflow (Phase 90, Batch 1) to automatically assemble
+                bounded memory + ProjectState context. No new instance is
+                ever created here if omitted - like memory_manager, it
+                requires real collaborators of its own, so there is no
+                safe stateless default; when omitted, "ask jarvis:"
+                requests fail honestly instead.
         """
         self._planner = planner
         self._executor = executor
@@ -523,6 +555,7 @@ class JarvisOrchestrator:
         self._web_search_provider = web_search_provider
         self._inbox_store = inbox_store
         self._logger = logger
+        self._context_assembler = context_assembler
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -1362,6 +1395,25 @@ class JarvisOrchestrator:
                 pattern, destination, session_id
             )
 
+        # Phase 90, Batch 1: the "ask jarvis: <request>" Context
+        # Intelligence command is checked last, immediately before the
+        # generic fallback - the exact dispatch position Section 24.A.7
+        # requires. No existing deterministic command or special matcher
+        # above starts with "ask jarvis:" (confirmed by grep against
+        # every exact/prefix table in core/command_router.py before this
+        # matcher was added), so this cannot shadow or steal priority
+        # from any of them, and every request not starting with this
+        # exact prefix falls through to _handle_request_core exactly as
+        # before - this never converts an unmatched request into an
+        # intelligence request.
+        ask_jarvis_request_text = self._command_router.match_ask_jarvis(
+            user_request.strip()
+        )
+        if ask_jarvis_request_text is not None:
+            return self._handle_ask_jarvis_request(
+                ask_jarvis_request_text, user_request, session_id
+            )
+
         response = self._handle_request_core(user_request, session_id=session_id)
         return self._attach_ai_suggestion(response, user_request, session_id)
 
@@ -1612,6 +1664,134 @@ class JarvisOrchestrator:
             included_count=ingestion.included_count,
             session_id=session_id,
         )
+
+        return response
+
+    def _handle_ask_jarvis_request(
+        self, raw_request: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the explicit "ask jarvis: <request>" request (Phase 90,
+        Batch 1 - Context Intelligence).
+
+        This is a terminal response path, the direct architectural
+        sibling of _handle_file_summary_request/
+        _handle_web_search_summary_request/_handle_webpage_summary_request:
+        the AI's own advisory answer, grounded in automatically-assembled
+        context, is the entire point of this request. It still
+        coordinates only existing, already-secured components, and
+        executes no tool of any kind:
+
+            1. A Plan is generated normally (Planner.create_plan), so the
+               existing unexpected-action policy has a real expected-
+               action scope to evaluate AI suggestions against.
+            2. The raw trailing request text
+               CommandRouter.match_ask_jarvis extracted is checked for
+               emptiness here, before anything else is attempted - an
+               empty request fails honestly with no context retrieval
+               and no AI call at all.
+            3. Required collaborators (AI reasoning, then the
+               context_assembler) are confirmed available, each with its
+               own honest failure.
+            4. intelligence.context.ContextAssembler.assemble() performs
+               bounded, deterministic memory search/recency selection and
+               a ProjectStateStore.get() read - never an AI call, never a
+               tool execution, never an approval.
+            5. intelligence.context.build_ai_context_block() combines the
+               assembled, always-UNTRUSTED ContextItems into one
+               AIContextBlock - this method never constructs an
+               AIContextBlock itself, and never re-labels or re-derives
+               trust.
+            6. AIReasoningEngine.reason() is called exactly as it always
+               is, with the live request text as the trusted user_input
+               and the combined block as context_block - this method has
+               no ability to execute anything regardless of what the AI
+               returns, and the combined block still passes through
+               PromptBuilder's existing, unmodified untrusted-context
+               framing and injection scanner unchanged.
+            7. The fixed _ASK_JARVIS_LABEL is prepended to every
+               successful response unconditionally - the code-enforced
+               honesty guarantee that this is an advisory answer grounded
+               in automatically assembled context, regardless of the
+               AI's own wording.
+            8. Every AI-suggested action is evaluated through the
+               existing, unmodified _evaluate_unexpected_actions method -
+               the same Batch 4 policy and audit path every other request
+               already uses.
+
+        A failure at any stage returns an honest, distinct JarvisResponse
+        rather than ever presenting a failure as if it were a real AI
+        answer, and never raises into the caller. No tool is ever
+        executed, no approval is ever created, and no store is ever
+        mutated by this method.
+
+        Args:
+            raw_request: The raw trailing request text extracted by
+                CommandRouter.match_ask_jarvis - possibly empty.
+            user_request: The original, full request text (including the
+                "ask jarvis:" prefix), used only for Planner.create_plan.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True only when a real AI answer was
+            produced; otherwise success=False with an honest explanation
+            of which stage did not complete - never blocked or requiring
+            confirmation, since this workflow performs no write action of
+            any kind.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+        request_text = raw_request.strip()
+
+        if not request_text:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_EMPTY_REQUEST_MESSAGE,
+                plan=plan,
+            )
+
+        if self._reasoning is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._context_assembler is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_CONTEXT_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        assembled = self._context_assembler.assemble(request_text)
+        context_block = build_ai_context_block(assembled)
+
+        reasoning_request = AIReasoningRequest(
+            user_input=request_text,
+            context_block=context_block,
+            session_id=session_id,
+        )
+        result = self._reasoning.reason(reasoning_request)
+        if result is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_AI_REASONING_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        summary = result.summary
+        if result.has_suggestions:
+            steps = "; ".join(a.description for a in result.suggested_actions)
+            summary = f"{result.summary} Suggested steps: {steps}"
+
+        response = JarvisResponse(
+            success=True,
+            message=f"{_ASK_JARVIS_LABEL} {summary}",
+            plan=plan,
+        )
+
+        # Reused, not duplicated: the exact same Batch 4 policy/audit method
+        # every other request's advisory suggestion already goes through.
+        self._evaluate_unexpected_actions(response, result, session_id)
 
         return response
 

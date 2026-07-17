@@ -246,6 +246,14 @@ Every generated prompt is **local text only, printed to the CLI for you to copy 
 
 This record is **entirely manual** — Jarvis never inspects git, runs a subprocess, or scans the filesystem to populate or verify any field; every value is exactly what you last typed, and `last_updated` means only "when this stored record was last written," never a live git/test-run timestamp. Since Phase 89, Batch 2, this same record flows into every Claude Prompt Studio prompt's "Project Context" section (see above) — recording it once means you no longer have to retype it into every prompt.
 
+### Jarvis Intelligence (Phase 90, Batch 1 — Context Intelligence)
+
+| Command | Tier | Does |
+|---|---|---|
+| `ask jarvis: <request>` | GREEN (advisory, no tool execution) | Automatically assembles a small, bounded set of relevant stored memories (deterministic search on your request's own words, falling back to your most recent memories) and your manually-recorded project state, then asks the AI reasoning engine to advise on your request. |
+
+`ask jarvis: <request>` is **advisory only and requires `AI_REASONING_ENABLED`** — if AI reasoning is not enabled, or the provider is unavailable, you get an honest message saying so, never a fabricated answer. It executes **no tool, creates no approval, and mutates no store** in this batch: it only reads up to 5 relevant/recent memories and your project-state record, combines them into one clearly-labelled untrusted context block (passing through the same injection scanner every other AI-facing context already does), and reports the AI's response labelled `[AI advisory response - based on automatically assembled context]`. An empty request (`ask jarvis:` with nothing after the colon) performs no retrieval and no AI call at all.
+
 ---
 
 ## 7. Inbox, Scheduled Summaries, and Startup Notices

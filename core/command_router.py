@@ -204,6 +204,29 @@ _PROJECT_STATE_SHOW_EXACT_COMMANDS: frozenset[str] = frozenset(
 #: "update jarvis project state".
 _PROJECT_STATE_UPDATE_PREFIX = "update jarvis project state:"
 
+#: The exact, mandatory prefix for Jarvis's Phase 90, Batch 1 Context
+#: Intelligence command: "ask jarvis: <request>". The trailing colon is
+#: mandatory grammar, not a separator checked separately - "ask jarvis"
+#: (no colon), "ask jarvis about X" (no colon), and "jarvis, ask: X"
+#: (does not start with this exact prefix) all correctly fail to match.
+#: Checked directly, by grep, against every other exact/prefix table in
+#: this module before being added (Phase 90 planning gate, Section
+#: 24.A.7): no existing command anywhere in this module contains the
+#: word "ask" (confirmed - the only match for "ask" case-insensitively
+#: in this entire file, before this addition, was the unrelated word
+#: "asking" inside a comment), and "jarvis" appears only in
+#: _JARVIS_BRAIN_EXACT_COMMANDS ("jarvis brain status"/"show jarvis
+#: brain"), _PROJECT_STATE_SHOW_EXACT_COMMANDS ("show jarvis project
+#: state"), and _PROJECT_STATE_UPDATE_PREFIX ("update jarvis project
+#: state:") - none of which starts with, or is a prefix of, "ask
+#: jarvis:", in either direction. This is a distinct, narrow operation
+#: from match()/build_input(), mirroring match_web_search_summary's own
+#: precedent exactly: it never names a registered tool for the
+#: orchestrator to execute directly, because answering an "ask jarvis:"
+#: request is a context-assembly-then-AI-reasoning workflow, not a
+#: single tool execution, and Batch 1 executes no tools at all.
+_ASK_JARVIS_PREFIX = "ask jarvis:"
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -1068,6 +1091,40 @@ class CommandRouter:
             return None
 
         return text[len(prefix) :].strip()
+
+    def match_ask_jarvis(self, text: str) -> str | None:
+        """Match the explicit "ask jarvis: <request>" command and extract
+        its raw trailing request text (Phase 90, Batch 1).
+
+        Recognises only the exact, case-insensitive "ask jarvis:" prefix
+        (colon mandatory). This is a distinct, narrow operation from
+        match()/build_input(): it never names a registered tool for the
+        orchestrator to execute directly, because answering an "ask
+        jarvis:" request is a context-assembly-then-AI-reasoning
+        workflow, not a single tool execution - mirroring
+        match_web_search_summary's own precedent exactly. This method
+        does not gate on any tool being registered: the workflow never
+        goes through ToolExecutor or a registered tool at all in Batch 1
+        (it calls MemoryManager/ProjectStateStore/AIReasoningEngine
+        directly); whether those collaborators are actually available is
+        the orchestrator's own responsibility to check.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing request text if the text matches
+            this command's exact grammar - possibly empty, if the phrase
+            was used with no request at all - or None if the text does
+            not start with the exact "ask jarvis:" prefix (including
+            "ask jarvis" with no colon, "ask jarvis about X", and
+            "jarvis, ask: X", none of which match).
+        """
+        lowered = text.casefold()
+        if not lowered.startswith(_ASK_JARVIS_PREFIX):
+            return None
+
+        return text[len(_ASK_JARVIS_PREFIX) :].strip()
 
     def match_webpage_summary(self, text: str) -> str | None:
         """Match an explicit AI webpage-summary request and extract its URL.
