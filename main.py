@@ -412,6 +412,13 @@ def build_orchestrator() -> JarvisOrchestrator:
     # no new AI authority, nothing bypasses the Security Manager or Tool
     # Executor - the engine remains strictly advisory either way.
     reasoning_engine: AIReasoningEngine | None = None
+    # Phase 90, Batch 2: the same real AIRouter instance built below (not
+    # a second one) also powers the "ask jarvis to: <request>" tool-
+    # selection workflow, called directly rather than through
+    # AIReasoningEngine (Section 26.C) - so it stays None whenever AI
+    # reasoning is disabled, exactly mirroring reasoning_engine's own
+    # None-when-disabled convention.
+    tool_selection_router: AIRouter | None = None
     if settings.ai_reasoning_enabled:
         ai_router = AIRouter(
             provider=ClaudeProvider(settings),
@@ -426,6 +433,7 @@ def build_orchestrator() -> JarvisOrchestrator:
             settings=settings,
         )
         reasoning_engine = AIReasoningEngine(router=ai_router, enabled=True)
+        tool_selection_router = ai_router
 
     return JarvisOrchestrator(
         planner=planner,
@@ -457,6 +465,10 @@ def build_orchestrator() -> JarvisOrchestrator:
         # built above (not a second one) powers the explicit "ask
         # jarvis: <request>" Context Intelligence command.
         context_assembler=context_assembler,
+        # Phase 90, Batch 2: the same AIRouter instance already built
+        # above (not a second one) powers the explicit "ask jarvis to:
+        # <request>" tool-selection command.
+        tool_selection_router=tool_selection_router,
     )
 
 

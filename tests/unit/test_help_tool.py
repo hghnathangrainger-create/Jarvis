@@ -127,6 +127,7 @@ def test_output_is_identical_regardless_of_input_data() -> None:
         "show jarvis project state",
         "update jarvis project state:",
         "ask jarvis:",
+        "ask jarvis to:",
     ],
 )
 def test_output_includes_every_documented_command_family(expected_phrase: str) -> None:
@@ -193,6 +194,32 @@ def test_output_documents_ask_jarvis_command() -> None:
     assert "ask jarvis: <request>" in result.output
     assert "(advisory; requires AI_REASONING_ENABLED)" in result.output
     assert "Executes no tool and creates no approval" in result.output
+
+
+def test_output_documents_ask_jarvis_to_command() -> None:
+    """Phase 90, Batch 2: documented in the same batch the command
+    shipped, deliberately avoiding the exact Phase-57/58-class gap (a
+    real command missing from HelpTool's own _HELP_LINES)."""
+    result = _run(HelpTool())
+    assert "ask jarvis to: <request>" in result.output
+    assert "AI_REASONING_ENABLED" in result.output
+    assert "no supported capability can satisfy" in result.output
+
+
+def test_ask_jarvis_and_ask_jarvis_to_are_distinctly_documented() -> None:
+    """Batch 1's advisory command and Batch 2's tool-selection command
+    must never read as the same behavior."""
+    result = _run(HelpTool())
+    ask_jarvis_line = next(
+        line for line in result.output.splitlines() if "ask jarvis: <request>" in line
+    )
+    ask_jarvis_to_line = next(
+        line
+        for line in result.output.splitlines()
+        if "ask jarvis to: <request>" in line
+    )
+    assert "No approval, retry, replan, workflow, or write" in ask_jarvis_to_line
+    assert ask_jarvis_line != ask_jarvis_to_line
 
 
 def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (

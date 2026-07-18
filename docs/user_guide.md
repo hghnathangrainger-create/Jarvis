@@ -254,6 +254,16 @@ This record is **entirely manual** — Jarvis never inspects git, runs a subproc
 
 `ask jarvis: <request>` is **advisory only and requires `AI_REASONING_ENABLED`** — if AI reasoning is not enabled, or the provider is unavailable, you get an honest message saying so, never a fabricated answer. It executes **no tool, creates no approval, and mutates no store** in this batch: it only reads up to 5 relevant/recent memories and your project-state record, combines them into one clearly-labelled untrusted context block (passing through the same injection scanner every other AI-facing context already does), and reports the AI's response labelled `[AI advisory response - based on automatically assembled context]`. An empty request (`ask jarvis:` with nothing after the colon) performs no retrieval and no AI call at all.
 
+### Jarvis Intelligence: Tool Selection (Phase 90, Batch 2 — GREEN only)
+
+| Command | Tier | Does |
+|---|---|---|
+| `ask jarvis to: <request>` | GREEN only (no approval flow exists for this command) | Asks Jarvis to select at most one explicitly allowlisted capability - in this batch, only showing your manually-maintained project state - and, if selected and safe, actually runs it through the real tool executor. |
+
+`ask jarvis to:` builds on the exact same bounded memory/project-state context assembly as `ask jarvis:` above, then asks the AI to choose between two outcomes: **execute** the one allowlisted capability (`project_state_show`), or **honestly report that no supported capability applies** — Jarvis never forces a match onto an unrelated request. Every AI response is strictly, deterministically validated (exact JSON shape, known capability, matching arguments) before anything else happens; a malformed or unrecognised response is rejected outright, never guessed at or repaired. A selected capability then goes through a real security check requiring it to be GREEN — if it is not (or its underlying tool is unexpectedly no longer available at the moment it would run), Jarvis refuses honestly rather than asking for approval or pretending it ran. A real, successful result is always the actual tool's own output, labelled `[Jarvis tool result]` — never an AI paraphrase of it. Like `ask jarvis:`, this requires `AI_REASONING_ENABLED`, and an empty request (`ask jarvis to:` with nothing after the colon) performs no retrieval, no AI call, and no tool execution.
+
+`ask jarvis:` (advisory) and `ask jarvis to:` (tool selection) are deliberately separate commands with no overlap: the first never touches a tool; the second never gives free-form advice — it either runs the one allowlisted capability or honestly declines.
+
 ---
 
 ## 7. Inbox, Scheduled Summaries, and Startup Notices

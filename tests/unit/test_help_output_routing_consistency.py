@@ -158,6 +158,10 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     ),
     # Jarvis Intelligence
     ("Jarvis Intelligence: ask jarvis", "ask jarvis: what is my current focus"),
+    (
+        "Jarvis Intelligence: ask jarvis to",
+        "ask jarvis to: show my project state",
+    ),
 )
 
 

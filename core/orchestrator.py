@@ -55,6 +55,7 @@ from ai.memory_selection import (
 )
 from ai.reasoning_engine import AIReasoningEngine
 from ai.reasoning_models import AIReasoningRequest, AIReasoningResult
+from ai.router import AIRouter
 from ai.web_search_ingestion import ingest_web_search_for_ai
 from ai.webpage_ingestion import ingest_webpage_for_ai
 from config.constants import EventOutcome, SecurityTier, StepStatus
@@ -62,6 +63,11 @@ from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler, build_ai_context_block
+from intelligence.planning import (
+    UNSUPPORTED_CAPABILITY_MESSAGE,
+    PlanningOutcomeKind,
+    select_tool,
+)
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -195,6 +201,30 @@ _ASK_JARVIS_AI_REASONING_UNAVAILABLE_MESSAGE = (
 _ASK_JARVIS_CONTEXT_NOT_AVAILABLE_MESSAGE = (
     "Context assembly is not available, so I can't answer this request."
 )
+
+#: Fixed label for a successful "ask jarvis to: <request>" execution
+#: (Phase 90, Batch 2) - the code-enforced honesty guarantee that the
+#: substantive content is the real ToolResult.output, never an AI
+#: paraphrase of it, mirroring _ASK_JARVIS_LABEL's own convention.
+_ASK_JARVIS_TO_LABEL = "[Jarvis tool result]"
+_ASK_JARVIS_TO_EMPTY_REQUEST_MESSAGE = (
+    "Please include what you'd like Jarvis to do after 'ask jarvis to:'"
+)
+_ASK_JARVIS_TO_AI_REASONING_NOT_ENABLED_MESSAGE = (
+    "AI reasoning is not enabled, so Jarvis can't select a tool for this request."
+)
+_ASK_JARVIS_TO_CONTEXT_NOT_AVAILABLE_MESSAGE = (
+    "Context assembly is not available, so Jarvis can't select a tool for this "
+    "request."
+)
+_ASK_JARVIS_TO_PROVIDER_UNAVAILABLE_MESSAGE = (
+    "Jarvis's AI provider is not available right now, so it can't select a "
+    "tool for this request."
+)
+_ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE = (
+    "Jarvis's AI provider could not process this request right now."
+)
+_ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX = "Jarvis could not safely process that request:"
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
 #: Distinct from _FILE_SUMMARY_LABEL for the same reason that label is
@@ -475,6 +505,7 @@ class JarvisOrchestrator:
         inbox_store: InboxStore | None = None,
         logger: _AuditLogger | None = None,
         context_assembler: ContextAssembler | None = None,
+        tool_selection_router: AIRouter | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -542,6 +573,20 @@ class JarvisOrchestrator:
                 requires real collaborators of its own, so there is no
                 safe stateless default; when omitted, "ask jarvis:"
                 requests fail honestly instead.
+            tool_selection_router: An optional, already-constructed
+                AIRouter, used only by the explicit "ask jarvis to:
+                <request>" tool-intent workflow (Phase 90, Batch 2) to
+                select at most one allowlisted GREEN capability. This is
+                deliberately the same real AIRouter instance main.py
+                already builds for reasoning_engine when AI reasoning is
+                enabled - never a second instance - passed directly
+                because AIReasoningEngine.reason() hardcodes one shared
+                system instruction with no field for this call's own
+                trusted planning instruction (Section 26.C). When
+                omitted (AI reasoning disabled, mirroring
+                reasoning_engine's own None-when-disabled convention),
+                "ask jarvis to:" requests fail honestly instead of
+                calling any provider.
         """
         self._planner = planner
         self._executor = executor
@@ -556,6 +601,7 @@ class JarvisOrchestrator:
         self._inbox_store = inbox_store
         self._logger = logger
         self._context_assembler = context_assembler
+        self._tool_selection_router = tool_selection_router
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -1395,6 +1441,21 @@ class JarvisOrchestrator:
                 pattern, destination, session_id
             )
 
+        # Phase 90, Batch 2: the "ask jarvis to: <request>" tool-intent
+        # command is checked immediately before its Batch 1 sibling
+        # "ask jarvis:", per Section 25.A's fixed (though not
+        # correctness-critical - the two prefixes never collide, see
+        # CommandRouter's own collision proof) dispatch ordering. Both
+        # remain in the same final special-handler cluster, immediately
+        # before the generic fallback.
+        ask_jarvis_to_request_text = self._command_router.match_ask_jarvis_to(
+            user_request.strip()
+        )
+        if ask_jarvis_to_request_text is not None:
+            return self._handle_ask_jarvis_to_request(
+                ask_jarvis_to_request_text, user_request, session_id
+            )
+
         # Phase 90, Batch 1: the "ask jarvis: <request>" Context
         # Intelligence command is checked last, immediately before the
         # generic fallback - the exact dispatch position Section 24.A.7
@@ -1666,6 +1727,158 @@ class JarvisOrchestrator:
         )
 
         return response
+
+    def _handle_ask_jarvis_to_request(
+        self, raw_request: str, user_request: str, session_id: int | None
+    ) -> JarvisResponse:
+        """Handle the explicit "ask jarvis to: <request>" request (Phase
+        90, Batch 2 - Planning and Safe GREEN Tool Selection).
+
+        This is a terminal response path, the tool-executing sibling of
+        _handle_ask_jarvis_request: instead of an advisory answer, this
+        workflow asks the AI to select at most one allowlisted GREEN
+        capability, deterministically validates that selection, runs a
+        real security preflight, and - only if every check passes -
+        executes the real, corresponding tool through the existing,
+        unmodified ToolExecutor. It still coordinates only existing,
+        already-secured components, plus the new, narrow
+        intelligence.planning.select_tool() helper:
+
+            1. A Plan is generated normally (Planner.create_plan).
+            2. The raw trailing request text is checked for emptiness
+               here, before anything else is attempted - an empty
+               request performs no context retrieval, no AI call, no
+               preflight, and no tool execution.
+            3. Required collaborators (the tool-selection AIRouter, then
+               the context_assembler) are confirmed available, each
+               with its own honest, distinct failure - "AI reasoning is
+               not enabled" is never confused with "the provider is
+               unavailable" or "the provider failed".
+            4. intelligence.context.ContextAssembler.assemble() performs
+               the exact same bounded, deterministic context assembly
+               Batch 1 already uses - unchanged.
+            5. intelligence.planning.select_tool() calls the real
+               AIRouter directly (with its own fixed, trusted planning
+               instruction - never mixed into any ContextItem), parses
+               and validates the response, and - for a valid "execute"
+               decision - runs the real SecurityManager preflight,
+               requiring GREEN before ever returning an executable
+               StructuredPlan. This method never constructs an
+               AIContextBlock, never calls a provider, and never
+               classifies security itself.
+            6. A valid "unsupported" decision, or any parsing/
+               validation/preflight failure, terminates here - zero
+               tool execution, zero approval, zero store mutation.
+            7. Only a real, GREEN-preflighted StructuredPlan reaches
+               self._executor.execute() - the same real, unmodified
+               ToolExecutor every other tool call in the system goes
+               through, which independently re-classifies the action
+               from scratch. Its real ToolResult is translated via the
+               existing, unmodified _tool_result_to_response() helper,
+               so an unexpected execution-time confirmation-required or
+               blocked result is reported exactly as honestly as it
+               already is for every other tool call - never converted
+               into an approval flow, never claimed as a success.
+            8. A successful execution's response is grounded in the
+               real ToolResult.output, with only a fixed label
+               prepended - no second AI call ever summarizes,
+               paraphrases, or embellishes it.
+
+        Args:
+            raw_request: The raw trailing request text extracted by
+                CommandRouter.match_ask_jarvis_to - possibly empty.
+            user_request: The original, full request text (including
+                the "ask jarvis to:" prefix), used only for
+                Planner.create_plan.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. success=True for a real, grounded
+            execution or a valid "unsupported" decision; success=False
+            for every disabled/unavailable/failed/invalid/diverged
+            outcome - never blocked or requiring confirmation as a
+            claimed success, and never presenting a failure as if it
+            were a valid "unsupported" decision.
+        """
+        plan = self._planner.create_plan(user_request.strip())
+        request_text = raw_request.strip()
+
+        if not request_text:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_EMPTY_REQUEST_MESSAGE,
+                plan=plan,
+            )
+
+        if self._tool_selection_router is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_AI_REASONING_NOT_ENABLED_MESSAGE,
+                plan=plan,
+            )
+
+        if self._context_assembler is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_CONTEXT_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        assembled = self._context_assembler.assemble(request_text)
+
+        outcome = select_tool(
+            request_text=request_text,
+            assembled_context=assembled,
+            router=self._tool_selection_router,
+            tool_registry=self._registry,
+            security_manager=self._security,
+            session_id=session_id,
+        )
+
+        if outcome.kind is PlanningOutcomeKind.PROVIDER_UNAVAILABLE:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_PROVIDER_UNAVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        if outcome.kind is PlanningOutcomeKind.PROVIDER_FAILED:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE,
+                plan=plan,
+            )
+
+        if outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT:
+            return JarvisResponse(
+                success=False,
+                message=f"{_ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX} {outcome.detail}.",
+                plan=plan,
+            )
+
+        if outcome.kind is PlanningOutcomeKind.UNSUPPORTED:
+            return JarvisResponse(
+                success=True,
+                message=UNSUPPORTED_CAPABILITY_MESSAGE,
+                plan=plan,
+            )
+
+        # PlanningOutcomeKind.EXECUTABLE: a real, GREEN-preflighted
+        # StructuredPlan with exactly one step.
+        assert outcome.plan is not None
+        step = outcome.plan.steps[0]
+        result = self._executor.execute(
+            step.tool_name, step.arguments, session_id=session_id
+        )
+
+        base_response = self._tool_result_to_response(plan, result)
+        if not base_response.success:
+            return base_response
+
+        return replace(
+            base_response,
+            message=f"{_ASK_JARVIS_TO_LABEL} {base_response.message}".strip(),
+        )
 
     def _handle_ask_jarvis_request(
         self, raw_request: str, user_request: str, session_id: int | None

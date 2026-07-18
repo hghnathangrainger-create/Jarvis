@@ -227,6 +227,27 @@ _PROJECT_STATE_UPDATE_PREFIX = "update jarvis project state:"
 #: single tool execution, and Batch 1 executes no tools at all.
 _ASK_JARVIS_PREFIX = "ask jarvis:"
 
+#: The exact, mandatory prefix for Jarvis's Phase 90, Batch 2 tool-
+#: intent command: "ask jarvis to: <request>". The colon after "to" is
+#: mandatory grammar - "ask jarvis to" (no colon) does not match.
+#: Collision-checked (Phase 90 planning gate, Section 25.A): "ask
+#: jarvis to:" is never a prefix of "ask jarvis:", and "ask jarvis:" is
+#: never a prefix of "ask jarvis to:", in either direction - comparing
+#: character-by-character after the shared "ask jarvis" stem, the very
+#: next character diverges immediately (":" for the Batch 1 phrase vs.
+#: a space beginning " to:" for this Batch 2 phrase). Re-grepped
+#: against every other exact/prefix table in this module: no command
+#: anywhere other than _ASK_JARVIS_PREFIX itself contains the word
+#: "ask", so this cannot collide with any other command family either.
+#: This is a distinct, narrow operation from match()/build_input(),
+#: mirroring match_ask_jarvis's own precedent exactly: it never names a
+#: registered tool for the orchestrator to execute directly, since
+#: answering an "ask jarvis to:" request is a context-assembly-then-
+#: AI-capability-selection workflow, not a single tool execution -
+#: though, unlike Batch 1's ask jarvis:, a real tool call to the one
+#: allowlisted GREEN capability may follow.
+_ASK_JARVIS_TO_PREFIX = "ask jarvis to:"
+
 #: Two exact phrases mapping to the same fixed, no-argument request
 #: (Phase 36), mirroring _CONFIG_EXACT_COMMANDS's own established
 #: pattern exactly: "list" and "show" are two names for the same
@@ -1091,6 +1112,36 @@ class CommandRouter:
             return None
 
         return text[len(prefix) :].strip()
+
+    def match_ask_jarvis_to(self, text: str) -> str | None:
+        """Match the explicit "ask jarvis to: <request>" command and
+        extract its raw trailing request text (Phase 90, Batch 2).
+
+        Recognises only the exact, case-insensitive "ask jarvis to:"
+        prefix (colon mandatory). Checked before match_ask_jarvis() by
+        the caller (JarvisOrchestrator.handle_request) - see that
+        method's own docstring for why this ordering, while not a
+        correctness necessity (the two prefixes never collide, per
+        this module's own collision proof above), is fixed as the
+        narrative grouping for these two sibling commands.
+
+        Args:
+            text: The stripped request text.
+
+        Returns:
+            The extracted raw trailing request text if the text
+            matches this command's exact grammar - possibly empty, if
+            the phrase was used with no request at all - or None if
+            the text does not start with the exact "ask jarvis to:"
+            prefix (including "ask jarvis to" with no colon, "ask
+            jarvis" alone, "jarvis, ask to: X", and "ask jarvis: to X"
+            - a legitimate Batch 1 request - none of which match).
+        """
+        lowered = text.casefold()
+        if not lowered.startswith(_ASK_JARVIS_TO_PREFIX):
+            return None
+
+        return text[len(_ASK_JARVIS_TO_PREFIX) :].strip()
 
     def match_ask_jarvis(self, text: str) -> str | None:
         """Match the explicit "ask jarvis: <request>" command and extract

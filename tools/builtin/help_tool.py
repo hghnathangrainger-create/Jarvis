@@ -11,7 +11,8 @@ updated Phase 89, Batch 1 to document the new "jarvis project state"
 show/update command family; updated Phase 89, Batch 2 to describe
 Claude Prompt Studio's new manually-recorded Project Context section;
 updated Phase 90, Batch 1 to document the new "ask jarvis: <request>"
-Context Intelligence command).
+Context Intelligence command; updated Phase 90, Batch 2 to document
+the new "ask jarvis to: <request>" tool-selection command).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -156,6 +157,13 @@ _HELP_LINES: tuple[str, ...] = (
     "requires AI_REASONING_ENABLED). Executes no tool and creates no approval - "
     "if AI reasoning is not enabled or is unavailable, this reports that "
     "honestly instead of guessing an answer.",
+    "  ask jarvis to: <request> - asks Jarvis to select at most one explicitly "
+    "allowlisted, GREEN-only capability (Batch 2 supports only showing your "
+    "manually-maintained project state - the same data 'show jarvis project "
+    "state' reports); requires AI_REASONING_ENABLED. May honestly report that "
+    "no supported capability can satisfy your request. No approval, retry, "
+    "replan, workflow, or write behavior of any kind - a real result is only "
+    "ever shown after the real, unmodified tool actually runs.",
 )
 
 
