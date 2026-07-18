@@ -140,6 +140,7 @@ from tools.builtin.memory_update_tool import MemoryUpdateTool
 from tools.builtin.prepare_prompt_tool import PreparePromptTool
 from tools.builtin.project_state_show_tool import ProjectStateShowTool
 from tools.builtin.project_state_update_tool import ProjectStateUpdateTool
+from tools.builtin.project_state_verify_tool import ProjectStateVerifyTool
 from tools.builtin.quarantine_list_tool import QuarantineListTool
 from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
@@ -158,6 +159,7 @@ __all__ = [
     "PreparePromptTool",
     "ProjectStateShowTool",
     "ProjectStateUpdateTool",
+    "ProjectStateVerifyTool",
     "QuarantineListTool",
     "EchoTool",
     "InfoTool",

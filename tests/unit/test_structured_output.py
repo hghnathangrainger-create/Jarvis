@@ -1,10 +1,10 @@
 """
 test_structured_output.py
 
-Unit tests for intelligence/structured_output.py (Phase 90, Batch 2):
-the strict, deterministic parser for "ask jarvis to: <request>" model
-output (contracts fixed by docs/phase_90_implementation_plan.md,
-Sections 25.B and 26.A/B/D).
+Unit tests for intelligence/structured_output.py (Phase 90, Batches
+2/3): the strict, deterministic parser for "ask jarvis to: <request>"
+model output (contracts fixed by docs/phase_90_implementation_plan.md,
+Sections 25.B, 26.A/B/D, and the Batch 3 planning prompt).
 
 Run with:
     pytest tests/unit/test_structured_output.py
@@ -17,6 +17,7 @@ import json
 import pytest
 
 from intelligence.capability_catalog import (
+    CAPABILITY_CATALOG,
     CapabilityAdapter,
     CapabilityArgumentSpec,
     CapabilityId,
@@ -448,3 +449,211 @@ def test_json_default_behavior_would_have_silently_overwritten_duplicates() -> N
     not a redundant extra check."""
     text = '{"a": 1, "a": 2}'
     assert json.loads(text) == {"a": 2}  # plain json.loads silently overwrites
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: real CAPABILITY_CATALOG (project_state_show,
+# project_state_update_focus, project_state_verify_focus)
+# ---------------------------------------------------------------------------
+
+_UPDATE_FOCUS_EXECUTE_TEXT = json.dumps(
+    {
+        "decision": "execute",
+        "capability_id": "project_state_update_focus",
+        "arguments": {"value": "a brand new focus"},
+    }
+)
+
+
+def test_project_state_show_remains_valid_against_real_catalog() -> None:
+    result = parse_tool_selection(_EXECUTE_TEXT, CAPABILITY_CATALOG)
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.PROJECT_STATE_SHOW
+
+
+def test_update_focus_valid_selection() -> None:
+    result = parse_tool_selection(_UPDATE_FOCUS_EXECUTE_TEXT, CAPABILITY_CATALOG)
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.PROJECT_STATE_UPDATE_FOCUS
+    assert result.arguments == {"value": "a brand new focus"}
+
+
+def test_unsupported_remains_valid_against_real_catalog() -> None:
+    result = parse_tool_selection(_UNSUPPORTED_TEXT, CAPABILITY_CATALOG)
+    assert result.decision is ToolSelectionDecision.UNSUPPORTED
+
+
+def test_verify_focus_is_rejected_from_ai_output_even_though_catalogued() -> None:
+    """PROJECT_STATE_VERIFY_FOCUS is a real catalog entry (so the fixed
+    two-step workflow can resolve it internally) but must never be
+    selectable through AI output."""
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_verify_focus",
+            "arguments": {},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "capability is internal-only and cannot be selected"
+
+
+def test_update_focus_missing_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_update_focus_extra_argument_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "x", "extra": "y"},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_update_focus_non_string_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": 5},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_update_focus_empty_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": ""},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_update_focus_whitespace_only_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "   \t  "},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_update_focus_over_500_chars_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "x" * 501},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "oversized string argument"
+
+
+def test_update_focus_exactly_500_chars_is_accepted() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "x" * 500},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert len(result.arguments["value"]) == 500
+
+
+def test_update_focus_nul_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "hello\x00world"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument contains a NUL character"
+
+
+def test_update_focus_leading_control_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "\x01leading control char"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_update_focus_trailing_control_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "trailing control char\x1f"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_update_focus_leading_or_trailing_plain_space_is_not_a_control_character() -> (
+    None
+):
+    """A plain space (0x20) is printable, not a C0 control character or
+    DEL - it is not specifically rejected by the leading/trailing
+    control-character check."""
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": " padded with spaces "},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == " padded with spaces "
+
+
+def test_update_focus_value_is_never_normalized_or_rewritten() -> None:
+    """The validated value is preserved verbatim - no trimming, no
+    case-folding, no collapsing of internal whitespace."""
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "Mixed CASE   with   spacing"},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == "Mixed CASE   with   spacing"
+
+
+def test_rejected_value_is_never_echoed_in_the_error() -> None:
+    marker = "UNIQUE_SECRET_TO_NEVER_LEAK_ABCDEF"
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": marker + ("x" * 501)},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert marker not in reason

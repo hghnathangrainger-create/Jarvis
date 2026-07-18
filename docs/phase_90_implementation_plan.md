@@ -1043,6 +1043,16 @@ Expected Batch 2 files remain those listed in §25.I, with one narrow, explicitl
 
 This turn is documentation only. Sections 1–25 are unchanged; §26 (A through I) supersedes only the conflicting Batch 2 wording named in its own preamble.
 
+## 27. Batch 3 Routing Clarification
+
+**A short, factual note only - Sections 1–26 are otherwise unchanged.**
+
+Section 24's original illustrative Batch 3 example command, `ask jarvis: update my project focus to X and confirm it`, is **superseded**. Batch 1's `ask jarvis: <request>` command remains, permanently within Phase 90, advisory-only - no tool selection, no tool execution, no approval, no writes, exactly as implemented in Batch 1 (commit `8462446`) and unchanged by Batches 2 or 3.
+
+Batch 3's write-and-verify vertical slice is instead reached by **extending the existing Batch 2 command**: `ask jarvis to: <request>`, via its own natural-language request shape, `ask jarvis to: update my project focus to X and confirm it`. No new user-facing command was introduced for Batch 3 - `intelligence/planning.py`'s existing `select_tool()` function gained a second model-selectable capability (`project_state_update_focus`) and one internal-only capability (`project_state_verify_focus`), both resolved through the same command, the same trusted planning instruction, and the same strict structured-output parser Batch 2 already established.
+
+Implemented at commit (Batch 3 implementation baseline): see the completion report and Continuation Kit for the exact hash, recorded there rather than here, per this project's own established discipline of never having a planning document predict a commit hash before that commit exists.
+
 ---
 
 **This is a planning document only. No production code has been written. Batch 1 does not begin until Nathan explicitly approves it after reviewing this plan.**

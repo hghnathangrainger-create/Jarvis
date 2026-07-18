@@ -108,6 +108,7 @@ from tools.builtin import (
     PreparePromptTool,
     ProjectStateShowTool,
     ProjectStateUpdateTool,
+    ProjectStateVerifyTool,
     QuarantineListTool,
     ScheduleCreateTool,
     ScheduleDisableTool,
@@ -327,6 +328,13 @@ def build_orchestrator() -> JarvisOrchestrator:
     project_state_store = ProjectStateStore(session_factory)
     registry.register_tool(ProjectStateShowTool(project_state_store))
     registry.register_tool(ProjectStateUpdateTool(project_state_store))
+    # ProjectStateVerifyTool (Phase 90, Batch 3): internal-only - no
+    # CommandRouter grammar, not documented in HelpTool. Registered here
+    # only so WorkflowEngine/ToolExecutor can execute and audit it as
+    # the fixed second step of the "ask jarvis to: update my project
+    # focus..." workflow. Reuses the same project_state_store instance -
+    # never a second store or connection.
+    registry.register_tool(ProjectStateVerifyTool(project_state_store))
 
     # PreparePromptTool (Phase 86, Batch 2; extended Phase 89, Batch 2
     # with project-state context): reuses the exact same jarvis_brain

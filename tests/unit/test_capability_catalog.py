@@ -1,8 +1,8 @@
 """
 test_capability_catalog.py
 
-Unit tests for intelligence/capability_catalog.py (Phase 90, Batch 2):
-the hand-maintained tool-selection allowlist for "ask jarvis to:
+Unit tests for intelligence/capability_catalog.py (Phase 90, Batches
+2/3): the hand-maintained tool-selection allowlist for "ask jarvis to:
 <request>".
 
 Run with:
@@ -27,12 +27,56 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_project_state_show() -> None:
-    assert set(CAPABILITY_CATALOG) == {CapabilityId.PROJECT_STATE_SHOW}
+def test_catalog_contains_exactly_the_three_batch_3_entries() -> None:
+    assert set(CAPABILITY_CATALOG) == {
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
+    }
 
 
 def test_no_other_capability_id_exists() -> None:
-    assert {member.value for member in CapabilityId} == {"project_state_show"}
+    assert {member.value for member in CapabilityId} == {
+        "project_state_show",
+        "project_state_update_focus",
+        "project_state_verify_focus",
+    }
+
+
+def test_update_focus_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    assert adapter.capability_id is CapabilityId.PROJECT_STATE_UPDATE_FOCUS
+    assert adapter.tool_name == "project_state_update"
+    assert [spec.name for spec in adapter.arguments] == ["value"]
+    assert adapter.arguments[0].type_name == "str"
+    assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
+    assert adapter.max_execution_tier is SecurityTier.YELLOW
+    assert adapter.verification_strategy_id == "project_state_focus_exact_match"
+    assert adapter.internal_only is False
+
+
+def test_verify_focus_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_VERIFY_FOCUS]
+    assert adapter.capability_id is CapabilityId.PROJECT_STATE_VERIFY_FOCUS
+    assert adapter.tool_name == "project_state_verify"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is True
+
+
+def test_only_two_capabilities_are_model_selectable() -> None:
+    selectable = {
+        capability_id
+        for capability_id, adapter in CAPABILITY_CATALOG.items()
+        if not adapter.internal_only
+    }
+    assert selectable == {
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+    }
 
 
 def test_project_state_show_adapter_fields_are_exact() -> None:
@@ -76,6 +120,20 @@ def test_build_tool_input_copies_arbitrary_arguments() -> None:
     assert result["value"] == "x"
 
 
+def test_build_tool_input_adds_fixed_field_for_update_focus() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    result = build_tool_input(adapter, {"value": "new focus"})
+    assert result == {"field": "focus", "value": "new focus"}
+
+
+def test_build_tool_input_never_lets_model_choose_the_field() -> None:
+    """The "field" key is always the fixed literal "focus" - never
+    derived from, or overridable by, model-supplied arguments."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    result = build_tool_input(adapter, {"value": "x", "field": "branch"})
+    assert result["field"] == "focus"
+
+
 # --- Contract shape tests --------------------------------------------------
 
 
@@ -107,5 +165,8 @@ def test_capability_adapter_has_exact_fields() -> None:
     }
 
 
-def test_execution_strategy_has_exactly_single_tool() -> None:
-    assert {member.value for member in ExecutionStrategy} == {"single_tool"}
+def test_execution_strategy_has_exactly_two_members() -> None:
+    assert {member.value for member in ExecutionStrategy} == {
+        "single_tool",
+        "two_step_workflow",
+    }

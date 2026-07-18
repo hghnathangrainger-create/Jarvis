@@ -183,6 +183,50 @@ def _strip_single_outer_fence(text: str) -> str:
     return inner.strip()
 
 
+def _is_control_char(character: str) -> bool:
+    """Return whether a single character is a C0 control character or DEL.
+
+    Args:
+        character: A single character.
+
+    Returns:
+        True if character's code point is a C0 control (0x00-0x1F) or
+        DEL (0x7F) - this deliberately does not flag an ordinary
+        printable space (0x20).
+    """
+    code_point = ord(character)
+    return code_point < 0x20 or code_point == 0x7F
+
+
+def _validate_string_argument(value: str) -> None:
+    """Apply the fixed string-argument hygiene rules to any string
+    argument (Section 26/Batch 3 planning prompt).
+
+    Applied generically to every string-typed argument this parser
+    ever validates - not special-cased to any one argument name - since
+    there is no reason a different string argument would need laxer
+    rules.
+
+    Args:
+        value: The already-type-checked string value.
+
+    Raises:
+        ToolSelectionParseError: If value is empty or whitespace-only,
+            exceeds the fixed maximum length, contains a NUL character,
+            or has a leading/trailing control character.
+    """
+    if len(value) > _MAX_STRING_ARGUMENT_CHARS:
+        raise ToolSelectionParseError("oversized string argument")
+    if not value.strip():
+        raise ToolSelectionParseError("empty or whitespace-only string argument")
+    if "\x00" in value:
+        raise ToolSelectionParseError("string argument contains a NUL character")
+    if _is_control_char(value[0]) or _is_control_char(value[-1]):
+        raise ToolSelectionParseError(
+            "string argument has a leading or trailing control character"
+        )
+
+
 def _validate_arguments(
     adapter: CapabilityAdapter, arguments: dict[str, object]
 ) -> dict[str, object]:
@@ -226,8 +270,8 @@ def _validate_arguments(
         elif isinstance(value, bool) or not isinstance(value, expected_type):
             raise ToolSelectionParseError("invalid argument type")
 
-        if expected_type is str and len(value) > _MAX_STRING_ARGUMENT_CHARS:
-            raise ToolSelectionParseError("oversized string argument")
+        if expected_type is str:
+            _validate_string_argument(value)
 
         validated[spec.name] = value
 
@@ -311,6 +355,10 @@ def parse_tool_selection(
     adapter = catalog.get(capability_id)
     if adapter is None:
         raise ToolSelectionParseError("capability id not present in catalog")
+    if adapter.internal_only:
+        raise ToolSelectionParseError(
+            "capability is internal-only and cannot be selected"
+        )
 
     validated_arguments = _validate_arguments(adapter, arguments_raw)
 

@@ -206,8 +206,20 @@ def test_output_documents_ask_jarvis_to_command() -> None:
     assert "no supported capability can satisfy" in result.output
 
 
+def test_output_documents_ask_jarvis_to_focus_update_capability() -> None:
+    """Phase 90, Batch 3: the new focus-update capability is documented
+    in the same batch it shipped, honestly disclosing the approval and
+    verification requirements - never claiming no approval is ever
+    needed, since that is no longer true."""
+    result = _run(HelpTool())
+    assert "update only its focus field" in result.output
+    assert "requires your explicit approval" in result.output
+    assert "structured read-back" in result.output
+    assert "Zero retries, zero replans" in result.output
+
+
 def test_ask_jarvis_and_ask_jarvis_to_are_distinctly_documented() -> None:
-    """Batch 1's advisory command and Batch 2's tool-selection command
+    """Batch 1's advisory command and Batch 2/3's tool-selection command
     must never read as the same behavior."""
     result = _run(HelpTool())
     ask_jarvis_line = next(
@@ -218,8 +230,16 @@ def test_ask_jarvis_and_ask_jarvis_to_are_distinctly_documented() -> None:
         for line in result.output.splitlines()
         if "ask jarvis to: <request>" in line
     )
-    assert "No approval, retry, replan, workflow, or write" in ask_jarvis_to_line
+    assert "no arbitrary tool access, no autonomous behavior" in ask_jarvis_to_line
     assert ask_jarvis_line != ask_jarvis_to_line
+
+
+def test_internal_verify_tool_is_never_documented_as_a_user_command() -> None:
+    """Phase 90, Batch 3: project_state_verify is internal-only and
+    must never appear as if it were a real, user-typed command."""
+    result = _run(HelpTool())
+    assert "project_state_verify" not in result.output
+    assert "project state verify" not in result.output.lower()
 
 
 def test_output_documents_the_explicit_webpage_save_command_and_its_distinction() -> (

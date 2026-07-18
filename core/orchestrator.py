@@ -65,9 +65,11 @@ from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler, build_ai_context_block
 from intelligence.planning import (
     UNSUPPORTED_CAPABILITY_MESSAGE,
+    PlanningOutcome,
     PlanningOutcomeKind,
     select_tool,
 )
+from intelligence.verification import VerificationOutcome, verify_focus_update
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -225,6 +227,22 @@ _ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE = (
     "Jarvis's AI provider could not process this request right now."
 )
 _ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX = "Jarvis could not safely process that request:"
+#: Phase 90, Batch 3: the update-focus-and-verify workflow requires a
+#: real, configured WorkflowEngine - unlike Batch 2's project_state_show
+#: path, which only needs ToolExecutor.
+_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE = (
+    "Workflow execution is not available, so Jarvis can't safely update "
+    "the project focus for this request."
+)
+#: Shown only if the first WorkflowEngine.run() call for the update-
+#: focus workflow does not pause for approval, even though preflight
+#: required exactly YELLOW - a genuine execution-time safety mismatch
+#: (Batch 3 planning prompt). Never shown for an ordinary tool failure.
+_ASK_JARVIS_TO_SAFETY_MISMATCH_MESSAGE = (
+    "Jarvis refused this update: the safety check that should have "
+    "required your approval did not behave as expected, so nothing was "
+    "changed."
+)
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
 #: Distinct from _FILE_SUMMARY_LABEL for the same reason that label is
@@ -658,6 +676,12 @@ class JarvisOrchestrator:
                     else None
                 ),
             )
+            # Phase 90, Batch 3: recognised purely structurally (no new
+            # persisted marker, per Section 24.C.12) - never mistaken for
+            # any of the five pre-existing fixed Phase 15 workflows,
+            # whose own tool names never match this exact pair.
+            if self._is_update_focus_workflow_result(result):
+                return self._update_focus_workflow_result_to_response(result)
             return self._workflow_result_to_response(result)
 
         if self._is_pending_webpage_summary(response):
@@ -1863,6 +1887,9 @@ class JarvisOrchestrator:
                 plan=plan,
             )
 
+        if outcome.kind is PlanningOutcomeKind.EXECUTABLE_WORKFLOW:
+            return self._start_update_focus_workflow(plan, outcome, session_id)
+
         # PlanningOutcomeKind.EXECUTABLE: a real, GREEN-preflighted
         # StructuredPlan with exactly one step.
         assert outcome.plan is not None
@@ -1878,6 +1905,176 @@ class JarvisOrchestrator:
         return replace(
             base_response,
             message=f"{_ASK_JARVIS_TO_LABEL} {base_response.message}".strip(),
+        )
+
+    def _start_update_focus_workflow(
+        self,
+        plan: Plan,
+        outcome: PlanningOutcome,
+        session_id: int | None,
+    ) -> JarvisResponse:
+        """Run the deterministic, two-step update-focus-and-verify Plan
+        through the real, unmodified WorkflowEngine (Phase 90, Batch 3).
+
+        Args:
+            plan: The generic Plan built for the raw "ask jarvis to:"
+                request text (used only if WorkflowEngine is
+                unavailable - the real workflow response otherwise
+                carries its own, internal two-step Plan instead).
+            outcome: The EXECUTABLE_WORKFLOW PlanningOutcome carrying
+                the real, already-preflighted two-step workflow_plan.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. If WorkflowEngine is not configured, an
+            honest failure. If the first run() call does not pause for
+            approval (step 1 was preflighted YELLOW but did not
+            require confirmation at real execution time - a genuine
+            safety mismatch), an honest refusal that never claims
+            success under any circumstance. Otherwise, the translated,
+            verification-aware response for whatever real state the
+            workflow reached.
+        """
+        if self._workflow_engine is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        assert outcome.workflow_plan is not None  # guaranteed by EXECUTABLE_WORKFLOW
+        result = self._workflow_engine.run(outcome.workflow_plan, session_id=session_id)
+
+        if result.overall_status is not StepStatus.WAITING:
+            # Step 1 was preflighted YELLOW but did not pause for
+            # approval at real execution time - refuse honestly
+            # regardless of what actually happened; never report
+            # success here under any circumstance (Batch 3 planning
+            # prompt's own "execution-time divergence" safety
+            # requirement).
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_SAFETY_MISMATCH_MESSAGE,
+                plan=plan,
+                intelligence_trace=(
+                    "Step 1/2: safety mismatch - the expected approval "
+                    "requirement was not applied.",
+                ),
+            )
+
+        return self._update_focus_workflow_result_to_response(result)
+
+    @staticmethod
+    def _is_update_focus_workflow_result(result: WorkflowResult) -> bool:
+        """Structurally recognise the Batch 3 update-focus-and-verify
+        workflow shape - never a new persisted marker (Section 24.C.12).
+
+        Args:
+            result: A real WorkflowResult, from either run() or resume().
+
+        Returns:
+            True only if result.plan has exactly two steps whose real
+            tool names match this one fixed workflow's own shape,
+            exactly in order. Every one of the five pre-existing fixed
+            Phase 15 workflows uses different tool names and so can
+            never match this check.
+        """
+        steps = result.plan.steps
+        if len(steps) != 2:
+            return False
+        return (
+            steps[0].tool_name == "project_state_update"
+            and steps[1].tool_name == "project_state_verify"
+        )
+
+    def _update_focus_workflow_result_to_response(
+        self, result: WorkflowResult
+    ) -> JarvisResponse:
+        """Translate a real update-focus-and-verify WorkflowResult into
+        a grounded, verification-aware JarvisResponse (Phase 90, Batch 3).
+
+        Never asks AI to judge success: verification is always the
+        real, exact-string-equality comparison
+        intelligence.verification.verify_focus_update() performs
+        against the real, already-durable PlanStep.tool_input["value"]
+        and the verify step's real ToolResult.metadata["focus"].
+
+        Args:
+            result: The real WorkflowResult from run() or resume().
+
+        Returns:
+            A JarvisResponse honestly reflecting exactly one of:
+            pending approval (WAITING); the write step itself never
+            executed (failed/blocked/declined - no verification
+            attempted); or, once the write step completed, a real
+            VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE) grounded
+            in real values only - never AI prose, never a claimed
+            success the real results do not support.
+        """
+        if result.overall_status is StepStatus.WAITING:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: awaiting your approval to update the "
+                    "project focus.",
+                ),
+            )
+
+        write_outcome = result.step_outcomes[0]
+        if write_outcome.status is not StepStatus.COMPLETED:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: update did not execute; no verification "
+                    "attempted.",
+                ),
+            )
+
+        verify_outcome = (
+            result.step_outcomes[1] if len(result.step_outcomes) > 1 else None
+        )
+        expected_value = str(write_outcome.step.tool_input.get("value", ""))
+        verification = verify_focus_update(
+            expected_value=expected_value,
+            verify_tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+        )
+        trace = (
+            "Step 1/2: update executed.",
+            f"Step 2/2: verification {verification.outcome.value}.",
+        )
+
+        if verification.outcome is VerificationOutcome.VERIFIED:
+            message = (
+                f"Jarvis updated the project focus to: {expected_value}. "
+                "Verification succeeded - the stored value matches."
+            )
+            success = True
+        elif verification.outcome is VerificationOutcome.FAILED:
+            message = (
+                "Jarvis's update tool reported success, but the structured "
+                "read-back found a different value than requested - the "
+                "update is not confirmed."
+            )
+            success = False
+        else:
+            message = (
+                "Jarvis's update tool reported success, but verification "
+                "could not be completed, so the update is not confirmed."
+            )
+            success = False
+
+        return JarvisResponse(
+            success=success,
+            message=message,
+            plan=result.plan,
+            tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+            intelligence_trace=trace,
         )
 
     def _handle_ask_jarvis_request(

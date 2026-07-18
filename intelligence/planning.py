@@ -1,16 +1,19 @@
 """
 planning.py
 
-Ties Batch 2's Context Intelligence, trusted planning instruction,
-strict structured-output parsing, capability catalog, and deterministic
+Ties Context Intelligence, the trusted planning instruction, strict
+structured-output parsing, the capability catalog, and deterministic
 security preflight together into a single, testable function:
-select_tool() (Phase 90, Batch 2; contracts fixed by
-docs/phase_90_implementation_plan.md, Sections 25/26).
+select_tool() (Phase 90, Batches 2/3; contracts fixed by
+docs/phase_90_implementation_plan.md, Sections 25/26 and the Batch 3
+planning prompt).
 
 Responsibilities:
     - Own the one fixed, Jarvis-authored trusted planning instruction
       (Section 26.C) - never mixed into memory, ProjectState, or any
-      other untrusted ContextItem.
+      other untrusted ContextItem. Batch 3 extends it to describe both
+      model-selectable capabilities and explicitly forbids the
+      internal verifier from ever being offered.
     - Call the real, already-constructed AIRouter.route() directly
       (Section 26.C's own inspection finding: AIReasoningEngine.reason()
       hardcodes one shared system instruction with no field for a
@@ -19,28 +22,42 @@ Responsibilities:
       without touching any trust-boundary enforcement code).
     - Parse and validate the response via
       intelligence.structured_output.parse_tool_selection().
-    - For a valid "execute" decision: resolve the CapabilityAdapter,
-      confirm its real tool is still registered, build its
-      deterministic tool input, call the real tool's own action_for(),
-      classify it through the real SecurityManager, and require GREEN
-      before returning an executable StructuredPlan.
+    - For a valid "execute" decision naming a SINGLE_TOOL capability
+      (project_state_show): resolve the CapabilityAdapter, confirm its
+      real tool is still registered, build its deterministic tool
+      input, call the real tool's own action_for(), classify it
+      through the real SecurityManager, and require its preflight tier
+      to exactly match the catalog's declared max_execution_tier
+      before returning an executable, flat StructuredPlan.
+    - For a valid "execute" decision naming a TWO_STEP_WORKFLOW
+      capability (project_state_update_focus, Batch 3): perform the
+      same preflight for the write step (expecting exactly YELLOW),
+      additionally preflight the fixed internal verifier capability
+      (expecting exactly GREEN), and deterministically construct a
+      real, exactly-two-step planner.plan_models.Plan for the caller
+      to run through the real, unmodified WorkflowEngine. The AI never
+      selects, orders, or configures the verifier step - it is always
+      the second, fixed step of this one workflow shape.
     - For a valid "unsupported" decision: return that outcome directly,
       with no plan, no preflight, and no tool involvement of any kind.
 
 Does NOT:
-    - Call ToolExecutor.execute() or tool.run() itself. This module
-      only ever prepares a StructuredPlan for the caller (the
-      orchestrator) to execute through the real, unmodified
-      ToolExecutor - exactly the same division of responsibility
-      Batch 1 already established between intelligence/context.py
-      (assembly) and core/orchestrator.py (execution/response).
-    - Create an approval, retry, replan, or touch WorkflowEngine.
+    - Call ToolExecutor.execute(), WorkflowEngine.run()/resume(), or
+      tool.run() itself. This module only ever prepares a plan for the
+      caller (core/orchestrator.py) to execute through the real,
+      unmodified ToolExecutor/WorkflowEngine - exactly the same
+      division of responsibility Batch 1 already established between
+      intelligence/context.py (assembly) and core/orchestrator.py
+      (execution/response).
+    - Create an approval, retry, or replan. WorkflowEngine's own,
+      unmodified ApprovalManager integration is the sole approval
+      authority for the two-step workflow this module constructs.
     - Modify Batch 1's ContextAssembler, its budgets, or its
       memory-selection algorithm - this module only ever consumes an
       already-assembled AssembledContext, unchanged.
-    - Modify ai/reasoning_engine.py, ai/router.py, or
-      ai/prompt_builder.py. AIRouter is used exactly as already built,
-      through its existing, public route()/is_available() methods.
+    - Modify ai/reasoning_engine.py, ai/router.py, ai/prompt_builder.py,
+      workflow/engine.py, or planner/plan_models.py. AIRouter and
+      Plan/PlanStep are used exactly as already built.
 """
 
 from __future__ import annotations
@@ -57,6 +74,7 @@ from intelligence.capability_catalog import (
     CAPABILITY_CATALOG,
     CapabilityAdapter,
     CapabilityId,
+    ExecutionStrategy,
     build_tool_input,
 )
 from intelligence.context import AssembledContext, build_ai_context_block
@@ -65,31 +83,56 @@ from intelligence.structured_output import (
     ToolSelectionParseError,
     parse_tool_selection,
 )
-from security.security_manager import SecurityManager
+from planner.plan_models import Plan, PlanStep
+from security.security_manager import SecurityDecision, SecurityManager
 from tools.base_tool import ToolRequest
 from tools.registry import ToolRegistry
 
 #: The one fixed, Jarvis-authored trusted planning instruction (Section
-#: 26.C). Supplied only through AIRouter.route()'s own
-#: system_instruction parameter - never mixed into any ContextItem, and
-#: never derived from, or influenced by, memory or ProjectState text.
-#: Echoes both valid response shapes verbatim, per Section 26.C's own
-#: requirement that the trusted instruction include the exact two valid
-#: objects.
+#: 26.C; extended for Batch 3). Supplied only through AIRouter.route()'s
+#: own system_instruction parameter - never mixed into any ContextItem,
+#: and never derived from, or influenced by, memory or ProjectState
+#: text. Echoes both valid response shapes verbatim, per Section 26.C's
+#: own requirement that the trusted instruction include the exact two
+#: valid objects. Explicitly names project_state_verify_focus as
+#: internal-only and forbidden from ever being offered - the parser
+#: (intelligence/structured_output.py) independently enforces this too,
+#: so a model that ignores this instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly one capability is "
-    "available to you: capability id \"project_state_show\", which shows "
-    "the current manually-recorded Jarvis project state (branch, phase, "
-    "commit, test-suite result, focus). Select it only when showing that "
-    "record can satisfy the user's request below. Otherwise, you must "
-    "return the exact unsupported object.\n"
+    "You are Jarvis's tool-selection planner. Exactly two capabilities "
+    "are available to you:\n"
     "\n"
-    "Respond with exactly one of these two JSON objects, and nothing "
-    "else:\n"
+    '1. capability id "project_state_show" - shows the current '
+    "manually-recorded Jarvis project state (branch, phase, commit, "
+    "test-suite result, focus). Use this only when the request asks to "
+    "show or read the manually-maintained project state.\n"
     "\n"
-    "Execute:\n"
+    '2. capability id "project_state_update_focus" - updates only the '
+    "manually-maintained project state's focus field. Use this only "
+    "when the request explicitly asks to update the project state's "
+    "focus. Include the requested new focus text in "
+    'arguments.value (a non-empty string). This action requires your '
+    "explicit approval and will be verified with a structured read-back "
+    "after it runs.\n"
+    "\n"
+    'A third capability id, "project_state_verify_focus", exists only '
+    "internally - it is never a valid selection, is never selectable "
+    "through your output, and must never appear in your response under "
+    "any circumstances.\n"
+    "\n"
+    "If neither project_state_show nor project_state_update_focus can "
+    "satisfy the request, you must return the exact unsupported object.\n"
+    "\n"
+    "Respond with exactly one of these JSON objects, and nothing else:\n"
+    "\n"
+    "Execute (show):\n"
     '{"decision": "execute", "capability_id": "project_state_show", '
     '"arguments": {}}\n'
+    "\n"
+    "Execute (update focus):\n"
+    '{"decision": "execute", "capability_id": '
+    '"project_state_update_focus", "arguments": {"value": "the '
+    'requested new focus"}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'
@@ -112,8 +155,13 @@ class PlanningOutcomeKind(Enum):
     into a single generic result, so a caller can honestly distinguish
     each one (Section 26's own "AI enablement gate" requirement)."""
 
-    #: A valid "execute" decision, GREEN preflight passed - plan is set.
+    #: A valid "execute" decision selecting a SINGLE_TOOL capability,
+    #: preflight passed - `plan` is set.
     EXECUTABLE = "executable"
+    #: A valid "execute" decision selecting the TWO_STEP_WORKFLOW
+    #: capability (Batch 3), both steps' preflights passed -
+    #: `workflow_plan` is set, ready for WorkflowEngine.run().
+    EXECUTABLE_WORKFLOW = "executable_workflow"
     #: A valid "unsupported" decision - no plan, no tool involvement.
     UNSUPPORTED = "unsupported"
     #: The router's provider reported itself unavailable; route() was
@@ -121,7 +169,7 @@ class PlanningOutcomeKind(Enum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     #: route() itself raised (AIProviderError/ResponseValidationError).
     PROVIDER_FAILED = "provider_failed"
-    #: Parsing/validation failed, or the selected capability failed its
+    #: Parsing/validation failed, or a selected capability failed its
     #: registry/security preflight - detail carries a bounded reason.
     INVALID_OUTPUT = "invalid_output"
 
@@ -177,13 +225,19 @@ class PlanningOutcome:
 
     Attributes:
         kind: Which distinct outcome occurred.
-        plan: Set only when kind is EXECUTABLE.
+        plan: Set only when kind is EXECUTABLE - a flat, single-step
+            StructuredPlan for the caller to run directly through
+            ToolExecutor.
+        workflow_plan: Set only when kind is EXECUTABLE_WORKFLOW - a
+            real, exactly-two-step planner.plan_models.Plan for the
+            caller to run through WorkflowEngine.
         detail: A short, bounded, non-sensitive reason, set only when
             kind is INVALID_OUTPUT - never the raw model output.
     """
 
     kind: PlanningOutcomeKind
     plan: StructuredPlan | None = None
+    workflow_plan: Plan | None = None
     detail: str | None = None
 
 
@@ -262,29 +316,34 @@ def select_tool(
     assert parsed.capability_id is not None  # guaranteed for EXECUTE
     adapter = active_catalog[parsed.capability_id]
 
-    if not tool_registry.has_tool(adapter.tool_name):
-        return PlanningOutcome(
-            kind=PlanningOutcomeKind.INVALID_OUTPUT,
-            detail="the selected capability's tool is no longer registered",
-        )
-
-    tool = tool_registry.get_tool(adapter.tool_name)
-    assert tool is not None  # guaranteed by has_tool() above
-
-    tool_input = build_tool_input(adapter, parsed.arguments)
-    preflight_request = ToolRequest(
-        tool_name=adapter.tool_name, input_data=tool_input, session_id=session_id
+    preflight = _preflight_capability(
+        adapter,
+        arguments=parsed.arguments,
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
     )
-    action = tool.action_for(preflight_request)
-    preflight_decision = security_manager.classify_action(action)
+    if isinstance(preflight, str):
+        return PlanningOutcome(kind=PlanningOutcomeKind.INVALID_OUTPUT, detail=preflight)
+    tool_input, preflight_decision = preflight
 
-    if preflight_decision.tier is not SecurityTier.GREEN:
+    if adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW:
+        workflow_outcome = _build_update_focus_workflow_plan(
+            request_text,
+            tool_input=tool_input,
+            write_adapter=adapter,
+            write_tier=preflight_decision.tier,
+            tool_registry=tool_registry,
+            security_manager=security_manager,
+            session_id=session_id,
+            catalog=active_catalog,
+        )
+        if isinstance(workflow_outcome, str):
+            return PlanningOutcome(
+                kind=PlanningOutcomeKind.INVALID_OUTPUT, detail=workflow_outcome
+            )
         return PlanningOutcome(
-            kind=PlanningOutcomeKind.INVALID_OUTPUT,
-            detail=(
-                "the selected capability is not GREEN and cannot run "
-                "without approval"
-            ),
+            kind=PlanningOutcomeKind.EXECUTABLE_WORKFLOW, workflow_plan=workflow_outcome
         )
 
     step = StructuredPlanStep(
@@ -303,3 +362,160 @@ def select_tool(
         steps=(step,),
     )
     return PlanningOutcome(kind=PlanningOutcomeKind.EXECUTABLE, plan=plan)
+
+
+def _preflight_capability(
+    adapter: CapabilityAdapter,
+    *,
+    arguments: dict[str, object],
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+) -> tuple[dict[str, object], SecurityDecision] | str:
+    """Resolve, build input for, and preflight-classify one capability.
+
+    Shared by every capability this module ever preflights (the
+    directly-executed SINGLE_TOOL capability, and each step of the
+    TWO_STEP_WORKFLOW capability) - a single, reused implementation
+    rather than one copy per capability.
+
+    Args:
+        adapter: The capability's catalog entry.
+        arguments: The already-validated arguments to build tool input
+            from (empty for a capability that declares none).
+        tool_registry: Used only for has_tool()/get_tool().
+        security_manager: Used only for classify_action().
+        session_id: Optional session identifier, forwarded only into
+            the preflight ToolRequest - never executed.
+
+    Returns:
+        A tuple of (tool_input, preflight_decision) on success, where
+        preflight_decision.tier exactly matches
+        adapter.max_execution_tier. A short, bounded reason string on
+        any failure (unregistered tool, or a tier mismatch in either
+        direction) - never an exception, since this is an expected,
+        describable outcome, not a programming error.
+    """
+    if not tool_registry.has_tool(adapter.tool_name):
+        return "the selected capability's tool is no longer registered"
+
+    tool = tool_registry.get_tool(adapter.tool_name)
+    assert tool is not None  # guaranteed by has_tool() above
+
+    tool_input = build_tool_input(adapter, arguments)
+    preflight_request = ToolRequest(
+        tool_name=adapter.tool_name, input_data=tool_input, session_id=session_id
+    )
+    action = tool.action_for(preflight_request)
+    preflight_decision = security_manager.classify_action(action)
+
+    if preflight_decision.tier is not adapter.max_execution_tier:
+        return (
+            "the selected capability's real security classification "
+            f"({preflight_decision.tier.value}) does not match what is "
+            f"required ({adapter.max_execution_tier.value}) - refusing as "
+            "a safety mismatch"
+        )
+
+    return tool_input, preflight_decision
+
+
+def _build_update_focus_workflow_plan(
+    request_text: str,
+    *,
+    tool_input: dict[str, object],
+    write_adapter: CapabilityAdapter,
+    write_tier: SecurityTier,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> Plan | str:
+    """Deterministically construct the fixed, exactly-two-step Plan for
+    the update-focus-and-verify workflow (Batch 3).
+
+    The AI never selects, orders, or configures the verifier step: this
+    function always pairs PROJECT_STATE_UPDATE_FOCUS with the fixed
+    internal PROJECT_STATE_VERIFY_FOCUS capability, in this fixed order,
+    with no model-controlled data in step 2's input.
+
+    Args:
+        request_text: The verbatim natural request (becomes Plan.user_request).
+        tool_input: The write step's already-validated, already-built
+            tool input (``{"field": "focus", "value": ...}``).
+        write_adapter: PROJECT_STATE_UPDATE_FOCUS's catalog entry.
+        write_tier: The write step's real, already-confirmed preflight
+            tier (always YELLOW, per _preflight_capability's own check).
+        tool_registry: Used only for has_tool()/get_tool() for the
+            verifier capability.
+        security_manager: Used only for classify_action() for the
+            verifier capability.
+        session_id: Optional session identifier for the preflight
+            ToolRequest only.
+        catalog: The capability catalog to resolve the fixed verifier
+            capability from.
+
+    Returns:
+        A real, two-step Plan ready for WorkflowEngine.run(), or a
+        short, bounded failure reason string if the internal verifier
+        capability itself fails its own preflight (an internal
+        configuration problem, never exposed as if it were the user's
+        own mistake).
+    """
+    verify_adapter = catalog.get(CapabilityId.PROJECT_STATE_VERIFY_FOCUS)
+    if verify_adapter is None:
+        return "the internal verification capability is not configured"
+
+    verify_preflight = _preflight_capability(
+        verify_adapter,
+        arguments={},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(verify_preflight, str):
+        return f"internal verification capability preflight failed: {verify_preflight}"
+    verify_tool_input, verify_decision = verify_preflight
+
+    write_tool = tool_registry.get_tool(write_adapter.tool_name)
+    assert write_tool is not None  # guaranteed by the caller's own preflight
+    write_action = write_tool.action_for(
+        ToolRequest(
+            tool_name=write_adapter.tool_name,
+            input_data=tool_input,
+            session_id=session_id,
+        )
+    )
+    write_reason = security_manager.classify_action(write_action).reason
+
+    verify_tool = tool_registry.get_tool(verify_adapter.tool_name)
+    assert verify_tool is not None
+    verify_action = verify_tool.action_for(
+        ToolRequest(
+            tool_name=verify_adapter.tool_name,
+            input_data=verify_tool_input,
+            session_id=session_id,
+        )
+    )
+
+    steps = (
+        PlanStep(
+            number=1,
+            description=write_adapter.description,
+            action=write_action,
+            tier=write_tier,
+            reason=write_reason,
+            tool_name=write_adapter.tool_name,
+            tool_input=tool_input,
+        ),
+        PlanStep(
+            number=2,
+            description=verify_adapter.description,
+            action=verify_action,
+            tier=verify_decision.tier,
+            reason=verify_decision.reason,
+            tool_name=verify_adapter.tool_name,
+            tool_input=verify_tool_input,
+        ),
+    )
+    return Plan(user_request=request_text, steps=steps)

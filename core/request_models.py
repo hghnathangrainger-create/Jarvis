@@ -106,6 +106,17 @@ class JarvisResponse:
             steps WorkflowEngine.run()/resume() actually attempted, in
             order. Never a live or streaming feed: it reflects only what
             has already happened by the time the response was built.
+        intelligence_trace: A short, bounded, redacted trace for a Phase
+            90 intelligence-originated response (Batch 3) - empty for
+            every other response. At most one entry per real workflow
+            step actually attempted (at most 2 for the Batch 3 update-
+            focus-and-verify workflow), each at most 200 characters.
+            Never carries raw tool_input dictionaries, full memory or
+            ProjectState context, API keys, or exception internals -
+            only a step number, a non-secret capability/tool name, real
+            approval state, and (for a verification step) the
+            VerificationOutcome value. Purely additive: every existing
+            JarvisResponse caller retains the default empty tuple.
     """
 
     success: bool
@@ -119,3 +130,4 @@ class JarvisResponse:
     tool_input: dict[str, object] = field(default_factory=dict)
     ai_suggestion: str | None = None
     workflow_trace: tuple[WorkflowTraceStep, ...] = field(default_factory=tuple)
+    intelligence_trace: tuple[str, ...] = field(default_factory=tuple)

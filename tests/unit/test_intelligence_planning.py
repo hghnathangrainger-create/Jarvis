@@ -1,10 +1,12 @@
 """
 test_intelligence_planning.py
 
-Unit tests for intelligence/planning.py (Phase 90, Batch 2):
+Unit tests for intelligence/planning.py (Phase 90, Batches 2/3):
 select_tool(), the function tying the trusted planning instruction,
 the real AIRouter, the strict structured-output parser, the capability
-catalog, and the real SecurityManager preflight together.
+catalog, and the real SecurityManager preflight together. Batch 3 adds
+the deterministic two-step update-focus-and-verify workflow plan
+construction.
 
 These use a real AIRouter/PromptBuilder/ResponseValidator with a fake,
 in-memory AIProvider (no live Claude API call is ever made), a real
@@ -446,3 +448,276 @@ def test_no_direct_tool_run_call_anywhere_in_planning_module() -> None:
             real_calls.add(node.func.attr)
     assert "run" not in real_calls
     assert "execute" not in real_calls
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: deterministic two-step update-focus-and-verify workflow plan
+# ---------------------------------------------------------------------------
+
+
+class _FakeUpdateFocusTool(BaseTool):
+    """A test double for project_state_update - never actually runs in
+    any of these tests, since select_tool() only ever calls
+    action_for() during preflight."""
+
+    @property
+    def name(self) -> str:
+        return "project_state_update"
+
+    @property
+    def description(self) -> str:
+        return "test double for project_state_update"
+
+    def action_for(self, request: ToolRequest) -> str:
+        return "update jarvis project state"
+
+    def run(self, request: ToolRequest) -> ToolResult:
+        return self.ok("should never run")
+
+
+class _FakeVerifyFocusTool(BaseTool):
+    """A test double for project_state_verify - never actually runs in
+    any of these tests."""
+
+    @property
+    def name(self) -> str:
+        return "project_state_verify"
+
+    @property
+    def description(self) -> str:
+        return "test double for project_state_verify"
+
+    def action_for(self, request: ToolRequest) -> str:
+        return "show jarvis project state"
+
+    def run(self, request: ToolRequest) -> ToolResult:
+        return self.ok("should never run")
+
+
+def _registry_with_update_and_verify() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register_tool(_FakeUpdateFocusTool())
+    registry.register_tool(_FakeVerifyFocusTool())
+    return registry
+
+
+_UPDATE_FOCUS_EXECUTE_TEXT = json.dumps(
+    {
+        "decision": "execute",
+        "capability_id": "project_state_update_focus",
+        "arguments": {"value": "a new focus value"},
+    }
+)
+
+
+def test_update_focus_selection_produces_executable_workflow_outcome() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus to a new focus value",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE_WORKFLOW
+    assert outcome.plan is None
+    assert outcome.workflow_plan is not None
+
+
+def test_update_focus_workflow_plan_has_exactly_two_steps_in_fixed_order() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    plan = outcome.workflow_plan
+    assert len(plan.steps) == 2
+    assert plan.steps[0].tool_name == "project_state_update"
+    assert plan.steps[1].tool_name == "project_state_verify"
+    assert plan.steps[0].number == 1
+    assert plan.steps[1].number == 2
+
+
+def test_update_focus_workflow_plan_step_1_input_is_field_focus() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    step1 = outcome.workflow_plan.steps[0]
+    assert step1.tool_input == {"field": "focus", "value": "a new focus value"}
+
+
+def test_update_focus_workflow_plan_step_2_input_has_no_model_controlled_data() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    step2 = outcome.workflow_plan.steps[1]
+    assert step2.tool_input == {}
+
+
+def test_update_focus_workflow_plan_step_tiers_are_yellow_then_green() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    plan = outcome.workflow_plan
+    assert plan.steps[0].tier is SecurityTier.YELLOW
+    assert plan.steps[1].tier is SecurityTier.GREEN
+
+
+def test_update_focus_workflow_plan_goal_is_the_verbatim_request() -> None:
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="please update my focus to something new",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.workflow_plan.user_request == "please update my focus to something new"
+
+
+def test_update_focus_workflow_has_no_third_step_possible() -> None:
+    """There is no mechanism anywhere for a third step to be added -
+    the plan is always exactly two PlanSteps, hardcoded."""
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    assert len(outcome.workflow_plan.steps) == 2
+
+
+def test_update_focus_forced_yellow_to_green_mismatch_is_invalid_output() -> None:
+    """If the write step's real preflight classification unexpectedly
+    comes back GREEN instead of the required YELLOW, this is a safety
+    mismatch, not a fortunate downgrade - refused, not silently
+    accepted."""
+
+    class _AlwaysGreenUpdateTool(BaseTool):
+        @property
+        def name(self) -> str:
+            return "project_state_update"
+
+        @property
+        def description(self) -> str:
+            return "forced-green test double"
+
+        def action_for(self, request: ToolRequest) -> str:
+            return "show jarvis project state"  # GREEN, not the real YELLOW action
+
+        def run(self, request: ToolRequest) -> ToolResult:
+            return self.ok("should never run")
+
+    registry = ToolRegistry()
+    registry.register_tool(_AlwaysGreenUpdateTool())
+    registry.register_tool(_FakeVerifyFocusTool())
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=registry,
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.workflow_plan is None
+    assert "safety mismatch" in outcome.detail
+
+
+def test_update_focus_forced_red_write_is_invalid_output() -> None:
+    class _AlwaysRedUpdateTool(BaseTool):
+        @property
+        def name(self) -> str:
+            return "project_state_update"
+
+        @property
+        def description(self) -> str:
+            return "forced-red test double"
+
+        def action_for(self, request: ToolRequest) -> str:
+            return "forget all memories"  # RED
+
+        def run(self, request: ToolRequest) -> ToolResult:
+            return self.ok("should never run")
+
+    registry = ToolRegistry()
+    registry.register_tool(_AlwaysRedUpdateTool())
+    registry.register_tool(_FakeVerifyFocusTool())
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=registry,
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.workflow_plan is None
+
+
+def test_update_focus_internal_verifier_preflight_mismatch_is_invalid_output() -> None:
+    """If the internal verifier's own preflight unexpectedly fails
+    (e.g. its tool is missing), this is reported as an internal
+    configuration problem, not exposed as the user's own mistake."""
+    registry = ToolRegistry()
+    registry.register_tool(_FakeUpdateFocusTool())
+    # project_state_verify deliberately not registered.
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=registry,
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.workflow_plan is None
+
+
+def test_update_focus_context_ids_are_not_populated_on_flat_structured_plan() -> None:
+    """The two-step workflow uses workflow_plan (a real planner.plan_models.Plan,
+    which has no context_ids_supplied field at all) - not the flat
+    StructuredPlan used by project_state_show."""
+    router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="update my focus",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    assert not hasattr(outcome.workflow_plan, "context_ids_supplied")
+
+
+def test_no_retry_or_replan_fields_on_workflow_plan_steps() -> None:
+    import dataclasses
+
+    from planner.plan_models import PlanStep
+
+    field_names = {f.name for f in dataclasses.fields(PlanStep)}
+    assert "max_retries" not in field_names
+    assert "max_replans" not in field_names
+    assert "retry_count" not in field_names
