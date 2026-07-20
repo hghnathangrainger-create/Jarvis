@@ -1,8 +1,8 @@
 # Jarvis — Phase 92 Implementation Plan
 
-**Status:** Planning gate — awaiting explicit approval before Batch 1 begins. Amended twice: §18 extended the grounding contract from capability selection alone to also cover model-supplied executable string arguments (via whole-request significant-term attribution); §19 replaces §18's domain-keyword-only capability grounding and whole-request significant-term argument attribution with capability-specific action-and-domain intent signatures and capability-specific argument-span extraction, after both were found on further inspection to be individually unsafe. Sections 1-17 are preserved as the original planning record; §18 is preserved as the record of the first amendment but its capability-grounding and argument-attribution design is **superseded by §19**; read §19 as the current, authoritative design for those two mechanisms.
+**Status:** Planning gate — awaiting explicit approval before Batch 1 begins. Amended three times: §18 extended the grounding contract from capability selection alone to also cover model-supplied executable string arguments (via whole-request significant-term attribution); §19 replaced §18's domain-keyword-only capability grounding and whole-request significant-term argument attribution with capability-specific action-and-domain intent signatures and capability-specific argument-span extraction; §20 corrects a remaining signature defect in §19 (`MEMORY_LIST_RECENT` treated the recency modifiers `"recent"`/`"recently"` as action evidence, which they are not) and finalizes every previously-approximate rule — the catalogue-wide uniqueness check, the exact six-capability signature table, the collision matrix, the exact terminal-punctuation policy, the exact negation-marker list and normalization, and the final disposition of the `"and confirm it"` suffix rule (dropped, in favor of a fixture wording update). Sections 1-17 are the original planning record; §18 and §19 are preserved as the record of prior amendments, but **§20 is the current, sole authoritative source** for the capability-grounding and argument-attribution design — where §20 differs from §18/§19, §20 governs.
 **Version:** Phase 92 — Intelligence Core V1 Next-Milestone Planning Gate
-**Date:** 2026-07-20 (original); amended 2026-07-20; amended again 2026-07-20
+**Date:** 2026-07-20 (original); amended 2026-07-20; amended again 2026-07-20; finalized 2026-07-20
 
 ---
 
@@ -545,4 +545,207 @@ Every mechanism in this section — the negation gate, the action-and-domain sig
 - Stop and report before implementing if either real `MEMORY_SEARCH` value/request pairing, or the `PROJECT_STATE_UPDATE_FOCUS` pairings after their disclosed §19.7 fixture updates, cannot satisfy the §19.4/§19.5 extraction-and-comparison rule without a false refusal.
 - Stop and report if the negation-marker list (§19.6) is found, during Batch 1 implementation, to false-trigger on any currently-accepted real phrasing — none were found during this planning pass, but this must be re-confirmed against the real fixture strings at implementation time.
 - Stop and report, and propose a smaller safe Phase 92 design instead, if capability-specific argument-span extraction is found during Batch 1 to require anything beyond a small, fixed, per-capability marker-splitting rule — in particular, do not expand this into a general natural-language span parser under any circumstances.
+- Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
+
+---
+
+## 20. Final Planning Correction — Exact Intent Signatures and Collision Proof
+
+**Sections 1-17 are the original planning record. §18 and §19 are preserved as the record of prior amendments. This section is the current, sole authoritative source for capability-grounding and argument-attribution design; where it differs from §18/§19, this section governs.**
+
+### 20.1 The remaining defect in §19's `MEMORY_LIST_RECENT` signature
+
+§19.3 accepted `"recent"`/`"recently"`/`"list"` as interchangeable action evidence for `MEMORY_LIST_RECENT`. `"recent"`/`"recently"` are recency **modifiers**, not actions — they describe *which* memories, never *what to do* with them. Concretely: **"Search memories for recent work."** contains a memory-domain word (`"memories"`) and `"recent"`, and under §19.3 this combination alone satisfied `MEMORY_LIST_RECENT`'s signature — even though the request's real action word, `"search"`, unambiguously asks for `MEMORY_SEARCH`. A model mistakenly selecting `MEMORY_LIST_RECENT` for this request would have passed §19.3's grounding check. This section corrects the signature to require a genuine listing/display action word, independent of and in addition to the recency qualifier.
+
+### 20.2 Exact final six-capability signature table
+
+Each capability requires **all** of: (1) action evidence, (2) domain evidence, and (3) any listed qualifier — every dimension independently, never substituting for one another. No `"e.g."` shorthand is used below; every phrasing listed is a real string this repository currently accepts or already ships as instructional text (sources given in §20.2.1).
+
+**1. `PROJECT_STATE_SHOW`**
+1. Required action token: `"show"`.
+2. Required domain phrase: `"project state"`, matched only as an adjacent, normalized substring — never `"project"` or `"state"` independently.
+3. Required qualifier: none.
+4. Prohibited collision: must not be satisfied by any request whose action token is `"update"` (that is `PROJECT_STATE_UPDATE_FOCUS`'s own signature) merely because the word `"project"` or `"state"` appears without the adjacent phrase.
+5. Exact existing phrasings satisfying it: `"show my project state"`; `"show my project state please"`.
+
+**2. `PROJECT_STATE_UPDATE_FOCUS`**
+1. Required action token: `"update"`.
+2. Required domain token: `"focus"`.
+3. Required qualifier: none.
+4. Prohibited collision: must not be satisfied merely by the presence of `"focus"` without `"update"` (this is exactly the "Show me the current project focus" case — `"focus"` present, `"update"` absent → not grounded here); must not itself satisfy `PROJECT_STATE_SHOW`'s signature (it contains no `"show"` and no adjacent `"project state"` phrase — real phrasings say "project **focus**," never "project **state**").
+5. Exact existing phrasings satisfying it: `"update my project focus to batch 3 verification"` (§20.7 fixture wording, suffix removed); `"update my focus to a new focus value"`; `"please update my focus to something new"` (paired, after §20.7's fixture-consistency pass, with a value matching its own extracted span).
+
+**3. `HEALTH_CHECK`**
+1. Required action token: `"check"`.
+2. Required domain token: `"health"` or `"status"` (`"status"` is real, shipped `_TRUSTED_PLANNING_INSTRUCTION` text — "asks about Jarvis's health **or status**" — not test-evidenced but not invented either).
+3. Required qualifier: none.
+4. Prohibited collision: must not be satisfied by a request whose domain token is `"schedule"`/`"schedules"` (that is `SCHEDULE_LIST`'s own domain) even though both capabilities may share the generic action word `"check"`/`"show"`/`"list"` in isolation.
+5. Exact existing phrasing satisfying it: `"check jarvis's health"`.
+
+**4. `SCHEDULE_LIST`**
+1. Required action token: `"show"` or `"list"` (`"list"` is real, shipped instruction text — "asks to see or **list** schedules").
+2. Required domain token: `"schedule"` or `"schedules"`.
+3. Required qualifier: none.
+4. Prohibited collision: must not be satisfied by a request whose domain token is `"health"`/`"status"` (`HEALTH_CHECK`'s own domain); must not itself satisfy `PROJECT_STATE_SHOW`'s signature merely because both use `"show"` (`PROJECT_STATE_SHOW` additionally requires the adjacent `"project state"` phrase, which `"show my schedules"` does not contain).
+5. Exact existing phrasing satisfying it: `"show my schedules"`.
+
+**5. `MEMORY_LIST_RECENT`** (corrected, §20.1)
+1. Required action token: `"show"` or `"list"` (real, shipped instruction text — "asks to see or **list** recently stored memories"; `"see"` is also shipped text but is deliberately excluded from the accepted-token set here, since as a single common word it carries a materially higher false-positive risk than `"show"`/`"list"` and is not needed once the fixture wording change in §20.7 is applied).
+2. Required domain token: `"memory"`, `"memories"`, `"remember"`, or `"remembered"`.
+3. **Required qualifier: `"recent"` or `"recently"`** — mandatory, in addition to (never instead of) the action token above. This is the corrected dimension: recency is necessary evidence, but is never by itself sufficient action evidence.
+4. Prohibited collision: must not be satisfied by a request whose action token is `"search"`/`"find"` (that is `MEMORY_SEARCH`'s own signature) merely because a recency word or a shared domain word is also present — e.g. `"Search memories for recent work"` contains the domain word and the recency qualifier, but contains neither `"show"` nor `"list"`, so it fails this signature's action requirement and is correctly **not** grounded here.
+5. Exact existing phrasing: **none currently satisfies the corrected signature as written** — see §20.7 for the required, disclosed fixture wording change (`"what have I asked you to remember recently"` → `"show me what I've asked you to remember recently"`), after which that phrasing satisfies it (`"show"` + `"remember"` + `"recently"`).
+
+**6. `MEMORY_SEARCH`**
+1. Required action token: `"search"` or `"find"` (both real, shipped instruction text — "asks to **search or find** stored memories"; the real test uses `"search"`).
+2. Required domain token: `"memory"` or `"memories"`.
+3. Required qualifier: none.
+4. Prohibited collision: must not be satisfied by a request whose action token is `"show"`/`"list"` with a `"recent"`/`"recently"` qualifier (`MEMORY_LIST_RECENT`'s own signature) merely because the shared domain word is present — e.g. `"Show recent memories"` contains `"show"`, `"recent"`, and `"memories"`, but contains no `"search"`/`"find"`, so it fails this signature's action requirement and is correctly **not** grounded here.
+5. Exact existing phrasings satisfying it: `"search my memories for the deployment checklist"`; `"search my memories for deployment checklist"`; `"search my memories for x"`.
+
+#### 20.2.1 Evidence sources
+
+Identical to §19.3.1: every action/domain token above is sourced either from a real, currently-passing test's literal `request_text`, or from the real, already-shipped `_TRUSTED_PLANNING_INSTRUCTION` string in `intelligence/planning.py` (both re-quoted verbatim in §19.3.1 and re-verified during this pass). No token was added that is not traceable to one of these two sources.
+
+### 20.3 Catalogue-wide uniqueness rule
+
+Grounding evaluates the live `request_text` against **all six** signatures above, not only the one the model selected, in this exact order:
+
+1. Run the negation/conflict gate (§20.6) once, against the whole request, independent of any capability. If it triggers, refuse immediately (detail: `negated_or_conflicting_request`) — no signature is evaluated.
+2. Evaluate every one of the six signatures in §20.2 independently against `request_text`, and collect the set of capability ids whose full signature (action + domain + qualifier, where required) is satisfied.
+3. If this set is **empty**, refuse (detail: `no_signature_matched`).
+4. If this set has **more than one member**, refuse (detail: `multiple_signatures_matched`) — **even if the model-selected capability is one of the matched members.** A request that is genuinely ambiguous between two real capabilities is never resolved by trusting the model's own choice among them.
+5. If this set has **exactly one member** and it is **not equal** to the model-selected `capability_id`, refuse (detail: `selected_capability_not_unique_match`).
+6. Otherwise (exactly one member, equal to the model's selection): proceed to argument-span extraction/attribution (§20.4) if the capability declares a string argument, else proceed directly to the existing `_preflight_capability()`.
+
+Direct re-verification (§20.2, per-capability item 5, and the collision matrix in §20.5) confirms every real, currently-accepted phrasing for all six capabilities — after the one disclosed §20.7 fixture change — produces a set of size exactly one, equal to its own intended capability, so this rule introduces no new false refusal beyond that one disclosed change.
+
+### 20.4 Exact argument-span extraction rules (final)
+
+Unchanged in mechanism from §19.4 except for the removal of the `"and confirm it"` special case (§20.7). Applies only after the capability has already passed the uniqueness rule (§20.3) as the unique, matching, model-selected capability.
+
+**`MEMORY_SEARCH`**:
+1. The one accepted search marker, supported by every real phrasing, is `" for "` (case-insensitive).
+2. If `" for "` occurs **exactly once**, the candidate span is the trimmed text after it.
+3. **Reject** (detail: `ambiguous_argument_span`) if the marker occurs **zero** times or **more than once**.
+4. **Reject** (same detail) if the extracted candidate span, after trimming, is **empty**.
+5. **Reject** (same detail) if the candidate span contains the space-padded substring `" or "` (a disjunction/conflict signal within the span itself — see §20.6).
+6. Otherwise, compare the model-supplied `value` to the candidate span under the exact normalization-and-equality rule (§20.5-adjacent; see below). Equal → **accept**, original validated value passes through unchanged. Not equal → **reject** (detail: `argument_value_mismatch`).
+
+**`PROJECT_STATE_UPDATE_FOCUS`**:
+1. The one accepted focus-value marker, supported by every real phrasing, is `" to "` (case-insensitive).
+2. If `" to "` occurs **exactly once**, the candidate span is the trimmed text after it.
+3. **Reject** (detail: `ambiguous_argument_span`) if the marker occurs zero or more than once.
+4. **Reject** (same detail) if the extracted candidate span, after trimming, is empty.
+5. **Reject** (same detail) if the candidate span contains the space-padded substring `" or "`.
+6. No suffix stripping of any kind is applied (the `"and confirm it"` exception is dropped — §20.7). Otherwise, compare the model-supplied `value` to the candidate span under the exact normalization-and-equality rule below. Equal → accept, unchanged. Not equal → reject (detail: `argument_value_mismatch`).
+
+Neither rule ever falls back to a partial match, a second marker, or a best-effort guess — a request not shaped exactly as above for its capability is refused, never approximately parsed.
+
+### 20.5 Terminal punctuation policy (final)
+
+**Inspection finding**: no currently-accepted request phrasing, in any test, ends with terminal sentence punctuation (`.`, `!`, `?`) — every real `request_text` string in this repository is a bare phrase with no trailing punctuation. Terminal punctuation is therefore not required for compatibility with any existing test.
+
+**Chosen rule** (the narrow-stripping option, chosen for forward-looking real-usage robustness rather than test compatibility, since a real user typing a request at a keyboard commonly ends a sentence with punctuation while a model's own extracted argument value typically does not): before the exact-equality comparison (§20.4), strip **at most one** trailing character from the end of *both* the candidate span and the model-supplied value, if and only if that trailing character is one of exactly `.`, `!`, `?`. No other punctuation (commas, colons, semicolons, quotation marks, parentheses) is ever stripped, from either end, at any position. This is applied identically to both sides being compared, after casefolding and internal-whitespace collapsing, before the final equality check.
+
+**Compatibility consequence**: none for any currently-accepted phrasing (confirmed by the inspection finding above — no real fixture is affected either way by this rule, since none currently has trailing punctuation to strip). This rule only matters for future real-world requests that do include terminal punctuation.
+
+**Required tests**: a candidate span ending in exactly one of `.`/`!`/`?`, paired with a model value that omits it, is accepted; a candidate span or value containing internal (non-terminal) punctuation is compared unchanged (rejected if it differs); a candidate span with two consecutive terminal characters (e.g. `"...checklist?!"`) has only the single trailing character stripped, and the remaining terminal character causes the two sides to be compared as still containing it (so both sides must agree on whatever remains).
+
+### 20.6 Exact negation-marker list and normalization (final)
+
+**Normalization applied before matching**: casefold; replace the curly apostrophe `’` (U+2019) with the straight apostrophe `'` (U+0027); collapse runs of whitespace to a single space; strip leading/trailing whitespace; then pad with exactly one leading and one trailing space for the whole-word checks below.
+
+**Whole-word markers** (matched as the padded substring `" <word> "`, so they can never trigger on a word that merely contains the same letters without a surrounding space on both sides):
+- `" not "` — catches the standalone word `"not"` in any position, and therefore also catches every multi-word construction that contains `"not"` as its own word: `"do not"`, `"does not"`, `"is not"`, `"will not"`, `"can not"`, `"should not"`, etc. Does **not** match inside `"notebook"` or `"notice"` (no space immediately follows `"not"` in either word).
+- `" never "` — catches the standalone word `"never"`. Does **not** match inside `"whenever"` or `"nevertheless"` (in both words, `"never"`'s letters are not bounded by spaces on both sides once the whole word is padded).
+
+**Contraction substrings** (matched as a direct substring of the casefolded, apostrophe-normalized text — safe without padding, since the apostrophe itself is a sufficiently distinctive boundary): `"don't"`, `"doesn't"`, `"isn't"`, `"won't"`, `"can't"`.
+
+**Fixed single-word/phrase substrings** (safe as direct substrings; `"cannot"` is checked separately from `" not "` because it has no internal space for that check to find): `"cannot"`, `"instead of"`, `"rather than"`, `"but not"`.
+
+**Required tests** (directly satisfying every case named in the task): `"not"` triggers as an independent word; `"do not"` triggers (via the `" not "` whole-word check); `"don't"` triggers; `"don't"` with a curly apostrophe (`"don’t"`) triggers once normalized; `"never"` triggers; `"instead of"` triggers; `"notebook"` and `"notice"` do **not** trigger merely because they contain the letters "not".
+
+**Deliberate conservative limitation, documented**: a legitimate, literal memory-search value that itself happens to contain one of these markers (for example, searching for a note whose real content includes the word "never") may be refused in Phase 92 V1 and require simpler restatement. No quotation-parsing, clause-boundary detection, or general negation understanding is attempted — this is an accepted, disclosed, intentionally conservative limitation of V1, not an oversight.
+
+### 20.7 Final decision on the `"and confirm it"` suffix rule: dropped
+
+**Investigation**: the phrase `"and confirm it"` has no functional or parsing significance anywhere in the live production code or live user-facing documentation — `docs/user_guide.md` and `tools/builtin/help_tool.py` (the current, authoritative user-facing docs) never mention it as required or suggested phrasing. Its only appearances are: (a) historical, frozen `docs/phase_90_implementation_plan.md` illustrative example text (never a literal grammar requirement — the actual verification behavior runs automatically regardless of the request's exact wording), and (b) the one literal test fixture `_REQUEST` constant in `tests/unit/test_orchestrator_update_focus_workflow.py`. It exists only to preserve that one fixture's artificial wording and has no real supported user-facing value.
+
+**Decision**: the suffix-stripping exception is **dropped entirely** from the production design (§20.4 above no longer strips anything). Instead, Batch 1 will update the `_REQUEST` constant to remove the trailing clause — e.g. `_REQUEST = "ask jarvis to: update my project focus to batch 3 verification"` — and pair every test using it with a model-supplied value that exactly equals its own extracted span (`"batch 3 verification"`), per the same mechanical, disclosed fixture-consistency work already required by §19.7. This keeps the production span-extraction rule uniform and free of any bespoke, historically-motivated special case.
+
+**Required tests confirming the design contains no such exception**: a candidate span that happens to contain the words "and confirm it" *internally* (not as the request's own trailing clause, but genuinely part of the requested focus text) is compared unchanged — no stripping occurs anywhere, at any position, under any condition; a request built by appending arbitrary extra trailing text after the real focus value (with or without "and confirm it") is refused as an exact-equality mismatch, exactly like any other non-matching span, since there is no longer any suffix-specific handling to interact with it.
+
+### 20.8 Collision matrix
+
+All of the following are direct consequences of §20.2's signature table and §20.3's uniqueness rule, individually re-verified during this pass:
+
+**Project State**
+- A project-state read request (`"show my project state"`) grounds `PROJECT_STATE_SHOW` only — it contains no `"update"` and cannot satisfy `PROJECT_STATE_UPDATE_FOCUS`.
+- A focus-update request (`"update my project focus to batch 3 verification"`) grounds `PROJECT_STATE_UPDATE_FOCUS` only — it contains no `"show"` and no adjacent `"project state"` phrase, so it cannot satisfy `PROJECT_STATE_SHOW`.
+- `"Show the current project focus"` satisfies neither signature (`"show"` present but `"update"` absent for the update capability; `"show"` present but the adjacent `"project state"` phrase absent for the show capability) — refused as `no_signature_matched`, not a regression (§19.7/§20.2 item 5).
+- An update request cannot ground the show capability merely because it mentions "project" — the show signature requires the literal adjacent phrase `"project state"`, which no real update-focus phrasing contains (they all say "project **focus**").
+
+**Memory**
+- A recent-memory listing request (post-§20.7 fixture wording: `"show me what I've asked you to remember recently"`) grounds `MEMORY_LIST_RECENT` only — it contains no `"search"`/`"find"`.
+- A memory-search request (`"search my memories for the deployment checklist"`) grounds `MEMORY_SEARCH` only — it contains no `"show"`/`"list"` action token paired with a recency qualifier (and no recency qualifier at all).
+- `"Search memories for recent work"` cannot ground `MEMORY_LIST_RECENT` (no `"show"`/`"list"` action token present — `"search"` is not an accepted action token for that capability) — it grounds `MEMORY_SEARCH` only.
+- `"Show recent memories"` cannot ground `MEMORY_SEARCH` (no `"search"`/`"find"` present) — it grounds `MEMORY_LIST_RECENT` only (`"show"` + `"memories"` + `"recent"`, all three dimensions present).
+- `"memory"`, `"memories"`, `"recent"`, `"show"`, `"list"`, `"search"`, or `"find"` alone (without their required paired evidence) grounds neither capability — each signature requires action **and** domain (**and**, for `MEMORY_LIST_RECENT`, the recency qualifier) together.
+
+**Health and Schedules**
+- A health request (`"check jarvis's health"`) cannot ground `SCHEDULE_LIST` (no `"schedule"`/`"schedules"` domain token).
+- A schedule-list request (`"show my schedules"`) cannot ground `HEALTH_CHECK` (no `"health"`/`"status"` domain token).
+- The shared generic words `"show"`, `"check"`, `"list"`, or `"status"` are each insufficient alone — every signature in §20.2 also requires its own specific domain token, which these generic words never supply by themselves.
+
+### 20.9 Updated outcome details
+
+`PlanningOutcomeKind.UNGROUNDED_SELECTION` remains the single, shared public outcome kind. Its bounded, internal `detail` string now distinguishes exactly six cases (supersedes §19.8's four):
+
+1. `negated_or_conflicting_request` (§20.6, checked first).
+2. `no_signature_matched` (§20.3 step 3).
+3. `multiple_signatures_matched` (§20.3 step 4).
+4. `selected_capability_not_unique_match` (§20.3 step 5).
+5. `ambiguous_argument_span` (§20.4 — zero/multiple markers, empty span, or an internal disjunction).
+6. `argument_value_mismatch` (§20.4 — exactly one span extracted, but the model's value does not equal it).
+
+No detail string ever includes the raw request text, the candidate span, the rejected value, retrieved context, or model reasoning — each is a short, fixed, non-sensitive category label only, exactly mirroring `ToolSelectionParseError.reason`'s existing convention. The public, Batch-2-constructed refusal message stays simple and generic per category and never exposes parser internals.
+
+### 20.10 Compatibility impact (final)
+
+- **Zero impact** for `PROJECT_STATE_SHOW`, `PROJECT_STATE_UPDATE_FOCUS`'s capability-selection grounding (as opposed to its argument fixtures, below), `HEALTH_CHECK`, `SCHEDULE_LIST`, and `MEMORY_SEARCH` — every real, currently-tested phrasing satisfies its corrected signature and is the unique catalogue-wide match.
+- **One disclosed compatibility restriction, `MEMORY_LIST_RECENT`**: the sole existing test phrasing, `"what have I asked you to remember recently"`, does not satisfy the corrected signature (no listing/display action token). Batch 1 must update this fixture's wording to `"show me what I've asked you to remember recently"` (or an equivalent phrasing containing `"show"`/`"list"`), preserving the test's assertion and intent unchanged — this is a required, disclosed, mechanical fixture edit, not a silent behavior change.
+- **Larger, already-disclosed `PROJECT_STATE_UPDATE_FOCUS` argument-fixture work** (from §19.7, unchanged by this section except that the target span no longer includes "and confirm it"): most existing update-focus tests pair a fake model value with a `request_text` that does not contain it; Batch 1 must make each pairing mutually consistent.
+- **One deliberate new restriction, already named in §19.7 and reconfirmed here**: the task's own illustrative "Show me the current project focus" phrasing was never a previously-accepted phrasing and is now refused as `no_signature_matched` — judged safe and correct, not a regression.
+- No other currently-accepted phrasing is restricted by any rule in this section.
+
+### 20.11 Updated required tests
+
+In addition to every test already specified in §19.10 (superseded only where this section's exact rules differ — the `MEMORY_LIST_RECENT` signature, the dropped suffix exception, and the punctuation/negation specifics), the final plan requires:
+
+1. Every currently-accepted phrasing (post-§20.7 fixture update) produces a catalogue-wide signature-match set of size exactly one, equal to its own real capability.
+2. The model-selected `capability_id` is proven required to equal that unique match — a test forcing a mismatch (fake model selects capability A, but only capability B's signature matches) is refused (detail: `selected_capability_not_unique_match`), even though capability A's own signature, checked in isolation, would have matched.
+3. A request matching zero signatures is refused (detail: `no_signature_matched`).
+4. A constructed request matching more than one signature is refused (detail: `multiple_signatures_matched`), even when the model's selection is one of the matched capabilities.
+5. `"Search memories for recent work"` does not ground `MEMORY_LIST_RECENT`.
+6. `"Show recent memories"` does not ground `MEMORY_SEARCH`.
+7. A genuine read request does not ground any write capability (`PROJECT_STATE_UPDATE_FOCUS`).
+8. A genuine write request does not ground `PROJECT_STATE_SHOW`.
+9. `"not"` triggers negation as an independent word; `"do not"`, `"don't"`, `"don’t"` (curly apostrophe), `"never"`, and `"instead of"` each trigger.
+10. `"notebook"` and `"notice"` do not trigger negation.
+11. The exact requested argument span is accepted for both `MEMORY_SEARCH` and `PROJECT_STATE_UPDATE_FOCUS`.
+12. A wrong, expanded, old/superseded, rejected-alternative, or negated value is rejected for both capabilities.
+13. Terminal punctuation is handled exactly per §20.5 (single trailing `.`/`!`/`?` stripped from both sides only; nothing else stripped anywhere).
+14. The `"and confirm it"` suffix is never specially handled: internal occurrences of similar wording are compared unchanged, and extra trailing text of any kind causes a mismatch refusal.
+15. Every refusal category (all six in §20.9) produces zero `SecurityManager` preflight, zero `ApprovalManager.create_request()`, zero `ToolExecutor.execute()`, zero verifier call, zero write, and zero memory-result exposure.
+16. All currently-accepted, real Phase 90/91 request phrasings remain accepted after the one disclosed `MEMORY_LIST_RECENT` fixture-wording change (§20.10) — no other compatibility restriction exists.
+
+### 20.12 Updated stop conditions (final, supersedes §19.12)
+
+- Stop and report before implementing if, after the §20.7 `MEMORY_LIST_RECENT` fixture wording change, any currently-accepted real phrasing for any of the six capabilities still cannot satisfy its exact §20.2 signature, or produces a catalogue-wide match set other than the single, correct capability.
+- Stop and report if the negation-marker list (§20.6) is found, during Batch 1, to false-trigger on any real, currently-accepted phrasing (none were found in this planning pass).
+- Stop and report, and propose a smaller safe Phase 92 design, if any capability's action, domain, or qualifier evidence cannot be represented as a small, fixed token/phrase set without inventing unproven synonyms.
+- Stop and report if argument-span extraction for either `MEMORY_SEARCH` or `PROJECT_STATE_UPDATE_FOCUS` is found to require anything beyond the single fixed marker, single-occurrence rule in §20.4 — never expand into general natural-language parsing.
+- Stop and report if punctuation or suffix handling is found to require anything beyond the single, narrow, two-sided terminal-character rule in §20.5 — never introduce broad punctuation normalization.
+- Stop and report if any part of this design is found to require a probabilistic, learned, or similarity-scored judgment of any kind — the entire contract must remain deterministic string/token/substring logic only.
 - Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
