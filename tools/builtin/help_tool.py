@@ -171,10 +171,11 @@ _HELP_LINES: tuple[str, ...] = (
     "(requires your explicit approval, then a structured read-back checks "
     "the stored value matches - verification can fail or be unavailable and "
     "is always reported honestly, never assumed). May honestly report that "
-    "no supported capability can satisfy your request. Zero retries, zero "
-    "replans, no arbitrary tool access, no autonomous behavior - a real "
-    "result is only ever shown after the real, unmodified tool actually "
-    "runs.",
+    "no supported capability can satisfy your request, or ask you to "
+    "restate an ambiguous, conflicting, or unconfirmable request more "
+    "directly. Zero retries, zero replans, no arbitrary tool access, no "
+    "autonomous behavior - a real result is only ever shown after the "
+    "real, unmodified tool actually runs.",
 )
 
 

@@ -939,6 +939,21 @@ def test_ask_jarvis_to_handler_never_touches_workflow_engine_or_approvals() -> N
     assert "subprocess" not in source
 
 
+def test_advisory_ask_jarvis_handler_never_calls_select_tool_or_grounding() -> None:
+    """Phase 92, Batch 2: the executable grounding contract
+    (intelligence.planning.select_tool(), which internally calls
+    intelligence.grounding.ground_decision()) is used solely by the
+    executing "ask jarvis to:" handler - the advisory-only "ask
+    jarvis:" handler never calls it, so advisory answers can never
+    execute a tool through this or any other path."""
+    from core.orchestrator import JarvisOrchestrator
+
+    source = inspect.getsource(JarvisOrchestrator._handle_ask_jarvis_request)
+    assert "select_tool(" not in source
+    assert "ground_decision(" not in source
+    assert "ToolExecutor" not in source
+
+
 # --- Phase 92, Batch 1: grounding refusal zero-side-effect tests (EXECUTABLE path) --
 
 
@@ -1014,3 +1029,178 @@ def test_grounded_health_check_is_unaffected_by_the_grounding_addition() -> None
 
     assert response.success is True
     assert len(_tool_call_events(logger)) == 1
+
+
+# --- Phase 92, Batch 2: two-category public refusal-message mapping and end-to-end scenarios --
+
+
+def test_ungrounded_message_mapping_is_exhaustive_and_exactly_two_valued() -> None:
+    """Every one of the seven real UngroundedReason values (never a
+    hardcoded duplicate list) maps to exactly one of the two public
+    messages - never a third, per-reason message, and never an
+    unmapped reason."""
+    from core.orchestrator import (
+        _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE,
+        _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE,
+        _ask_jarvis_to_ungrounded_message,
+    )
+    from intelligence.grounding import UngroundedReason
+
+    mapped_messages = {
+        _ask_jarvis_to_ungrounded_message(reason.value) for reason in UngroundedReason
+    }
+
+    assert mapped_messages == {
+        _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE,
+        _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE,
+    }
+
+
+def test_public_refusal_messages_expose_no_internal_mechanics() -> None:
+    """Neither public message names an internal reason code, mentions
+    signatures/spans/parsing, or otherwise exposes implementation
+    detail - both are short, generic, actionable sentences."""
+    from core.orchestrator import (
+        _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE,
+        _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE,
+    )
+
+    for message in (
+        _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE,
+        _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE,
+    ):
+        lowered = message.lower()
+        for forbidden in (
+            "signature",
+            "span",
+            "enum",
+            "reason",
+            "grounding",
+            "capability_id",
+            "parse",
+            "negation",
+            "regex",
+        ):
+            assert forbidden not in lowered
+        assert len(message) <= 200
+
+
+def test_no_signature_match_returns_action_selection_message() -> None:
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, _, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: do my laundry")
+
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+
+def test_multiple_signature_match_returns_action_selection_message_and_executes_nothing() -> None:
+    """A request that genuinely satisfies two real capability
+    signatures at once (project_state_show and health_check) is
+    refused - Jarvis never chooses between them, and neither tool
+    executes, regardless of which one the model happened to select."""
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, _, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: show my project state and check jarvis's health"
+    )
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    assert len(_tool_call_events(logger)) == 0
+    assert orchestrator.approvals.list_pending() == []
+
+
+def test_capability_mismatch_executes_neither_the_correct_nor_selected_tool() -> None:
+    """A request that uniquely grounds health_check, while the model
+    instead selects schedule_list, is refused as
+    selected_capability_not_unique_match - health_check (the real,
+    intended match) never runs automatically as a "correction", and
+    schedule_list (the model's actual, wrong selection) never runs
+    either."""
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, _, logger = _router(_SCHEDULE_LIST_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    assert len(_tool_call_events(logger)) == 0
+
+
+def test_negation_in_executable_path_returns_exact_request_message() -> None:
+    """The negation gate applies identically to the ordinary
+    (non-workflow) EXECUTABLE path, not only the update-focus
+    workflow - a negated health-check request is refused with the
+    exact-request message and never executes."""
+    from core.orchestrator import _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+    router, _, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: do not check jarvis's health"
+    )
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+    assert len(_tool_call_events(logger)) == 0
+
+
+def test_memory_search_argument_mismatch_returns_exact_request_message() -> None:
+    from core.orchestrator import _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+    fabricated_value_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "an entirely invented search term"},
+        }
+    )
+    router, _, logger = _router(fabricated_value_text)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: search my memories for deployment checklist"
+    )
+
+    assert response.message == _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+
+def test_no_second_ai_call_on_any_grounding_refusal() -> None:
+    """Every refusal category still makes exactly one AI call - a
+    refusal never triggers a retry or a second, corrective model call."""
+    for request_text, decision_text in (
+        ("ask jarvis to: do my laundry", _HEALTH_CHECK_EXECUTE_TEXT),
+        (
+            "ask jarvis to: show my project state and check jarvis's health",
+            _HEALTH_CHECK_EXECUTE_TEXT,
+        ),
+        ("ask jarvis to: check jarvis's health", _SCHEDULE_LIST_EXECUTE_TEXT),
+        ("ask jarvis to: do not check jarvis's health", _HEALTH_CHECK_EXECUTE_TEXT),
+    ):
+        router, provider, logger = _router(decision_text)
+        orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+            router, logger
+        )
+
+        orchestrator.handle_request(request_text)
+
+        assert len(provider.received_requests) == 1

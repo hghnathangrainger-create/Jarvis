@@ -268,6 +268,24 @@ This record is **entirely manual** — Jarvis never inspects git, runs a subproc
 
 Like `ask jarvis:`, this requires `AI_REASONING_ENABLED`, and an empty request (`ask jarvis to:` with nothing after the colon) performs no retrieval, no AI call, and no tool execution.
 
+**Requests must be direct and unambiguous (Phase 92).** Before anything is run, Jarvis independently confirms the selected capability, and any value it would use, genuinely matches what you actually typed - not just what the AI decided. This is a safety check on top of the AI's own choice, not a replacement for it: it can only refuse a request, never redirect it to a different capability or silently correct a value. Genuinely direct requests are unaffected, for example:
+
+- `ask jarvis to: show my project state`
+- `ask jarvis to: update my project focus to <your exact value>`
+- `ask jarvis to: check jarvis's health`
+- `ask jarvis to: show my schedules` (or `list my schedules`)
+- `ask jarvis to: show me what I have asked you to remember recently` (or `list ... recently`)
+- `ask jarvis to: search my memories for <your exact query>`
+
+Jarvis will ask you to restate your request, plainly and without exposing any internal detail, when:
+
+- your request could reasonably match more than one supported action at once,
+- your request doesn't clearly match any supported action,
+- your request negates or conflicts with itself (for example, "do not update my focus to X"),
+- or the exact value you asked for can't be tied precisely back to your own wording.
+
+In every one of these cases, nothing is run, nothing is approved, and no stored content (memories, project state) is ever shown or changed as a result of the refusal itself - only a short, honest message asking you to restate the request more directly.
+
 `ask jarvis:` (advisory) and `ask jarvis to:` (tool selection) are deliberately separate commands with no overlap: the first never touches a tool; the second never gives free-form advice — it either runs an allowlisted capability (with approval and verification where required) or honestly declines.
 
 ---

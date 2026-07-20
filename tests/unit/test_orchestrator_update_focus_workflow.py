@@ -714,10 +714,10 @@ def test_ungrounded_update_focus_never_reaches_workflow_engine() -> None:
 
 
 def test_ungrounded_update_focus_response_message_never_leaks_the_candidate_value() -> None:
-    """The refusal message is the fixed, generic Batch 1 wording - it
-    never echoes the fabricated/rejected argument value back to the
-    caller, unlike the real success message which does (see
-    test_approved_verified_response_is_grounded_in_real_values)."""
+    """The refusal message is one of the two fixed, generic Phase 92,
+    Batch 2 public messages - it never echoes the fabricated/rejected
+    argument value back to the caller, unlike the real success message
+    which does (see test_approved_verified_response_is_grounded_in_real_values)."""
     router, _ = _router(_update_focus_text("an entirely fabricated value"))
     orchestrator, *_ = _build_stack(_in_memory_session_factory(), router)
 
@@ -725,3 +725,79 @@ def test_ungrounded_update_focus_response_message_never_leaks_the_candidate_valu
 
     assert "an entirely fabricated value" not in response.message
     assert response.plan is not None
+
+
+# --- L. Phase 92, Batch 2: public refusal-message mapping and end-to-end proofs -----
+
+
+def test_ungrounded_update_focus_argument_mismatch_returns_exact_request_message() -> None:
+    """An argument-value mismatch is one of the "exact-request" reasons
+    (§ Batch 2 mapping) - the public message asks for a direct,
+    exact restatement, never naming the mismatch mechanism."""
+    from core.orchestrator import _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+    router, _ = _router(_update_focus_text("an entirely fabricated value"))
+    orchestrator, *_ = _build_stack(_in_memory_session_factory(), router)
+
+    response = orchestrator.handle_request(_REQUEST)
+
+    assert response.message == _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+
+def test_negated_update_focus_returns_exact_request_message() -> None:
+    """Negation is also an "exact-request" reason - same public
+    message as an argument mismatch, never a distinct seventh wording."""
+    from core.orchestrator import _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+    router, _ = _router(_update_focus_text("batch 3 verification"))
+    orchestrator, *_ = _build_stack(_in_memory_session_factory(), router)
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: do not update my project focus to batch 3 verification"
+    )
+
+    assert response.message == _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
+
+
+def test_update_focus_argument_mismatch_creates_no_durable_pending_workflow() -> None:
+    """Beyond the in-memory ApprovalManager proof already given by
+    test_ungrounded_update_focus_value_creates_no_approval_and_no_write,
+    this proves the durable PausedWorkflowStore itself is never written
+    to on a refusal - a real, separately-constructed store instance
+    over the same session factory reads back zero rows."""
+    session_factory = _in_memory_session_factory()
+    router, _ = _router(_update_focus_text("an entirely fabricated value"))
+    orchestrator, project_state_store, *_ = _build_stack(
+        session_factory, router, durable=True
+    )
+
+    response = orchestrator.handle_request(_REQUEST)
+
+    assert response.success is False
+    assert PausedWorkflowStore(session_factory).list_all() == []
+    assert project_state_store.get() is None
+
+
+def test_capability_mismatch_for_update_focus_executes_neither_tool() -> None:
+    """A request that uniquely grounds project_state_show (a read),
+    while the model instead selects project_state_update_focus (a
+    write) with a fabricated value, is refused as
+    selected_capability_not_unique_match - neither the correct tool
+    (project_state_show, which the model never asked for) nor the
+    incorrectly selected one (project_state_update_focus) executes,
+    and the update-focus workflow is never even attempted."""
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, _ = _router(_update_focus_text("an entirely fabricated focus"))
+    orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
+        _in_memory_session_factory(), router
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: show my project state")
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    assert response.tool_result is None
+    assert response.requires_confirmation is False
+    assert approvals.list_pending() == []
+    assert project_state_store.get() is None

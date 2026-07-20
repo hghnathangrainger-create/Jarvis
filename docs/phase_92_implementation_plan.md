@@ -829,3 +829,81 @@ Directly proven, not merely asserted:
 ### 21.10 Confirmation of scope boundaries
 
 No new capability, write action, security rule, retry/replan/multi-tool-plan behavior, embedding, confidence score, or autonomous behavior was added. `ground_decision()` can only ever refuse an outcome the existing structured-output parser and capability catalog already produced — it never approves, repairs, widens, or modifies a decision. Phase 92 remains open; Batch 2 (final, per-reason user-facing refusal wording) has not been started, and no Batch 2 documentation was added in this section.
+
+## 22. Batch 2 Implementation Evidence and Phase 92 Closure
+
+**Status: Batch 2 complete. Phase 92 is formally closed by this section and the accompanying `docs/phase_92_completion_report.md`.**
+
+### 22.1 Batch 1 production audit (performed before any Batch 2 code change)
+
+Direct inspection of `ed0047b`'s diff to `intelligence/grounding.py`, `intelligence/planning.py`, and `core/orchestrator.py` confirmed:
+
+- Exactly three production files changed; no other production module was touched.
+- `intelligence/planning.py`'s diff is a single, minimal insertion: one new import, one new `PlanningOutcomeKind` member, and one `ground_decision()` call placed after argument validation and before `_preflight_capability()` — no existing logic was altered or reordered.
+- `core/orchestrator.py`'s diff is a single fixed message constant and one new `if outcome.kind is ...` branch, placed before the pre-existing `EXECUTABLE` fallthrough — no existing branch was altered.
+- `intelligence/grounding.py`'s only imports are `re`, `collections.abc.Mapping`, `dataclasses.dataclass`, `enum.Enum`, and `intelligence.capability_catalog.CapabilityId` — no AI provider, no `ToolExecutor`/`ApprovalManager`/`WorkflowEngine`, no network/file/subprocess access, no retry/replan construct, no probabilistic or embedding-based logic.
+- The module's 545 lines are proportionate to this repository's own established documentation convention (matching `intelligence/verification.py`/`intelligence/planning.py`'s own docstring density) — production logic, once docstrings are excluded, is exactly the negation gate, six fixed signatures, catalogue-wide matching, and two argument-span extractors specified in §20, nothing more.
+
+**Conclusion: no stop condition was triggered.** Batch 1's production diff contains no unrelated refactoring, no duplicated orchestration architecture, no new capability behavior, no hidden retry/replanning, no request/argument mutation, no additional AI call, no probabilistic interpretation, no security-rule change, and no approval bypass. No part of Batch 1 was rewritten in Batch 2 — the accepted contract (signature table, negation markers, punctuation handling, ambiguity handling, span markers) is unchanged, since no failing test ever demonstrated a defect in it.
+
+### 22.2 Completed orchestrator handling: two public refusal-message categories
+
+`core/orchestrator.py` now maps `PlanningOutcomeKind.UNGROUNDED_SELECTION`'s bounded `detail` to exactly one of two fixed, generic public messages via `_ask_jarvis_to_ungrounded_message()`:
+
+- **Action-selection refusal** (`_ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE`) — used for `no_signature_matched`, `multiple_signatures_matched`, and `selected_capability_not_unique_match`: *"Jarvis could not safely match that request to one supported action, so nothing was run. Please restate exactly what you'd like Jarvis to do."*
+- **Exact-request refusal** (`_ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE`) — used for `negated_or_conflicting_request`, `missing_argument_span`, `ambiguous_argument_span`, and `argument_value_mismatch`: *"Jarvis could not safely confirm the exact request or value, so nothing was run. Please restate it directly and exactly."*
+
+Neither message ever contains the internal reason code, the live request, a candidate argument span, or a rejected/candidate value. `test_ungrounded_message_mapping_is_exhaustive_and_exactly_two_valued` proves every one of the seven real `UngroundedReason` members (read from the enum itself, never a hardcoded duplicate list) maps to exactly one of these two strings — no third, per-reason message exists, and no reason is left unmapped. `test_public_refusal_messages_expose_no_internal_mechanics` proves neither message contains any of `signature`, `span`, `enum`, `reason`, `grounding`, `capability_id`, `parse`, `negation`, or `regex`, and that both are under 200 characters.
+
+### 22.3 End-to-end zero-side-effect proof (Batch 2 additions)
+
+New orchestrator-level tests, covering both the ordinary `EXECUTABLE` path and the `EXECUTABLE_WORKFLOW` (`project_state_update_focus`) path:
+
+- **Capability mismatch**: `test_capability_mismatch_executes_neither_the_correct_nor_selected_tool` (health_check uniquely grounded, schedule_list selected — neither runs) and `test_capability_mismatch_for_update_focus_executes_neither_tool` (project_state_show uniquely grounded, project_state_update_focus selected with a fabricated value — no approval, no write, no workflow attempt).
+- **No signature**: `test_no_signature_match_returns_action_selection_message` — "do my laundry" against a health_check selection; zero preflight, zero tool calls, action-selection message.
+- **Multiple signatures**: `test_multiple_signature_match_returns_action_selection_message_and_executes_nothing` — a request satisfying both `project_state_show` and `health_check` at once; zero tool calls, zero approvals, action-selection message, no automatic choice between the two.
+- **Negation/conflict**: `test_negation_in_executable_path_returns_exact_request_message` (ordinary path) and `test_negated_update_focus_returns_exact_request_message` (workflow path) — both zero-execution, exact-request message.
+- **MEMORY_SEARCH argument mismatch**: `test_memory_search_argument_mismatch_returns_exact_request_message` and the pre-existing `test_ungrounded_memory_search_argument_never_exposes_search_results` — no MemoryTool call, no stored memory content exposed, exact-request message, rejected value never echoed.
+- **PROJECT_STATE_UPDATE_FOCUS argument mismatch**: `test_ungrounded_update_focus_argument_mismatch_returns_exact_request_message`, the pre-existing `test_ungrounded_update_focus_value_creates_no_approval_and_no_write`, and the new `test_update_focus_argument_mismatch_creates_no_durable_pending_workflow` (a fresh `PausedWorkflowStore` instance over the same session factory reads back zero rows) — no YELLOW approval, no durable pending workflow, no store write, rejected value never echoed.
+- **No second model call on any refusal category**: `test_no_second_ai_call_on_any_grounding_refusal`, parametrized across no-signature, multiple-signature, capability-mismatch, and negation cases — exactly one AI call each.
+
+Every one of these tests uses the real `SecurityManager`, real `ToolRegistry`/`ToolExecutor`, real `ApprovalManager`, real `WorkflowEngine`, and real `ProjectStateStore`/`PausedWorkflowStore` over a real in-memory SQLite database — no mocks of these components. Only the `_CountingSecurityManager` subclass (Batch 1, planning-level) and the fake, in-memory `AIProvider` (used throughout Phase 90/91/92) are test doubles, and both exist solely to make an absence of calls provable rather than to fabricate a result.
+
+### 22.4 Successful vertical-slice regressions (unchanged, confirmed)
+
+All six capabilities were confirmed still functioning exactly as before, through pre-existing tests unmodified in Batch 2: `test_project_state_show_behavior_is_unaffected_by_new_capabilities` / `test_real_execution_through_real_tool_executor_grounds_the_response` (`PROJECT_STATE_SHOW`), `test_approval_executes_the_workflow_exactly_once` / `test_durable_restart_end_to_end` / `test_exact_mismatch_reports_failed_verification` (`PROJECT_STATE_UPDATE_FOCUS` — real YELLOW classification, real approval, real resume, real durable write, real durable verification), `test_health_check_executes_through_real_tool_executor_and_grounds_response` (`HEALTH_CHECK`), `test_schedule_list_executes_through_real_tool_executor_and_grounds_response` (`SCHEDULE_LIST`), `test_memory_list_recent_executes_through_real_tool_executor_and_grounds_response` (`MEMORY_LIST_RECENT`), and `test_memory_search_executes_through_real_tool_executor_and_grounds_response` (`MEMORY_SEARCH`).
+
+### 22.5 Advisory and deterministic path confirmation
+
+`test_advisory_ask_jarvis_handler_never_calls_select_tool_or_grounding` (new, Batch 2) is a structural proof that `_handle_ask_jarvis_request` (the advisory `ask jarvis:` handler) never references `select_tool(`, `ground_decision(`, or `ToolExecutor` — the executable grounding contract is used solely by `_handle_ask_jarvis_to_request`. Combined with the pre-existing, unmodified `test_ask_jarvis_advisory_command_remains_unaffected`, `test_existing_deterministic_commands_are_unaffected`, `test_ask_jarvis_advisory_remains_unaffected_by_update_focus_addition`, and `test_existing_deterministic_command_remains_unaffected` (all still passing, all unchanged), this confirms the advisory path never executes a tool through the new contract and deterministic command grammar is untouched.
+
+### 22.6 Compatibility review of Batch 1 fixture wording changes
+
+Every fixture wording change made in Batch 1 was re-verified directly against `ed0047b`'s diff (not from memory):
+
+| File | Old request wording | New request wording | Why the old wording lacked evidence |
+|---|---|---|---|
+| `test_intelligence_planning.py` (×2), `test_orchestrator_ask_jarvis_to.py` (×1) | `"what have I asked you to remember recently"` | `"show me what I have asked you to remember recently"` | Contained no listing/display action token (`"show"`/`"list"`) required by `MEMORY_LIST_RECENT`'s corrected signature (§20.1) — only the domain word and recency qualifier were present. |
+| `test_intelligence_planning.py` (×9) | `request_text="update my focus"` | `request_text="update my focus to a new focus value"` | Contained the action token (`"update"`) and domain token (`"focus"`) but no `" to "` marker at all, so no argument span could ever be extracted for the paired fake value. |
+| `test_orchestrator_update_focus_workflow.py` (`_REQUEST` + all `_update_focus_text()` fixtures) | `_REQUEST` ended `"...and confirm it"`; fake values varied (`"new focus value"`, `"restart-tested focus"`, `"intended value"`, `"some value"`, `"new focus"`, `"grounded focus value"`, `"some private-looking value"`, `"no second call test"`) | `_REQUEST` drops the suffix (final §20.7 decision); every fake value realigned to the single value `"batch 3 verification"`, matching `_REQUEST`'s own `" to "` span exactly | None of the varied fake values were ever the literal text following `" to "` in `_REQUEST` — argument grounding did not exist before Batch 1, so this mismatch was invisible until it did. |
+
+**Confirmation: no assertion was weakened.** Every downstream literal-value assertion (`project_state_store.get().focus == ...`, `"... " in final.message`, `persisted_rows[0].plan_steps[0]["tool_input"]["value"] == ...`) was updated to the same new, consistent value — never loosened to a wildcard, a substring check, or removed. The one deliberately new restriction (the task's own illustrative `"Show me the current project focus"` phrasing, never previously accepted, correctly refused as `no_signature_matched`) remains a documented, intentional narrowing, not a regression. No inconsistent fixture was restored to preserve historical wording. The full Phase 90/91 regression sweep (§21.9, re-run in Batch 2 — see §22.7) confirms every accepted safe Phase 90/91 user-facing example still passes unchanged.
+
+### 22.7 Verification results (Batch 2)
+
+- Focused Phase 92 suite (`test_grounding.py` 71, `test_intelligence_planning.py` 43, `test_orchestrator_ask_jarvis_to.py` 54, `test_orchestrator_update_focus_workflow.py` 31): **199 passed**.
+- Phase 90/91 regression sweep (same 29 files as §21.9): **649 passed**.
+- Full suite, normal environment: **4760 passed, 3 skipped** (13 more than Batch 1's 4747 — exactly the 13 new Batch 2 tests).
+- Full suite, `AI_REASONING_ENABLED=false`: **4760 passed, 3 skipped** — identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **4760 passed, 3 skipped** — identical.
+- Ruff (`ruff check` on every Python file changed across both batches: `core/orchestrator.py intelligence/planning.py intelligence/grounding.py tests/unit/test_intelligence_planning.py tests/unit/test_orchestrator_ask_jarvis_to.py tests/unit/test_orchestrator_update_focus_workflow.py tests/unit/test_grounding.py`): **All checks passed! Exit code 0.** No new or pre-existing findings.
+- `git diff --check`: exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, no whitespace errors.
+- `dashboard_test.txt` was not opened, read, staged, or otherwise touched at any point during Batch 2.
+
+### 22.8 Manual Anthropic API acceptance status
+
+Live Anthropic manual acceptance remains postponed because the configured API account lacks sufficient credits — an external account limitation, not a Jarvis code failure. No production behavior was changed to bypass it, and no live manual test is claimed to have passed. Repository-level fake-provider, deterministic, security, approval, execution, verification, and full-suite tests remain the sole closure evidence, exactly as in every prior phase.
+
+### 22.9 Formal closure
+
+Phase 92 is closed as of this section and `docs/phase_92_completion_report.md`. No new capability, write action, security rule, security-tier change, retry, replanning, autonomous behavior, embedding, semantic similarity, confidence scoring, request/argument rewriting, or scope-excluded behavior (dashboard, voice, phone, browser/computer control, source-code self-modification) was added in either batch. Phase 93 has not been started.

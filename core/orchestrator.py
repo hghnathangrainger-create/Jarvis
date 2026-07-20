@@ -63,6 +63,7 @@ from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler, build_ai_context_block
+from intelligence.grounding import UngroundedReason
 from intelligence.planning import (
     UNSUPPORTED_CAPABILITY_MESSAGE,
     PlanningOutcome,
@@ -227,19 +228,53 @@ _ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE = (
     "Jarvis's AI provider could not process this request right now."
 )
 _ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX = "Jarvis could not safely process that request:"
-#: Phase 92, Batch 1: a minimal, honest placeholder for a structurally
-#: valid decision the deterministic grounding gate could not attribute
-#: to the live request (intelligence.grounding.ground_decision()) -
-#: never exposing the bounded internal reason code, the request, or
-#: any candidate/rejected value. Batch 2 owns refining this into
-#: distinct, per-reason public wording; this exists in Batch 1 only so
-#: PlanningOutcomeKind.UNGROUNDED_SELECTION has a safe, non-crashing
-#: response shape, exactly mirroring every other outcome kind's own
-#: fixed message.
-_ASK_JARVIS_TO_UNGROUNDED_MESSAGE = (
-    "Jarvis could not confirm that request clearly and safely matches an "
-    "allowlisted capability, so nothing was run."
+#: Phase 92, Batch 2: the two public refusal messages for
+#: PlanningOutcomeKind.UNGROUNDED_SELECTION (intelligence.grounding.
+#: ground_decision()). Neither ever exposes the bounded internal
+#: UngroundedReason code, the live request, a candidate argument span,
+#: or a rejected/candidate value - each is a short, fixed, generic
+#: sentence asking for a direct restatement, exactly like every other
+#: outcome kind's own fixed message.
+#:
+#: _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE covers the reasons
+#: where the request itself could not be tied to exactly one supported
+#: action: no signature matched, more than one signature matched, or
+#: the uniquely-grounded capability differed from the model's
+#: selection (see _ACTION_SELECTION_UNGROUNDED_REASONS below).
+_ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE = (
+    "Jarvis could not safely match that request to one supported action, so "
+    "nothing was run. Please restate exactly what you'd like Jarvis to do."
 )
+#: _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE covers the reasons
+#: where the action itself was recognisable but the exact request or
+#: argument value could not be safely confirmed: a negated or
+#: conflicting request, a missing or ambiguous argument span, or a
+#: model-supplied value that did not exactly match the request (all
+#: remaining UngroundedReason members, by construction - see
+#: _ACTION_SELECTION_UNGROUNDED_REASONS below).
+_ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE = (
+    "Jarvis could not safely confirm the exact request or value, so nothing "
+    "was run. Please restate it directly and exactly."
+)
+#: The subset of UngroundedReason values mapped to the action-selection
+#: message above; every other member (checked exhaustively against the
+#: real enum by a structural test) maps to the exact-request message.
+_ACTION_SELECTION_UNGROUNDED_REASONS = frozenset(
+    {
+        UngroundedReason.NO_SIGNATURE_MATCHED.value,
+        UngroundedReason.MULTIPLE_SIGNATURES_MATCHED.value,
+        UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH.value,
+    }
+)
+
+
+def _ask_jarvis_to_ungrounded_message(detail: str | None) -> str:
+    """Maps an UNGROUNDED_SELECTION outcome's bounded `detail` string to
+    one of exactly two public refusal messages (Phase 92, Batch 2) -
+    never a per-reason message, and never the raw detail itself."""
+    if detail in _ACTION_SELECTION_UNGROUNDED_REASONS:
+        return _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    return _ASK_JARVIS_TO_EXACT_REQUEST_REFUSAL_MESSAGE
 #: Phase 90, Batch 3: the update-focus-and-verify workflow requires a
 #: real, configured WorkflowEngine - unlike Batch 2's project_state_show
 #: path, which only needs ToolExecutor.
@@ -1904,14 +1939,16 @@ class JarvisOrchestrator:
             return self._start_update_focus_workflow(plan, outcome, session_id)
 
         if outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION:
-            # Phase 92, Batch 1: refused before any preflight, approval,
+            # Phase 92, Batch 2: refused before any preflight, approval,
             # execution, or verification - see
-            # intelligence.grounding.ground_decision(). Batch 2 owns the
-            # final, per-reason public wording; this minimal branch only
-            # prevents a crash and never claims success.
+            # intelligence.grounding.ground_decision(). One of exactly
+            # two honest, non-technical public messages, chosen from
+            # the bounded internal reason - never the reason code
+            # itself, never the request, never a candidate/rejected
+            # value.
             return JarvisResponse(
                 success=False,
-                message=_ASK_JARVIS_TO_UNGROUNDED_MESSAGE,
+                message=_ask_jarvis_to_ungrounded_message(outcome.detail),
                 plan=plan,
             )
 
