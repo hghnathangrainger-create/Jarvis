@@ -390,10 +390,16 @@ def test_memory_list_recent_never_reaches_the_save_operation() -> None:
 
 
 def test_health_check_and_schedule_list_and_memory_list_recent_reject_extra_arguments() -> None:
-    """Each new Batch 1 capability declares zero arguments, so any
-    non-empty "arguments" object is rejected by the existing, strict
-    parser before any preflight or execution is attempted."""
-    for capability_id in ("health_check", "schedule_list", "memory_list_recent"):
+    """Each Batch 1 zero-argument capability, plus Batch 2's
+    memory_search (which declares only "value"), rejects any
+    unrecognised "arguments" key via the existing, strict parser before
+    any preflight or execution is attempted."""
+    for capability_id in (
+        "health_check",
+        "schedule_list",
+        "memory_list_recent",
+        "memory_search",
+    ):
         stray_argument_text = json.dumps(
             {
                 "decision": "execute",
@@ -478,22 +484,71 @@ def test_project_state_show_behavior_is_unaffected_by_new_capabilities() -> None
     assert response.tool_result.tool_name == "project_state_show"
 
 
-def test_memory_search_capability_id_is_not_recognised_yet() -> None:
-    """Batch 2's MEMORY_SEARCH does not exist yet - a model response
-    naming it must be rejected exactly like any other unknown
-    capability id."""
-    memory_search_text = json.dumps(
-        {"decision": "execute", "capability_id": "memory_search", "arguments": {"value": "x"}}
-    )
-    router, _, logger = _router(memory_search_text)
-    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+_MEMORY_SEARCH_EXECUTE_TEXT = json.dumps(
+    {
+        "decision": "execute",
+        "capability_id": "memory_search",
+        "arguments": {"value": "deployment checklist"},
+    }
+)
+
+
+def test_memory_search_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_MEMORY_SEARCH_EXECUTE_TEXT)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
         router, logger
     )
+    memory.save("Remember to review the deployment checklist before release.")
+    memory.save("An unrelated memory about lunch plans.")
 
-    response = orchestrator.handle_request("ask jarvis to: search my memories for x")
+    response = orchestrator.handle_request(
+        "ask jarvis to: search my memories for deployment checklist"
+    )
 
-    assert response.success is False
-    assert len(_tool_call_events(logger)) == 0
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "Remember to review the deployment checklist before release." in response.message
+    assert "An unrelated memory about lunch plans." not in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "memory"
+    assert response.tool_result.success is True
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_memory_search_real_no_results_grounds_the_response() -> None:
+    router, provider, logger = _router(_MEMORY_SEARCH_EXECUTE_TEXT)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    memory.save("An unrelated memory that will never match the query.")
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: search my memories for deployment checklist"
+    )
+
+    assert response.success is True
+    assert response.tool_result is not None
+    assert response.tool_result.success is True
+    assert "none found" in response.message.lower()
+
+
+def test_memory_search_never_reaches_the_save_operation() -> None:
+    """A structural, behavioural proof that memory_search can only ever
+    read: the real MemoryTool.run() only ever receives
+    operation="search" for this capability - never a model-supplied
+    value - so saving a memory through it is impossible."""
+    router, _, logger = _router(_MEMORY_SEARCH_EXECUTE_TEXT)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    before_count = memory.count()
+
+    orchestrator.handle_request(
+        "ask jarvis to: remember that Phase 91 Batch 2 introduced memory search"
+    )
+
+    assert memory.count() == before_count
 
 
 # --- Real execution / grounded response -----------------------------------------

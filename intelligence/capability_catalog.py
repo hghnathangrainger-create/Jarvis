@@ -24,13 +24,18 @@ Responsibilities:
       thin, exact-tier-checked wrapper around an already-registered,
       already-tested read-only tool, reusing the exact same
       SINGLE_TOOL execution strategy PROJECT_STATE_SHOW already uses.
+      Phase 91, Batch 2 adds one further model-selectable, bounded,
+      single-argument, GREEN, SINGLE_TOOL entry: MEMORY_SEARCH.
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
       non-model-controlled arguments the real tool requires (e.g. the
       literal field name for project_state_update_focus, or the
-      literal memory-list operation for memory_list_recent). Never
-      more than that, and never derived from model output.
+      literal memory-list/memory-search operation for
+      memory_list_recent/memory_search), and, for memory_search only,
+      a fixed rename of its one model-facing argument ("value") into
+      the real MemoryTool's own input key ("query"). Never more than
+      that, and never derived from model output.
 
 Does NOT:
     - Expose every ToolRegistry tool to the model. ToolRegistry is
@@ -69,6 +74,7 @@ class CapabilityId(Enum):
     HEALTH_CHECK = "health_check"
     SCHEDULE_LIST = "schedule_list"
     MEMORY_LIST_RECENT = "memory_list_recent"
+    MEMORY_SEARCH = "memory_search"
 
 
 class ExecutionStrategy(Enum):
@@ -230,6 +236,19 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         verification_strategy_id=None,
         internal_only=False,
     ),
+    CapabilityId.MEMORY_SEARCH: CapabilityAdapter(
+        capability_id=CapabilityId.MEMORY_SEARCH,
+        tool_name="memory",
+        description=(
+            "Searches your stored memories for text matching a query. "
+            "Read-only and safe."
+        ),
+        arguments=(CapabilityArgumentSpec(name="value", type_name="str", required=True),),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
 }
 
 
@@ -261,6 +280,24 @@ def get_adapter(capability_id: CapabilityId) -> CapabilityAdapter | None:
 _FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: {"field": "focus"},
     CapabilityId.MEMORY_LIST_RECENT: {"operation": "list"},
+    CapabilityId.MEMORY_SEARCH: {"operation": "search"},
+}
+
+#: Fixed, non-model-controlled renames of a capability's own declared
+#: argument name into the real tool's own input key, applied before any
+#: fixed arguments are merged in (Phase 91, Batch 2). Only
+#: memory_search needs this: its one model-facing argument is named
+#: "value" - matching project_state_update_focus's own established
+#: single-string-argument convention - but the real MemoryTool expects
+#: that same text under the key "query", not "value". This mapping is a
+#: fixed literal chosen once by this catalog, never derived from or
+#: influenced by model output - the model only ever sees and supplies
+#: "value"; it never sees, chooses, or can override "query" as a key
+#: name. Every other capability's real tool input already matches its
+#: own validated arguments' key names one-to-one, so it simply has no
+#: entry here.
+_ARGUMENT_KEY_RENAMES_BY_CAPABILITY: dict[CapabilityId, dict[str, str]] = {
+    CapabilityId.MEMORY_SEARCH: {"value": "query"},
 }
 
 
@@ -274,31 +311,46 @@ def build_tool_input(
     already happened in intelligence/structured_output.py, against
     this same adapter's own declared arguments); it exists so no code
     path ever hands a decoder-owned or otherwise externally-held dict
-    reference directly to a real ToolRequest.
+    reference directly to a real ToolRequest. For the small number of
+    capabilities registered in _ARGUMENT_KEY_RENAMES_BY_CAPABILITY,
+    this copy also renames the matching key(s) to the real tool's own
+    input key name(s) - e.g. memory_search's validated "value" argument
+    becomes "query", the key MemoryTool's real "search" operation
+    actually reads.
 
     For the small number of capabilities registered in
     _FIXED_ARGUMENTS_BY_CAPABILITY, this then merges in that
     capability's own fixed, literal key/value pairs - e.g.
     project_state_update_focus's real tool (ProjectStateUpdateTool)
     expects a "field" key the model is never asked to supply, and
-    memory_list_recent's real tool (MemoryTool) expects an "operation"
-    key the model is never asked to supply either. These fixed values
-    always win: they are applied after the model-supplied copy, so a
-    capability's own declared arguments can never smuggle in a
-    different key of the same name (in practice this never happens,
-    since a capability never simultaneously declares an argument with
-    the same name as one of its own fixed keys).
+    memory_list_recent's/memory_search's real tool (MemoryTool) expects
+    an "operation" key the model is never asked to supply either. These
+    fixed values always win: they are applied after the model-supplied
+    (and possibly renamed) copy, so a capability's own declared
+    arguments can never smuggle in a different key of the same name (in
+    practice this never happens, since a capability never simultaneously
+    declares an argument with the same name as one of its own fixed
+    keys).
 
     Args:
         adapter: The capability adapter the arguments belong to - used
-            to look up any fixed key/value pairs this capability needs.
+            to look up any key renames and fixed key/value pairs this
+            capability needs.
         arguments: The already-validated arguments dict.
 
     Returns:
-        A new dict: `arguments`' own key/value pairs, plus this
+        A new dict: `arguments`' own key/value pairs (renamed per
+        _ARGUMENT_KEY_RENAMES_BY_CAPABILITY, if any), plus this
         capability's fixed key/value pairs (if any).
     """
-    tool_input = dict(arguments)
+    renames = _ARGUMENT_KEY_RENAMES_BY_CAPABILITY.get(adapter.capability_id)
+    if renames is not None:
+        tool_input = {
+            renames.get(key, key): value for key, value in arguments.items()
+        }
+    else:
+        tool_input = dict(arguments)
+
     fixed_arguments = _FIXED_ARGUMENTS_BY_CAPABILITY.get(adapter.capability_id)
     if fixed_arguments is not None:
         tool_input.update(fixed_arguments)

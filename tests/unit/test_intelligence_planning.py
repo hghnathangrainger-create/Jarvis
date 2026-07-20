@@ -522,6 +522,64 @@ def test_memory_list_recent_execute_with_stray_argument_is_rejected() -> None:
     assert outcome.plan is None
 
 
+_MEMORY_SEARCH_EXECUTE_TEXT = json.dumps(
+    {
+        "decision": "execute",
+        "capability_id": "memory_search",
+        "arguments": {"value": "the deployment checklist"},
+    }
+)
+
+
+def test_memory_search_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_MEMORY_SEARCH_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="search my memories for the deployment checklist",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_memory_list_recent(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "memory"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.MEMORY_SEARCH
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    # The fixed "operation": "search" was injected by build_tool_input(),
+    # and the model's own "value" argument was renamed to "query" - the
+    # real MemoryTool's own input key - never supplied or influenced by
+    # the model under either name.
+    assert outcome.plan.steps[0].arguments == {
+        "query": "the deployment checklist",
+        "operation": "search",
+    }
+    assert len(outcome.plan.steps) == 1
+
+
+def test_memory_search_execute_with_stray_operation_argument_is_rejected() -> None:
+    """memory_search declares only "value" as an argument, so a model
+    response naming "operation" as well is rejected by the strict
+    parser before this capability's own fixed-operation injection is
+    ever reached - proving the model can never smuggle a different
+    operation through."""
+    stray_argument_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "x", "operation": "save"},
+        }
+    )
+    router, _ = _router(stray_argument_text)
+    outcome = select_tool(
+        request_text="search my memories for x",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_memory_list_recent(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.plan is None
+
+
 def test_forced_yellow_preflight_is_rejected_before_execution() -> None:
     forced_catalog = {
         CapabilityId.PROJECT_STATE_SHOW: CapabilityAdapter(

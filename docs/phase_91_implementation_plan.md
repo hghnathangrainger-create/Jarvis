@@ -1,8 +1,8 @@
 # Jarvis — Phase 91 Implementation Plan
 
-**Status:** Batch 1 implemented and verified. Batch 2 (`MEMORY_SEARCH`) not yet started — Phase 91 remains open.
+**Status:** Batches 1 and 2 implemented and verified. Phase 91 is **implementation-complete**, pending Nathan's review and the still-postponed manual Anthropic API acceptance test (an external API-credit limitation, not a production-code failure) — not independently marked as closed.
 **Version:** Phase 91 — Safe Intelligence Capability Expansion (medium milestone: planning gate + 2 batches)
-**Date:** 2026-07-20 (planning gate); Batch 1 implemented 2026-07-20
+**Date:** 2026-07-20 (planning gate); Batch 1 implemented 2026-07-20; Batch 2 implemented 2026-07-20
 
 ---
 
@@ -354,4 +354,61 @@ Confirmed untouched, untracked, and uncommitted throughout this planning pass �
 
 **Not implemented (confirmed):** `MEMORY_SEARCH`, `quarantine_list`, `workflow_history`, `approval_history`, `info`, `file_search`, `file_list`, `memory` `save`/`get`/`categories`, any YELLOW/RED capability, any multi-tool plan, chaining, retry, replan, or dashboard change.
 
+**Post-Batch-1 addendum:** the 2 pre-existing/environmental full-suite failures noted above were separately diagnosed and fixed in a dedicated, test-only maintenance commit (`dc72a54`, "Fix test environment isolation before Phase 91 Batch 2") — the two affected fixtures now set `PYTHON_DOTENV_DISABLED=1` instead of deleting `AI_REASONING_ENABLED`, and the scheduled-inbox integration test file gained one autouse fixture supplying its own already-established fake `ANTHROPIC_API_KEY`. No production code changed. Verified: full suite in the normal environment, with `AI_REASONING_ENABLED=false`, and with `PYTHON_DOTENV_DISABLED=1` all passed with zero failures after that commit.
+
 **Phase 91 remains open** — Batch 2 (`MEMORY_SEARCH`) requires its own separate approval before implementation begins.
+
+---
+
+## 27. Batch 2 Implementation and Verification Evidence
+
+**Implemented exactly as planned in §5/§7-§10/§16**, with no scope deviation: `MEMORY_SEARCH` added to `CAPABILITY_CATALOG` as the fourth and final Phase 91 capability - GREEN, read-only, `SINGLE_TOOL`, one required bounded string argument. No other capability was added; no write behavior of any kind was introduced.
+
+**Files actually changed:**
+- `intelligence/capability_catalog.py` — one new `CapabilityId` member and `CAPABILITY_CATALOG` entry; `_FIXED_ARGUMENTS_BY_CAPABILITY` gained `{CapabilityId.MEMORY_SEARCH: {"operation": "search"}}`; a new, narrow `_ARGUMENT_KEY_RENAMES_BY_CAPABILITY` mechanism was added (a real, non-trivial gap found during repository inspection — see below) so `build_tool_input()` can rename a capability's validated argument key to the real tool's own input key name.
+- `intelligence/planning.py` — `_TRUSTED_PLANNING_INSTRUCTION` text extended to describe the sixth model-selectable capability and its exact JSON shape; module docstring header updated for accuracy. No control-flow change: `select_tool()`'s existing `SINGLE_TOOL` branch handles `memory_search` with zero new code, exactly as it already does for every other `SINGLE_TOOL` capability.
+- `tools/builtin/help_tool.py`, `docs/user_guide.md` — documentation of the new capability.
+- `tests/unit/test_capability_catalog.py`, `tests/unit/test_structured_output.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_orchestrator_ask_jarvis_to.py`, `tests/unit/test_help_tool.py` — new/updated focused tests (see below).
+
+**Confirmed unchanged (zero diff):** `core/orchestrator.py`, `core/command_router.py`, `core/request_models.py`, `intelligence/structured_output.py`, `intelligence/context.py`, `intelligence/verification.py`, `main.py`, `workflow/*`, `approval/*`, `tools/executor.py`, `security/security_manager.py`, `tools/builtin/memory_tool.py` itself, all dashboard code.
+
+**Repository-inspection finding requiring a planning clarification (reported, not silently assumed):** this plan's own §9 asserted `build_tool_input()` "already maps [`value`] to the real tool's `query` key, the same way it already maps to `ProjectStateUpdateTool`'s `value` key today" — on inspection this was inexact: `project_state_update_focus`'s `value` argument keeps the identical key name in the real tool's input (no rename occurs there; `build_tool_input()` only ever *added* a fixed extra key). No existing mechanism renamed an argument's key. Implementing `memory_search`'s explicit requirement to map the AI-facing `value` argument onto the real `MemoryTool`'s `query` input key therefore required one small, new, narrow addition — `_ARGUMENT_KEY_RENAMES_BY_CAPABILITY: dict[CapabilityId, dict[str, str]]`, applied inside `build_tool_input()` before the existing fixed-argument merge. This is additive only: every other capability has no entry in this new dict and is completely unaffected (proven by `test_build_tool_input_rename_does_not_affect_other_capabilities`, which re-confirms `project_state_update_focus`'s exact pre-existing behavior is unchanged).
+
+**Exact MEMORY_SEARCH catalogue definition:**
+```python
+CapabilityId.MEMORY_SEARCH: CapabilityAdapter(
+    capability_id=CapabilityId.MEMORY_SEARCH,
+    tool_name="memory",
+    description="Searches your stored memories for text matching a query. Read-only and safe.",
+    arguments=(CapabilityArgumentSpec(name="value", type_name="str", required=True),),
+    allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+    max_execution_tier=SecurityTier.GREEN,
+    verification_strategy_id=None,
+    internal_only=False,
+)
+```
+
+**Exact AI-facing argument:** `value` — `type_name="str"`, `required=True`. Bounds are the existing, unmodified generic string-argument hygiene rule in `intelligence/structured_output.py::_validate_string_argument()` (the same rule `project_state_update_focus`'s own `value` argument already uses): non-empty and non-whitespace-only after considering surrounding whitespace (effective minimum: one non-whitespace character), maximum 500 characters (`_MAX_STRING_ARGUMENT_CHARS`), no NUL character, no leading/trailing C0-control/DEL character. Zero new parser code was needed or added.
+
+**Exact real `MemoryTool` input produced:** `{"query": <validated value>, "operation": "search"}` — `build_tool_input()` renames the validated `value` key to `query` (via `_ARGUMENT_KEY_RENAMES_BY_CAPABILITY`), then merges in the fixed `operation="search"` (via `_FIXED_ARGUMENTS_BY_CAPABILITY`). Neither key is ever model-supplied or model-overridable: `operation` is not a declared argument at all (an attempt to supply it is rejected by the strict parser as an unknown argument, before `build_tool_input()` ever runs), and `value` is unconditionally renamed away, never left alongside `query` in the final input (proven by `test_build_tool_input_memory_search_never_leaves_a_stray_value_key`).
+
+**Real `SecurityManager` preflight confirmed:** the real action `"search memories"` (from `MemoryTool.action_for()` with `operation="search"`) classifies **GREEN** via the existing, unchanged `_RULES` entry — no new `SecurityManager` rule was added or needed, and the real, live classification exactly matched this plan's own expectation (§9), so no mismatch was found and no security rule was touched.
+
+**Real `ToolExecutor` execution confirmed:** `memory_search`'s one-step `StructuredPlan` is executed via `core/orchestrator.py`'s existing, unmodified `PlanningOutcomeKind.EXECUTABLE` branch, calling `self._executor.execute(...)` — the same real `ToolExecutor` every other tool call uses. Proven end-to-end in `tests/unit/test_orchestrator_ask_jarvis_to.py` with a real, SQLite-backed `MemoryTool` instance (never a mock), asserting exactly one `tool_call` audit event per request.
+
+**No direct `tool.run()` call added:** `test_no_direct_tool_run_call_anywhere_in_planning_module` (pre-existing, unmodified) continues to pass against the extended `intelligence/planning.py`.
+
+**Grounded-response behavior:** a successful search's response is the real `MemoryTool` search output verbatim, labelled `[Jarvis tool result]` — real matching memory content, real non-matching content correctly absent (`test_memory_search_executes_through_real_tool_executor_and_grounds_response`). A real no-match search returns the tool's own existing honest "none found" text unchanged (`test_memory_search_real_no_results_grounds_the_response`) — never a fabricated or AI-paraphrased result, and no second AI generation step of any kind runs after execution.
+
+**Test results:**
+- Focused (`test_capability_catalog.py` + `test_structured_output.py` + `test_intelligence_planning.py` + `test_orchestrator_ask_jarvis_to.py` + `test_help_tool.py`): **271 passed, 0 failed**.
+- Phase 91 Batch 1 + Phase 90 regressions (`test_ask_jarvis_to_routing.py`, `test_orchestrator_update_focus_workflow.py`, `test_verification.py`, `test_project_state_verify_tool.py`): **67 passed, 0 failed**.
+- Deterministic/security/executor regressions (`test_memory_tool.py`, `test_command_router.py`, `test_help_output_routing_consistency.py`, `test_security.py`, `test_security_injection_scan.py`, `test_security_unexpected_action.py`, `test_tool_executor_approval.py`, `test_tool_executor_logger_isolation.py`, `test_health_check_tool.py`, `test_schedule_tools.py`, `test_project_state_show_tool.py`, `test_project_state_update_tool.py`): **799 passed, 0 failed**.
+- Full suite, normal environment (`poetry run pytest -q`): **4658 passed, 3 skipped, 0 failed**.
+- Full suite with `AI_REASONING_ENABLED=false`: **4658 passed, 3 skipped, 0 failed** — identical.
+- Ruff (`poetry run ruff check` on every changed file): exit code 0, **no findings** (new or pre-existing) on any Batch 2 file.
+- `git diff --check`: clean.
+
+**Not implemented (confirmed):** memory `save`/`get`/`categories`/update/forget, any user-selectable result limit or category filter, `quarantine_list`, `workflow_history`, `approval_history`, `info`, `file_search`, `file_list`, any new YELLOW/RED capability, any multi-tool plan, chaining, retry, replan, or dashboard change.
+
+**Phase 91 is now implementation-complete** (all four planned capabilities across both batches are implemented and verified) but is **not** being marked closed here — it awaits Nathan's own review, and the manual Anthropic API acceptance test remains postponed for external API-credit reasons, not a code defect. No Phase 92 work of any kind has begun.

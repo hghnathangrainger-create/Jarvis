@@ -4,9 +4,9 @@ planning.py
 Ties Context Intelligence, the trusted planning instruction, strict
 structured-output parsing, the capability catalog, and deterministic
 security preflight together into a single, testable function:
-select_tool() (Phase 90, Batches 2/3; contracts fixed by
-docs/phase_90_implementation_plan.md, Sections 25/26 and the Batch 3
-planning prompt).
+select_tool() (Phase 90, Batches 2/3; Phase 91, Batches 1/2; contracts
+fixed by docs/phase_90_implementation_plan.md, Sections 25/26, the
+Batch 3 planning prompt, and docs/phase_91_implementation_plan.md).
 
 Responsibilities:
     - Own the one fixed, Jarvis-authored trusted planning instruction
@@ -100,7 +100,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly five capabilities "
+    "You are Jarvis's tool-selection planner. Exactly six capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -128,7 +128,13 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "stored memories. Use this only when the request asks to see or "
     "list recently stored memories. Takes no arguments.\n"
     "\n"
-    'A sixth capability id, "project_state_verify_focus", exists only '
+    '6. capability id "memory_search" - searches your stored memories '
+    "for text matching a query. Use this only when the request asks to "
+    "search or find stored memories matching some text. Include the "
+    "search text in arguments.value (a non-empty string, at most 500 "
+    "characters).\n"
+    "\n"
+    'A seventh capability id, "project_state_verify_focus", exists only '
     "internally - it is never a valid selection, is never selectable "
     "through your output, and must never appear in your response under "
     "any circumstances.\n"
@@ -158,6 +164,10 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "Execute (recent memories):\n"
     '{"decision": "execute", "capability_id": "memory_list_recent", '
     '"arguments": {}}\n'
+    "\n"
+    "Execute (search memories):\n"
+    '{"decision": "execute", "capability_id": "memory_search", '
+    '"arguments": {"value": "the search text"}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'

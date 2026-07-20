@@ -657,3 +657,149 @@ def test_rejected_value_is_never_echoed_in_the_error() -> None:
     )
     reason = _fails(text, catalog=CAPABILITY_CATALOG)
     assert marker not in reason
+
+
+# ---------------------------------------------------------------------------
+# Phase 91, Batch 2: memory_search - one required, bounded string argument
+# ---------------------------------------------------------------------------
+
+
+def _memory_search_text(value: object) -> str:
+    return json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": value},
+        }
+    )
+
+
+def test_memory_search_valid_selection() -> None:
+    text = _memory_search_text("the deployment checklist")
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.MEMORY_SEARCH
+    assert result.arguments == {"value": "the deployment checklist"}
+
+
+def test_memory_search_missing_value_is_rejected() -> None:
+    text = json.dumps(
+        {"decision": "execute", "capability_id": "memory_search", "arguments": {}}
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_extra_argument_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "x", "extra": "y"},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_internal_operation_field_is_rejected() -> None:
+    """The model can never supply "operation" itself - memory_search
+    declares only "value" as an argument, so any attempt to also name
+    the internal selector is rejected as an unknown argument, before
+    build_tool_input()'s own fixed operation="search" is ever reached."""
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "x", "operation": "save"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "unknown argument name in model output"
+
+
+def test_memory_search_null_value_is_rejected() -> None:
+    text = _memory_search_text(None)
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_numeric_value_is_rejected() -> None:
+    text = _memory_search_text(5)
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_boolean_value_is_rejected() -> None:
+    text = _memory_search_text(True)
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_array_value_is_rejected() -> None:
+    text = _memory_search_text(["a search query"])
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_object_value_is_rejected() -> None:
+    text = _memory_search_text({"query": "a search query"})
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_memory_search_empty_value_is_rejected() -> None:
+    text = _memory_search_text("")
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_memory_search_whitespace_only_value_is_rejected() -> None:
+    text = _memory_search_text("   \t  ")
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_memory_search_single_character_value_is_accepted() -> None:
+    """The accepted minimum is one non-whitespace character - there is
+    no separate numeric minimum-length threshold beyond the existing
+    non-empty/non-whitespace-only rule."""
+    text = _memory_search_text("x")
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == "x"
+
+
+def test_memory_search_over_500_chars_is_rejected() -> None:
+    text = _memory_search_text("x" * 501)
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "oversized string argument"
+
+
+def test_memory_search_exactly_500_chars_is_accepted() -> None:
+    text = _memory_search_text("x" * 500)
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert len(result.arguments["value"]) == 500
+
+
+def test_memory_search_nul_character_is_rejected() -> None:
+    text = _memory_search_text("hello\x00world")
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument contains a NUL character"
+
+
+def test_memory_search_leading_control_character_is_rejected() -> None:
+    text = _memory_search_text("\x01leading control char")
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_memory_search_trailing_control_character_is_rejected() -> None:
+    text = _memory_search_text("trailing control char\x1f")
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_memory_search_value_is_never_normalized_or_rewritten() -> None:
+    text = _memory_search_text("Mixed CASE   with   spacing")
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == "Mixed CASE   with   spacing"
+
+
+def test_memory_search_rejected_value_is_never_echoed_in_the_error() -> None:
+    marker = "UNIQUE_SECRET_TO_NEVER_LEAK_MEMSEARCH"
+    text = _memory_search_text(marker + ("x" * 501))
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert marker not in reason

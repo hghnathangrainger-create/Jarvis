@@ -235,6 +235,20 @@ def test_output_documents_phase_91_batch_1_read_only_capabilities() -> None:
     assert "no approval needed" in ask_jarvis_to_line
 
 
+def test_output_documents_phase_91_batch_2_memory_search_capability() -> None:
+    """Phase 91, Batch 2: the new bounded memory-search capability is
+    documented alongside the existing capabilities on the same line."""
+    result = _run(HelpTool())
+    ask_jarvis_to_line = next(
+        line
+        for line in result.output.splitlines()
+        if "ask jarvis to: <request>" in line
+    )
+    assert "search" in ask_jarvis_to_line.lower()
+    assert "memories" in ask_jarvis_to_line.lower()
+    assert "no approval needed" in ask_jarvis_to_line
+
+
 def test_ask_jarvis_and_ask_jarvis_to_are_distinctly_documented() -> None:
     """Batch 1's advisory command and Batch 2/3's tool-selection command
     must never read as the same behavior."""

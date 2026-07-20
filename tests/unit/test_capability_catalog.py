@@ -27,7 +27,7 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_six_phase_91_batch_1_entries() -> None:
+def test_catalog_contains_exactly_the_seven_phase_91_batch_2_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -35,6 +35,7 @@ def test_catalog_contains_exactly_the_six_phase_91_batch_1_entries() -> None:
         CapabilityId.HEALTH_CHECK,
         CapabilityId.SCHEDULE_LIST,
         CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
     }
 
 
@@ -46,6 +47,7 @@ def test_no_other_capability_id_exists() -> None:
         "health_check",
         "schedule_list",
         "memory_list_recent",
+        "memory_search",
     }
 
 
@@ -73,7 +75,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_five_capabilities_are_model_selectable() -> None:
+def test_only_six_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -85,6 +87,7 @@ def test_only_five_capabilities_are_model_selectable() -> None:
         CapabilityId.HEALTH_CHECK,
         CapabilityId.SCHEDULE_LIST,
         CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
     }
 
 
@@ -126,6 +129,19 @@ def test_memory_list_recent_adapter_fields_are_exact() -> None:
     assert adapter.capability_id is CapabilityId.MEMORY_LIST_RECENT
     assert adapter.tool_name == "memory"
     assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_memory_search_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_SEARCH]
+    assert adapter.capability_id is CapabilityId.MEMORY_SEARCH
+    assert adapter.tool_name == "memory"
+    assert [spec.name for spec in adapter.arguments] == ["value"]
+    assert adapter.arguments[0].type_name == "str"
+    assert adapter.arguments[0].required is True
     assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
     assert adapter.max_execution_tier is SecurityTier.GREEN
     assert adapter.verification_strategy_id is None
@@ -200,6 +216,44 @@ def test_build_tool_input_never_lets_model_choose_the_operation() -> None:
     adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_LIST_RECENT]
     result = build_tool_input(adapter, {"operation": "save"})
     assert result["operation"] == "list"
+
+
+def test_build_tool_input_renames_value_to_query_and_fixes_operation_for_memory_search() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_SEARCH]
+    result = build_tool_input(adapter, {"value": "deployment checklist"})
+    assert result == {"query": "deployment checklist", "operation": "search"}
+
+
+def test_build_tool_input_never_lets_model_choose_the_search_operation() -> None:
+    """The "operation" key is always the fixed literal "search" for
+    memory_search - never derived from, or overridable by, model-
+    supplied arguments. memory_search declares only "value" as an
+    argument, so a stray "operation" key could only ever reach
+    build_tool_input() via a bug elsewhere in the pipeline - this proves
+    even then it could never override the fixed value."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_SEARCH]
+    result = build_tool_input(adapter, {"value": "x", "operation": "save"})
+    assert result["operation"] == "search"
+
+
+def test_build_tool_input_memory_search_never_leaves_a_stray_value_key() -> None:
+    """The rename fully replaces "value" with "query" - the real
+    MemoryTool input never carries both keys, and never carries the
+    model-facing "value" key name at all."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_SEARCH]
+    result = build_tool_input(adapter, {"value": "x"})
+    assert "value" not in result
+    assert result["query"] == "x"
+
+
+def test_build_tool_input_rename_does_not_affect_other_capabilities() -> None:
+    """The key-rename mechanism is opt-in per capability - every
+    capability without an _ARGUMENT_KEY_RENAMES_BY_CAPABILITY entry
+    keeps its arguments' key names completely unchanged, exactly as
+    before this mechanism existed."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    result = build_tool_input(adapter, {"value": "new focus"})
+    assert result == {"field": "focus", "value": "new focus"}
 
 
 # --- Contract shape tests --------------------------------------------------
