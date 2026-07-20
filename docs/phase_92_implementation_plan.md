@@ -1,8 +1,8 @@
 # Jarvis — Phase 92 Implementation Plan
 
-**Status:** Planning gate — awaiting explicit approval before Batch 1 begins. Amended once (§18) to extend the grounding contract from capability selection alone to also cover model-supplied executable string arguments — see §18 for the full amendment; Sections 1-17 below are preserved as the original planning record and should be read together with §18, which supersedes any conflicting detail in them (in particular §4, §6, §8, §10-14, and §16).
+**Status:** Planning gate — awaiting explicit approval before Batch 1 begins. Amended twice: §18 extended the grounding contract from capability selection alone to also cover model-supplied executable string arguments (via whole-request significant-term attribution); §19 replaces §18's domain-keyword-only capability grounding and whole-request significant-term argument attribution with capability-specific action-and-domain intent signatures and capability-specific argument-span extraction, after both were found on further inspection to be individually unsafe. Sections 1-17 are preserved as the original planning record; §18 is preserved as the record of the first amendment but its capability-grounding and argument-attribution design is **superseded by §19**; read §19 as the current, authoritative design for those two mechanisms.
 **Version:** Phase 92 — Intelligence Core V1 Next-Milestone Planning Gate
-**Date:** 2026-07-20 (original); amended 2026-07-20
+**Date:** 2026-07-20 (original); amended 2026-07-20; amended again 2026-07-20
 
 ---
 
@@ -396,4 +396,153 @@ Two batches remain sufficient. Repository inspection found no evidence this is u
 - Stop and report before implementing if any currently-existing, real vertical-slice request phrasing for any of the 6 capabilities cannot satisfy the §18.3 `grounding_keywords` table without a false refusal.
 - Stop and report before implementing if any currently-existing, real vertical-slice `MEMORY_SEARCH`/`PROJECT_STATE_UPDATE_FOCUS` value/request pairing (after the disclosed, mechanical §18.7 fixture updates) still cannot satisfy the §18.4 attribution rule without a false refusal.
 - Stop and report if implementing argument-attribution grounding is found, on inspection during Batch 1, to require any change to `intelligence/structured_output.py`'s parsing/validation logic, `build_tool_input()`'s signature, or the executable value itself (it should not — grounding only ever decides accept/reject on the already-validated value).
+- Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
+
+---
+
+## 19. Second Planning Amendment — Action-and-Domain Signatures and Argument-Span Attribution
+
+**Sections 1-17 remain the original planning record. §18 is preserved as the record of the first amendment, but its two central mechanisms — domain-keyword-only capability grounding, and whole-request significant-term-subset argument attribution — are each shown below to admit unsafe cases, and are superseded by this section.** Where this section is silent, §18's supporting material (the outcome-kind choice, execution-order guarantees, and general test-strategy shape) still governs.
+
+### 19.1 Why domain-keyword-only capability grounding (§18.3) was insufficient
+
+Direct re-examination of §18.3's own design against the task's own worked example: `PROJECT_STATE_UPDATE_FOCUS`'s `grounding_keywords = ("focus",)` matches any request containing the bare word "focus" — including **"Show me the current project focus,"** a read-only request with no update intent at all. Under §18.3 alone, a model mistakenly selecting `PROJECT_STATE_UPDATE_FOCUS` for this request would pass capability-selection grounding and proceed toward a real YELLOW approval. The same structural flaw applies to `MEMORY_LIST_RECENT`/`MEMORY_SEARCH`, which share the keyword set `("memory", "memories", "remember", "remembered")` in §18.3 — a request naming only the memory *domain*, with no action evidence, could ground either capability regardless of which one is actually being asked for. **The root cause: a domain keyword identifies the subject matter, never the requested action** — and every capability pair sharing a domain in this catalog (`project_state_show`/`project_state_update_focus`; `memory_list_recent`/`memory_search`) differs precisely in the action performed on that shared subject, not the subject itself.
+
+### 19.2 Why whole-request significant-term attribution (§18.4) was insufficient
+
+§18.4's fallback rule accepted a model-supplied value whenever every one of its significant terms appeared anywhere in `request_text` — with no regard for the term's grammatical role. Direct testing of the task's own worked examples against this rule confirms the flaw: for **"Set the focus to testing, not deployment,"** the value `"deployment"` has exactly one significant term, `"deployment"`, which *is* present in the request — §18.4 would have **accepted** an explicitly-rejected alternative. The same failure applies to **"Search memories for school, not passwords"** (value `"passwords"` — present, wrongly accepted) and **"Do not change the focus to marketing"** (value `"marketing"` — present, wrongly accepted, and the request additionally negates the entire action). **§18.4's exact-substring primary check does not fix this either**, as the task's own inspection notes: the wrong or negated value is frequently an exact substring of the request too. The root cause: membership-in-the-whole-request proves a word was *mentioned*, never that it was *the value assigned to the argument, as opposed to a rejected alternative, an old value, or unrelated explanatory text*.
+
+### 19.3 Exact per-capability action-and-domain intent signatures
+
+Grounded only in language actually used in real, currently-passing tests, or in the real, already-shipped `_TRUSTED_PLANNING_INSTRUCTION` text in `intelligence/planning.py` (both inspected directly — see the exact phrasings enumerated in 19.3.1 below) — no invented synonym is included anywhere in this table:
+
+| Capability | Required action evidence (≥1 of) | Required domain evidence | Why this combination, not domain alone |
+|---|---|---|---|
+| `PROJECT_STATE_SHOW` | `"show"` (token) | the adjacent phrase `"project state"` (substring, not the two words independently) | shares the `project_state` domain with `PROJECT_STATE_UPDATE_FOCUS` — domain alone cannot distinguish read from write |
+| `PROJECT_STATE_UPDATE_FOCUS` | `"update"` (token) | `"focus"` (token) | same reason; `"update"` is the one action word ever used, in tests or in the shipped trusted instruction, for this capability |
+| `HEALTH_CHECK` | `"check"` (token) | `"health"` or `"status"` (token) | `"status"` is not test-evidenced but *is* real, already-shipped instructional text (`_TRUSTED_PLANNING_INSTRUCTION`: "asks about Jarvis's health or status") — included on that basis, not invented |
+| `SCHEDULE_LIST` | `"show"` or `"list"` (token) | `"schedule"` or `"schedules"` (token) | both action words are real: `"show"` from the real test, `"list"` from the shipped instruction text ("asks to see or list schedules") |
+| `MEMORY_LIST_RECENT` | `"recent"` or `"recently"` (token), or `"list"` (token) | `"memory"`, `"memories"`, `"remember"`, or `"remembered"` (token) | `"recent"/"recently"` is the real test's own action evidence; `"list"` is real, shipped instruction text |
+| `MEMORY_SEARCH` | `"search"` or `"find"` (token) | `"memory"` or `"memories"` (token) | both action words are real, shipped instruction text ("asks to search or find stored memories"); the real test uses `"search"` |
+
+A request is capability-grounded **only if it satisfies both columns** for its selected capability — never one alone. `HEALTH_CHECK` and `SCHEDULE_LIST` still require an action word even though only one Intelligence Core capability exists per domain today: consistency across all six signatures keeps the design uniform, reviewable, and equally strict everywhere, at zero cost against real evidence (every real accepted phrasing for these two already includes its required action word anyway).
+
+**Multi-word terms**: `"project state"` is matched as a single, adjacent, normalized-phrase substring of the request — never satisfied by `"project"` or `"state"` appearing independently or non-adjacently, exactly per the task's own instruction.
+
+**Action collisions this design prevents, directly**:
+- "Show me the current project focus." → contains `"show"` + `"focus"`, but **not** `"update"` → does not ground `PROJECT_STATE_UPDATE_FOCUS`. It also does not contain the adjacent phrase `"project state"` (it says "project focus") → does not ground `PROJECT_STATE_SHOW` either. Both capabilities are refused for this phrasing; see §19.7 for why this is a safe, deliberate compatibility boundary, not a regression.
+- A genuine update-focus request (e.g. `"update my focus to X"`) contains neither `"show"` nor the phrase `"project state"` → cannot ground `PROJECT_STATE_SHOW`.
+- `"what have I asked you to remember recently"` contains `"remember"` + `"recently"` → grounds `MEMORY_LIST_RECENT`; it contains no `"search"`/`"find"` → cannot ground `MEMORY_SEARCH`.
+- `"search my memories for X"` contains `"search"` + `"memories"` → grounds `MEMORY_SEARCH`; it contains no `"recent"`/`"recently"`/`"list"` → cannot ground `MEMORY_LIST_RECENT`.
+- A request containing only a generic action word (`"show"`, `"list"`, `"update"`, etc.) with no matching domain evidence for the selected capability grounds nothing, by construction (the domain column is mandatory).
+- A request containing only a shared domain word (`"memory"`, `"focus"`, `"project"`, `"state"` in isolation) with no matching action evidence grounds nothing.
+
+#### 19.3.1 Exact evidence sources for the table above
+
+- Real, currently-passing test phrasings (enumerated by direct `grep` of `tests/unit/test_orchestrator_ask_jarvis_to.py`, `test_intelligence_planning.py`, `test_orchestrator_update_focus_workflow.py`): `"show my project state"` / `"show my project state please"`; `"update my project focus to batch 3 verification and confirm it"` / `"update my focus to a new focus value"` / `"update my focus"` / `"please update my focus to something new"`; `"check jarvis's health"`; `"show my schedules"`; `"what have I asked you to remember recently"`; `"search my memories for the deployment checklist"` / `"search my memories for deployment checklist"` / `"search my memories for x"`.
+- The real, already-shipped `_TRUSTED_PLANNING_INSTRUCTION` text in `intelligence/planning.py` (read directly, quoted verbatim): "shows... Use this only when the request asks to **show or read** the manually-maintained **project state**"; "updates only... Use this only when the request explicitly asks to **update** the project state's **focus**"; "reports basic Jarvis system **health**... Use this only when the request asks about Jarvis's **health or status**"; "lists your configured web-search-summary **schedules**... asks to **see or list schedules**"; "lists your most recently stored **memories**... asks to see or **list recently** stored **memories**"; "searches your stored **memories**... asks to **search or find** stored **memories**".
+- No word outside these two evidence sources was added to any signature.
+
+### 19.4 Exact candidate argument-span extraction rules
+
+Applies only to `PROJECT_STATE_UPDATE_FOCUS` and `MEMORY_SEARCH` — the two capabilities with a model-supplied string argument — and only after that specific capability has already passed its own action-and-domain signature (§19.3) and the request has already passed the negation/conflict gate (§19.6).
+
+**Reused, not reinvented, primitive**: `core/command_router.py` already implements a real, tested, deterministic `_extract_after(text, marker)` helper for the existing deterministic `"search memories ... for <query>"` command grammar — find the first occurrence of a fixed marker phrase, return the trimmed, unquoted text after it, or empty if the marker is absent. This planning-amendment's extraction logic reuses the identical *technique* (first-occurrence marker splitting), reimplemented locally in the `intelligence/` package rather than imported across the architectural layer boundary — mirroring `intelligence/context.py`'s own established convention of locally reimplementing small, pure helpers rather than reaching into a sibling layer for a few lines of logic.
+
+**MEMORY_SEARCH**: the fixed marker is `" for "` (case-insensitive), matching every real accepted phrasing (`"search my memories for the deployment checklist"`, `"...for deployment checklist"`, `"...for x"`) and the shipped instruction text's own framing ("searches your stored memories for text matching a query").
+- If `" for "` occurs **exactly once** in `request_text`, the candidate span is the trimmed text after it.
+- If `" for "` occurs **zero or more than one** times, no unambiguous span exists — refuse (detail: ambiguous argument span).
+
+**PROJECT_STATE_UPDATE_FOCUS**: the fixed marker is `" to "` (case-insensitive), matching every real accepted phrasing (`"update my focus to X"`, `"update my project focus to X"`).
+- If `" to "` occurs **exactly once**, the candidate span is the trimmed text after it, **then** one fixed, hand-maintained suffix is stripped if present: the case-insensitive trailing phrase `"and confirm it"` (with any trailing period and surrounding whitespace) — this exact phrase is the real, repeatedly-used Phase 90 vertical-slice idiom (`"update my project focus to X and confirm it"`, appearing verbatim in `tests/unit/test_orchestrator_update_focus_workflow.py`'s own `_REQUEST` constant and in Phase 90's own planning document), not a general clause-stripping grammar. This is a single, explicitly-named special case, mirroring this repository's own established preference (e.g. `WorkflowEngine._PROPAGATED_FIELDS`) for a small, fixed, named list over a generalized parser.
+- If `" to "` occurs zero or more than one times, refuse (detail: ambiguous argument span).
+
+Neither rule ever constructs, infers, or guesses a span when the marker condition is not met exactly once — a request that does not match the one supported shape for its capability is refused, never approximately parsed.
+
+### 19.5 Exact normalization and comparison rules
+
+1. **Normalize** both the extracted candidate span and the model-supplied value independently: casefold, collapse runs of internal whitespace to one space, strip leading/trailing whitespace, strip one trailing sentence-ending mark (`.`, `!`, or `?`) if present.
+2. **Compare for exact equality.** The normalized model-supplied value must equal the normalized candidate span exactly — not merely contain or be contained by it. If equal, the argument is **accepted** and the *original, unmodified, already-validated* value (never the normalized or extracted text) proceeds into `build_tool_input()` exactly as today. If not equal, **reject** (detail: argument value mismatch).
+
+This is deliberately stricter than §18.4's containment/subset rule: because exactly one unambiguous candidate span is now established structurally (§19.4) before comparison ever runs, exact equality is both safe and sufficient — there is no remaining role for partial/subset matching to play, and no legitimate accepted value differs from its own request span once whitespace/case/trailing-punctuation are normalized (verified directly against every real existing `MEMORY_SEARCH` test pairing below, §19.7).
+
+### 19.6 Exact negation, conflict, and ambiguity refusal rules
+
+A single, request-level, deny-only gate — checked once, immediately after a structured `"execute"` decision is parsed, **before** any capability-signature or argument-span logic runs, and applied uniformly to **every** capability (including the four zero-argument ones, since a negated read request is just as unsafe to silently execute as a negated write):
+
+**Rule**: pad `request_text` with a leading and trailing space, casefold it, and check for the presence of any of the following fixed substrings: `" not "`, `"do not"`, `"don't"`, `"does not"`, `"doesn't"`, `"is not"`, `"isn't"`, `"cannot"`, `"can not"`, `"will not"`, `"won't"`, `"never"`, `"instead of"`, `"rather than"`, `"but not"`. If any is present, refuse immediately (detail: negated or conflicting request) — before capability-signature checking, before argument-span extraction, regardless of which capability the model selected.
+
+The single-token check for bare `" not "` (padded with surrounding spaces before searching) is deliberately whole-word: it matches `"...for school, not passwords..."` and `"do not change..."` correctly, while **not** false-triggering on words that merely contain the letters "not" as a substring (e.g. "notes", "notice", "notebook") — `" notes "` does not contain the four-character sequence `" not "`, since "notes" is followed by a letter, not a space, immediately after "t".
+
+This single, simple, request-level check is deliberately **not** a natural-language parser: it detects the *presence* of a fixed, small set of negation/contrast markers as an unconditional ambiguity signal, and never attempts to resolve which side of a "not"/"instead of"/"rather than" construction is the real intent. This directly implements "false refusal is preferable to executing or requesting approval for the wrong action": every one of the task's three worked examples (`"Set the focus to testing, not deployment"`, `"Search memories for school, not passwords"`, `"Do not change the focus to marketing"`) is refused outright by this one rule, independent of §19.3/§19.4/§19.5, before either the correct or incorrect value could ever be considered.
+
+**Disjunction inside an argument span**: additionally, if a capability's extracted candidate span (§19.4) itself contains the padded substring `" or "`, this is treated as a second candidate ambiguity signal and refused (detail: ambiguous argument span) — e.g. `"search memories for cats or dogs"` is refused rather than guessing which term is the real query.
+
+### 19.7 Compatibility impact on existing accepted phrasing
+
+- **Zero impact for capability-selection grounding**: every real, currently-tested phrasing for all six capabilities was checked directly against the §19.3 table and satisfies both its required action and domain evidence, with no wording change.
+- **Zero impact for `MEMORY_SEARCH` argument attribution**: both real existing value/request pairings (`"search my memories for the deployment checklist"` / `"the deployment checklist"`, and `"search my memories for deployment checklist"` / `"deployment checklist"`) already produce an exact match under §19.4/§19.5 with no fixture change.
+- **Real, disclosed impact for `PROJECT_STATE_UPDATE_FOCUS` test fixtures**: direct inspection found that the large majority of `tests/unit/test_intelligence_planning.py`'s update-focus tests, and several of `tests/unit/test_orchestrator_update_focus_workflow.py`'s, deliberately pair an arbitrary `request_text` (e.g. `"update my focus"`, `"please update my focus to something new"`) with one shared, fixed fake model value (`"a new focus value"` / `"new focus value"`) that was never intended to be content-consistent — these tests exist to exercise workflow/plan-construction mechanics (tier handling, step shape, preflight-mismatch handling, durable approval/verification), not content fidelity, and today nothing checks that relationship. **Batch 1 must give each such test a mutually consistent `request_text`/value pair** (e.g. `request_text="update my focus to a new focus value"` paired with value `"a new focus value"`, or an equivalent adjustment per test) — a mechanical, disclosed, low-risk fixture change that preserves every test's original assertion and intent unchanged. This is a larger set of fixture edits than §18.7 originally estimated (nearly every update-focus test in `test_intelligence_planning.py` uses a mismatched pairing today); it remains, however, a purely mechanical string-consistency edit, not a design or behavior change, and is explicitly budgeted into Batch 1 (§19.9).
+- **One deliberate new compatibility restriction, explicitly identified and justified**: the hypothetical phrasing "Show me the current project focus" (used only as the task's own illustrative example, never a real, currently-accepted phrasing in any test) would be refused under the new design (grounds neither `PROJECT_STATE_SHOW` nor `PROJECT_STATE_UPDATE_FOCUS` — see §19.3). This is judged safe and correct rather than a regression: it was never an existing accepted phrasing, and refusing an under-specified request that plausibly could mean either "show my focus" or "update my focus" is exactly the conservative behavior this milestone exists to add.
+- No other currently-accepted phrasing is restricted.
+
+### 19.8 Updated outcome design
+
+`PlanningOutcomeKind.UNGROUNDED_SELECTION` (introduced in §18, unchanged as the public shape) remains the smallest sufficient design. Its bounded, internal `detail` string now distinguishes exactly four cases, superseding §18.8's two-case sketch:
+
+1. **Negated or conflicting request** (§19.6) — checked first, applies to any capability.
+2. **Capability action/domain mismatch** (§19.3) — the selected capability's required action-and-domain evidence is not both present.
+3. **Ambiguous argument span** (§19.4/§19.6) — the capability's fixed extraction marker occurs zero or more than once, or the extracted span itself contains a disjunction marker.
+4. **Argument value mismatch** (§19.5) — exactly one candidate span was extracted, but the model-supplied value does not exactly equal it after normalization.
+
+No `detail` string ever includes the raw candidate span, the rejected model-supplied value, retrieved memory/context content, or any internal parser state — each is a short, fixed, non-sensitive category label, mirroring `ToolSelectionParseError.reason`'s own existing convention exactly. The public, user-facing refusal message (constructed in Batch 2, in `core/orchestrator.py`) is similarly fixed and generic per category, never echoing the specific rejected content, and may suggest the user restate the request more directly without guessing at their intent.
+
+### 19.9 Updated Batch 1 and Batch 2 scope
+
+**Batch 1 — Action-and-Domain Signatures, Argument-Span Attribution, Negation Gate (internal only):**
+- Replace §18.3's `grounding_keywords` field/table with the §19.3 action-and-domain signature table (two required evidence sets per capability, matched independently).
+- Implement the request-level negation/conflict gate (§19.6), applied first, before any other grounding check.
+- Implement capability-specific argument-span extraction (§19.4) for `PROJECT_STATE_UPDATE_FOCUS`/`MEMORY_SEARCH`, reusing the first-occurrence-marker-splitting technique already proven in `core/command_router.py`.
+- Implement the normalize-and-compare rule (§19.5).
+- Refine `UNGROUNDED_SELECTION`'s `detail` taxonomy to the four categories in §19.8.
+- Update the pre-identified, content-decoupled `PROJECT_STATE_UPDATE_FOCUS` test fixtures (§19.7) so every test's `request_text`/value pair is mutually consistent, preserving each test's original assertion intent unchanged; confirm both real `MEMORY_SEARCH` fixture pairings already pass unmodified.
+- Focused unit and adversarial tests (§19.10).
+- Stop/report; explicit approval required before Batch 2.
+
+**Batch 2 — Orchestrator Integration, Grounded Refusal, Full Regression, Docs** (unchanged in shape from §18.9):
+- Wire `UNGROUNDED_SELECTION` into `core/orchestrator.py`, with a distinct, honest, non-sensitive message per `detail` category, and an `intelligence_trace` entry.
+- Prove structurally and behaviorally: zero preflight, zero approval, zero execution, zero verification, zero memory-result exposure for every refusal category.
+- Full regression across every Phase 90/91 capability, including a *legitimately grounded* `PROJECT_STATE_UPDATE_FOCUS` request through real YELLOW approval and durable focus verification (must remain bit-for-bit unaffected).
+- Update `docs/user_guide.md`/`tools/builtin/help_tool.py` only if the new refusal needs user-facing disclosure.
+- Full suite + Ruff + `git diff --check`.
+- Stop/report; explicit approval required before Phase 92 closes.
+
+**Two batches remain sufficient.** Every mechanism specified above (signature table lookup, marker-based extraction reusing an already-proven technique, normalize-and-compare, a fixed substring-based negation gate) is a small, pure, deterministic function over two already-real strings; none requires new external dependencies, persistence, or a parser of unbounded scope. The larger-than-originally-estimated test-fixture edit set (§19.7) is still mechanical string-consistency work, not new design, and is explicitly budgeted into Batch 1 rather than discovered mid-batch.
+
+### 19.10 Updated required tests
+
+**Read versus write separation**: `"Show me the current project focus."` cannot ground `PROJECT_STATE_UPDATE_FOCUS` (fails action evidence: no `"update"`); a valid update-focus request (e.g. `"update my focus to a new focus value"`) grounds `PROJECT_STATE_UPDATE_FOCUS`; that same request cannot ground `PROJECT_STATE_SHOW` (fails domain evidence: no adjacent `"project state"` phrase); a rejected/refused update decision creates no YELLOW approval (`approvals.list_pending() == []`).
+
+**Memory action separation**: `"what have I asked you to remember recently"` grounds `MEMORY_LIST_RECENT` but not `MEMORY_SEARCH` (fails action evidence: no `"search"`/`"find"`); `"search my memories for X"` grounds `MEMORY_SEARCH` but not `MEMORY_LIST_RECENT` (fails action evidence: no `"recent"`/`"recently"`/`"list"`); a request containing only `"memory"`/`"memories"` with no action word grounds neither; a request containing only a generic action word (`"show"`, `"list"`, `"search"`) with no matching domain word grounds nothing.
+
+**Argument-span attribution, `MEMORY_SEARCH`**: the exact requested span (text after the single `" for "` occurrence) is accepted; an unrelated model-supplied fragment is rejected; a negated alternative (`"...for school, not passwords"`, model value `"passwords"`) is rejected via the negation gate before argument-span logic even runs; two or more `" for "` occurrences produce a refusal (ambiguous argument span), never a guessed span; a model-expanded value (real content plus extra invented words) is rejected by exact-equality comparison; case/whitespace/trailing-punctuation differences are accepted per the documented §19.5 normalization, and any other difference is rejected — proven by a small, explicit matrix of normalization-boundary tests; rejection is proven to cause zero `MemoryTool` invocation and zero memory-content exposure in the response or trace.
+
+**Argument-span attribution, `PROJECT_STATE_UPDATE_FOCUS`**: the exact requested new-focus span (text after the single `" to "` occurrence, with the fixed `"and confirm it"` suffix stripped when present) is accepted through to a real pending YELLOW approval; a current/old focus value substituted for the requested one is rejected (it does not match the extracted span) with zero `ApprovalManager.create_request()` call; a negated alternative is rejected via the negation gate; two or more `" to "` occurrences produce a refusal; an invented expansion is rejected by exact-equality comparison; the existing, real, now-fixture-consistent (§19.7) YELLOW approval → resume → write → durable focus-verification flow is fully re-run and remains unaffected.
+
+**Ambiguity and negation**: each of the task's three worked examples (`"Set the focus to testing, not deployment"`, `"Search memories for school, not passwords"`, `"Do not change the focus to marketing"`) is refused via the negation gate, proven independent of which value the (fake) model supplied; a request with two extraction-marker occurrences is refused as ambiguous; a candidate span containing `" or "` is refused as ambiguous; adversarial or retrieved `AssembledContext`/memory content cannot satisfy any grounding check, since none of the three checks (§19.3/§19.4/§19.6) ever receive `assembled_context` as an input — proven by a structural test asserting the grounding function's own signature.
+
+**Structural safety** (unchanged in shape from §18.10, re-verified against the revised mechanism): grounding runs after parsing/hygiene validation and before `_preflight_capability()`/`ApprovalManager`/`ToolExecutor`; grounding only narrows, never widens, an outcome; no second AI call, confidence score, or embedding is introduced anywhere; `ask jarvis:`'s advisory path and its own separate parser remain untouched.
+
+**Regression**: every real, currently-accepted Phase 90/91 request phrasing remains accepted (§19.7); the one identified, deliberate new compatibility boundary (the task's own illustrative "Show me the current project focus" phrasing, never a previously-accepted phrasing) is explicitly listed and justified in §19.7, not silently introduced.
+
+### 19.11 Confirmation: deterministic, deny-only, pre-execution
+
+Every mechanism in this section — the negation gate, the action-and-domain signature table, marker-based span extraction, and normalize-and-compare — is a pure function of `request_text` and (for argument attribution) the already-validated model-supplied value; none calls an AI provider, computes a similarity score, or retains state between requests. Each check can only convert an otherwise-proceeding decision into a refusal; none can cause a decision already invalid for any other reason (malformed output, an unsupported decision, a hygiene-failing argument, a tier mismatch) to become valid. All four checks run strictly after `intelligence/structured_output.py`'s existing parsing/type/hygiene validation and strictly before `_preflight_capability()`, `ApprovalManager.create_request()`, `ToolExecutor.execute()`, and `intelligence/verification.py`'s verifier — identical execution-order placement to §18, unchanged by this amendment.
+
+### 19.12 Updated stop conditions (supersedes §18.12)
+
+- Stop and report before implementing if any currently-existing, real vertical-slice request phrasing for any of the 6 capabilities cannot satisfy its §19.3 action-and-domain signature without a false refusal.
+- Stop and report before implementing if either real `MEMORY_SEARCH` value/request pairing, or the `PROJECT_STATE_UPDATE_FOCUS` pairings after their disclosed §19.7 fixture updates, cannot satisfy the §19.4/§19.5 extraction-and-comparison rule without a false refusal.
+- Stop and report if the negation-marker list (§19.6) is found, during Batch 1 implementation, to false-trigger on any currently-accepted real phrasing — none were found during this planning pass, but this must be re-confirmed against the real fixture strings at implementation time.
+- Stop and report, and propose a smaller safe Phase 92 design instead, if capability-specific argument-span extraction is found during Batch 1 to require anything beyond a small, fixed, per-capability marker-splitting rule — in particular, do not expand this into a general natural-language span parser under any circumstances.
 - Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
