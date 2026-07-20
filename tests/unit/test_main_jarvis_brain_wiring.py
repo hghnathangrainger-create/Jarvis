@@ -31,7 +31,21 @@ from tools.builtin.jarvis_brain_tool import JarvisBrainStatusTool
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point every setting at safe, isolated values so build_orchestrator()
-    never touches the real .env file or the real database."""
+    never touches the real .env file or the real database.
+
+    PYTHON_DOTENV_DISABLED=1 tells load_settings()'s own load_dotenv(...)
+    call to skip reading any .env file at all (a real, documented
+    python-dotenv mechanism) - this, not deleting AI_REASONING_ENABLED,
+    is what actually makes this fixture hermetic. Previously this fixture
+    used monkeypatch.delenv("AI_REASONING_ENABLED", raising=False), but
+    load_settings() calls load_dotenv(override=False), which only skips a
+    key already present in os.environ - deleting it left the key absent,
+    so a real, developer-machine .env file's own AI_REASONING_ENABLED
+    value (e.g. "true") would silently flow back in and defeat the
+    fixture's own intent (this is exactly what happened before this fix).
+    ANTHROPIC_API_KEY/DATABASE_PATH continue to come from this fixture's
+    own explicit monkeypatch.setenv calls either way."""
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test_jarvis.db"))
     monkeypatch.delenv("AI_REASONING_ENABLED", raising=False)

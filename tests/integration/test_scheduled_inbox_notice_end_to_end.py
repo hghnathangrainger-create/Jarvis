@@ -103,6 +103,26 @@ def root(shared_root: tk.Tk):
     yield shared_root
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test below that calls main.build_startup_notice() triggers a
+    second, independent load_settings() call, which requires
+    ANTHROPIC_API_KEY. Most tests in this file never set it themselves,
+    relying on a real developer .env file to supply it - this passed
+    silently in the normal environment (a real key is present there) but
+    fails whenever that real .env is not consulted (e.g. under
+    PYTHON_DOTENV_DISABLED=1), since build_startup_notice() catches the
+    resulting ConfigError and returns None, indistinguishable from a
+    real "nothing to report" result to any assertion that doesn't also
+    check *why*. Supplying this fake, non-secret value explicitly here -
+    the same "test-key-not-real" convention this file's own _settings()
+    helper and its one already-hermetic test already use - makes every
+    test in this file hermetic against .env content, matching this
+    repository's established fixture pattern (see
+    tests/unit/test_main_ai_wiring.py's own _hermetic_env)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+
 class _RecordingLogger:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
