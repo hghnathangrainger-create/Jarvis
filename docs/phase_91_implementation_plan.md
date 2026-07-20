@@ -1,8 +1,8 @@
 # Jarvis — Phase 91 Implementation Plan
 
-**Status:** Batches 1 and 2 implemented and verified. Phase 91 is **implementation-complete**, pending Nathan's review and the still-postponed manual Anthropic API acceptance test (an external API-credit limitation, not a production-code failure) — not independently marked as closed.
-**Version:** Phase 91 — Safe Intelligence Capability Expansion (medium milestone: planning gate + 2 batches)
-**Date:** 2026-07-20 (planning gate); Batch 1 implemented 2026-07-20; Batch 2 implemented 2026-07-20
+**Status:** Closed. Reviewed and accepted by Nathan. See `docs/phase_91_completion_report.md` for the authoritative closure record. Manual live-AI acceptance remains postponed for external Anthropic API-credit reasons (not a production-code failure); Phase 91 was closed on repository-level implementation, focused tests, integration tests, security/executor tests, and complete-suite verification.
+**Version:** Phase 91 — Safe Intelligence Capability Expansion (medium milestone: planning gate + 2 batches) — **complete**
+**Date:** 2026-07-20 (planning gate); Batch 1 implemented 2026-07-20; Batch 2 implemented 2026-07-20; closed 2026-07-20
 
 ---
 
@@ -411,4 +411,4 @@ CapabilityId.MEMORY_SEARCH: CapabilityAdapter(
 
 **Not implemented (confirmed):** memory `save`/`get`/`categories`/update/forget, any user-selectable result limit or category filter, `quarantine_list`, `workflow_history`, `approval_history`, `info`, `file_search`, `file_list`, any new YELLOW/RED capability, any multi-tool plan, chaining, retry, replan, or dashboard change.
 
-**Phase 91 is now implementation-complete** (all four planned capabilities across both batches are implemented and verified) but is **not** being marked closed here — it awaits Nathan's own review, and the manual Anthropic API acceptance test remains postponed for external API-credit reasons, not a code defect. No Phase 92 work of any kind has begun.
+**Phase 91 is now formally closed** (all four planned capabilities across both batches are implemented and verified, reviewed, and accepted) — see `docs/phase_91_completion_report.md` for the authoritative closure record. The manual Anthropic API acceptance test remains postponed for external API-credit reasons, not a code defect. No Phase 92 work of any kind has begun.
