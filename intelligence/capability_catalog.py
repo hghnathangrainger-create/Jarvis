@@ -2,9 +2,10 @@
 capability_catalog.py
 
 The hand-maintained tool-selection allowlist for Jarvis's "ask jarvis
-to: <request>" command (Phase 90, Batches 2/3; contracts fixed by
-docs/phase_90_implementation_plan.md, Sections 25.C/25.D/26 and the
-Batch 3 planning prompt).
+to: <request>" command (Phase 90, Batches 2/3; Phase 91, Batch 1;
+contracts fixed by docs/phase_90_implementation_plan.md, Sections
+25.C/25.D/26, the Batch 3 planning prompt, and
+docs/phase_91_implementation_plan.md).
 
 Responsibilities:
     - Define the small, closed set of types describing a selectable
@@ -12,14 +13,24 @@ Responsibilities:
       ExecutionStrategy, CapabilityAdapter.
     - Provide CAPABILITY_CATALOG, the single source of truth for which
       capabilities the intelligence layer may even consider selecting.
-      Batch 3 adds exactly two entries to Batch 2's one:
+      Batch 3 added exactly two entries to Batch 2's one:
       PROJECT_STATE_UPDATE_FOCUS (model-selectable, YELLOW, executed
       only via a deterministic two-step WorkflowEngine plan) and
       PROJECT_STATE_VERIFY_FOCUS (internal-only - never selectable
       from AI output, reachable only as the fixed second step of that
-      one workflow).
-    - Provide a small, deterministic tool-input builder that copies and
-      returns only a capability's own declared arguments - never more.
+      one workflow). Phase 91, Batch 1 adds three further
+      model-selectable, zero-argument, GREEN, SINGLE_TOOL entries:
+      HEALTH_CHECK, SCHEDULE_LIST, and MEMORY_LIST_RECENT - each a
+      thin, exact-tier-checked wrapper around an already-registered,
+      already-tested read-only tool, reusing the exact same
+      SINGLE_TOOL execution strategy PROJECT_STATE_SHOW already uses.
+    - Provide a small, deterministic tool-input builder that copies a
+      capability's own declared (model-supplied) arguments, plus - for
+      the small number of capabilities that need it - a fixed set of
+      non-model-controlled arguments the real tool requires (e.g. the
+      literal field name for project_state_update_focus, or the
+      literal memory-list operation for memory_list_recent). Never
+      more than that, and never derived from model output.
 
 Does NOT:
     - Expose every ToolRegistry tool to the model. ToolRegistry is
@@ -55,6 +66,9 @@ class CapabilityId(Enum):
     PROJECT_STATE_SHOW = "project_state_show"
     PROJECT_STATE_UPDATE_FOCUS = "project_state_update_focus"
     PROJECT_STATE_VERIFY_FOCUS = "project_state_verify_focus"
+    HEALTH_CHECK = "health_check"
+    SCHEDULE_LIST = "schedule_list"
+    MEMORY_LIST_RECENT = "memory_list_recent"
 
 
 class ExecutionStrategy(Enum):
@@ -177,6 +191,45 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         verification_strategy_id=None,
         internal_only=True,
     ),
+    CapabilityId.HEALTH_CHECK: CapabilityAdapter(
+        capability_id=CapabilityId.HEALTH_CHECK,
+        tool_name="health_check",
+        description=(
+            "Reports basic Jarvis system health (settings, database path, "
+            "tool registry, console logging, and store reachability). "
+            "Read-only and safe."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
+    CapabilityId.SCHEDULE_LIST: CapabilityAdapter(
+        capability_id=CapabilityId.SCHEDULE_LIST,
+        tool_name="schedule_list",
+        description=(
+            "Lists your configured web-search-summary schedules. "
+            "Read-only and safe."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
+    CapabilityId.MEMORY_LIST_RECENT: CapabilityAdapter(
+        capability_id=CapabilityId.MEMORY_LIST_RECENT,
+        tool_name="memory",
+        description=(
+            "Lists your most recently stored memories. Read-only and safe."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
 }
 
 
@@ -193,16 +246,21 @@ def get_adapter(capability_id: CapabilityId) -> CapabilityAdapter | None:
     return CAPABILITY_CATALOG.get(capability_id)
 
 
-#: The one fixed, non-trivial tool-input transformation Batch 3 needs:
-#: project_state_update_focus's real tool (ProjectStateUpdateTool)
-#: expects {"field": ..., "value": ...}, but the model only ever
-#: supplies {"value": ...} - "field" is always the fixed literal
-#: "focus", never model-controlled, never any other field name. This
-#: is a single, explicitly-named special case, not a generic per-
-#: adapter callable: every other capability's real tool input already
-#: matches its own validated arguments one-to-one.
-_FIXED_FIELD_BY_CAPABILITY: dict[CapabilityId, str] = {
-    CapabilityId.PROJECT_STATE_UPDATE_FOCUS: "focus",
+#: Fixed, non-model-controlled tool-input keys some capabilities need
+#: in addition to (never instead of) their own declared, validated
+#: arguments. Two real tools are multi-purpose (ProjectStateUpdateTool
+#: keys its write on a "field" name; MemoryTool keys its behaviour on
+#: an "operation" name) but the model is only ever asked to supply the
+#: capability's own narrow, declared arguments - never the field/
+#: operation name itself. Each entry here is a fixed literal, chosen
+#: once by this catalog, never derived from or overridable by model
+#: output (see build_tool_input's own "never overrides a model-
+#: supplied key" contract below). Every other capability's real tool
+#: input already matches its own validated arguments one-to-one, so it
+#: simply has no entry here.
+_FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]] = {
+    CapabilityId.PROJECT_STATE_UPDATE_FOCUS: {"field": "focus"},
+    CapabilityId.MEMORY_LIST_RECENT: {"operation": "list"},
 }
 
 
@@ -211,31 +269,37 @@ def build_tool_input(
 ) -> dict[str, object]:
     """Deterministically build the real tool input for a capability.
 
-    For every capability except project_state_update_focus, this is a
-    plain, defensive copy of already-validated arguments - this
-    function performs no validation of its own (that already happened
-    in intelligence/structured_output.py, against this same adapter's
-    own declared arguments); it exists so no code path ever hands a
-    decoder-owned or otherwise externally-held dict reference directly
-    to a real ToolRequest.
+    This starts as a plain, defensive copy of already-validated
+    arguments - this function performs no validation of its own (that
+    already happened in intelligence/structured_output.py, against
+    this same adapter's own declared arguments); it exists so no code
+    path ever hands a decoder-owned or otherwise externally-held dict
+    reference directly to a real ToolRequest.
 
-    For project_state_update_focus specifically, the real tool
-    (ProjectStateUpdateTool) expects a "field" key the model is never
-    asked to supply - this function adds it, fixed to the literal
-    "focus", never derived from model output.
+    For the small number of capabilities registered in
+    _FIXED_ARGUMENTS_BY_CAPABILITY, this then merges in that
+    capability's own fixed, literal key/value pairs - e.g.
+    project_state_update_focus's real tool (ProjectStateUpdateTool)
+    expects a "field" key the model is never asked to supply, and
+    memory_list_recent's real tool (MemoryTool) expects an "operation"
+    key the model is never asked to supply either. These fixed values
+    always win: they are applied after the model-supplied copy, so a
+    capability's own declared arguments can never smuggle in a
+    different key of the same name (in practice this never happens,
+    since a capability never simultaneously declares an argument with
+    the same name as one of its own fixed keys).
 
     Args:
-        adapter: The capability adapter the arguments belong to -
-            used to look up the one fixed-field special case above.
+        adapter: The capability adapter the arguments belong to - used
+            to look up any fixed key/value pairs this capability needs.
         arguments: The already-validated arguments dict.
 
     Returns:
-        A new dict. For most capabilities, the same key/value pairs as
-        `arguments`. For project_state_update_focus, `arguments` plus
-        a fixed `"field"` key.
+        A new dict: `arguments`' own key/value pairs, plus this
+        capability's fixed key/value pairs (if any).
     """
     tool_input = dict(arguments)
-    fixed_field = _FIXED_FIELD_BY_CAPABILITY.get(adapter.capability_id)
-    if fixed_field is not None:
-        tool_input["field"] = fixed_field
+    fixed_arguments = _FIXED_ARGUMENTS_BY_CAPABILITY.get(adapter.capability_id)
+    if fixed_arguments is not None:
+        tool_input.update(fixed_arguments)
     return tool_input

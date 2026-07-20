@@ -218,6 +218,23 @@ def test_output_documents_ask_jarvis_to_focus_update_capability() -> None:
     assert "Zero retries, zero replans" in result.output
 
 
+def test_output_documents_phase_91_batch_1_read_only_capabilities() -> None:
+    """Phase 91, Batch 1: the three new zero-argument, GREEN, read-only
+    capabilities are documented in the same batch they shipped,
+    alongside the existing GREEN/YELLOW capabilities - not as a
+    separate, disconnected command."""
+    result = _run(HelpTool())
+    ask_jarvis_to_line = next(
+        line
+        for line in result.output.splitlines()
+        if "ask jarvis to: <request>" in line
+    )
+    assert "system health" in ask_jarvis_to_line
+    assert "configured schedules" in ask_jarvis_to_line
+    assert "recently stored" in ask_jarvis_to_line.lower()
+    assert "no approval needed" in ask_jarvis_to_line
+
+
 def test_ask_jarvis_and_ask_jarvis_to_are_distinctly_documented() -> None:
     """Batch 1's advisory command and Batch 2/3's tool-selection command
     must never read as the same behavior."""

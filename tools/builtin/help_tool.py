@@ -162,8 +162,11 @@ _HELP_LINES: tuple[str, ...] = (
     "honestly instead of guessing an answer.",
     "  ask jarvis to: <request> - asks Jarvis to select at most one explicitly "
     "allowlisted capability; requires AI_REASONING_ENABLED. May show your "
-    "manually-maintained project state (the same data 'show jarvis project "
-    "state' reports, no approval needed), or may update only its focus field "
+    "manually-maintained project state, report basic Jarvis system health, "
+    "list your configured schedules, or list your most recently stored "
+    "memories (all read-only, no approval needed - the same data 'show "
+    "jarvis project state'/'health check'/'list schedules'/'show memories' "
+    "already report), or may update only its focus field "
     "(requires your explicit approval, then a structured read-back checks "
     "the stored value matches - verification can fail or be unavailable and "
     "is always reported honestly, never assumed). May honestly report that "

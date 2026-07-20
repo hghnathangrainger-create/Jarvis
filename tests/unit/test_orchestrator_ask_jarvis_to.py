@@ -46,6 +46,7 @@ try:
     from memory.memory_manager import MemoryManager
     from planner.planner import Planner
     from project_state.project_state_store import ProjectStateStore
+    from scheduling.schedule_store import ScheduleStore
     from security.security_manager import SecurityManager
     from storage.database import create_session_factory, initialize_database
     from tools.base_tool import BaseTool, ToolRequest, ToolResult
@@ -232,6 +233,267 @@ _EXECUTE_TEXT = json.dumps(
 _UNSUPPORTED_TEXT = json.dumps(
     {"decision": "unsupported", "capability_id": None, "arguments": {}}
 )
+_HEALTH_CHECK_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "health_check", "arguments": {}}
+)
+_SCHEDULE_LIST_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "schedule_list", "arguments": {}}
+)
+_MEMORY_LIST_RECENT_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "memory_list_recent", "arguments": {}}
+)
+
+
+# --- Phase 91, Batch 1: zero-argument GREEN read-only capabilities ---------------
+
+
+def _build_real_orchestrator_with_phase_91_batch_1_tools(
+    tool_selection_router: AIRouter | None, logger: _RecordingLogger
+) -> tuple[JarvisOrchestrator, MemoryManager, ScheduleStore]:
+    """Builds a real orchestrator wired with the real, production
+    HealthCheckTool, ScheduleListTool, and MemoryTool - each backed by
+    real, isolated in-memory SQLite stores (never a mock/fake store),
+    the same shape main.py's own build_orchestrator() uses. Every
+    capability's execution here goes through the exact same real
+    ToolExecutor/SecurityManager path as any other tool call."""
+    from approval.approval_history_store import ApprovalHistoryStore
+    from inbox.inbox_store import InboxStore
+    from quarantine.quarantine_store import QuarantineStore
+    from tools.builtin.health_check_tool import HealthCheckTool
+    from tools.builtin.memory_tool import MemoryTool
+    from tools.builtin.schedule_list_tool import ScheduleListTool
+    from workflow.workflow_history_store import WorkflowHistoryStore
+
+    session_factory = _in_memory_session_factory()
+    memory = MemoryManager(EpisodicMemoryStore(session_factory))
+    project_state_store = ProjectStateStore(session_factory)
+    schedule_store = ScheduleStore(session_factory)
+    inbox_store = InboxStore(session_factory)
+    quarantine_store = QuarantineStore(session_factory)
+    approval_history = ApprovalHistoryStore(session_factory)
+    workflow_history = WorkflowHistoryStore(session_factory)
+
+    context_assembler = ContextAssembler(
+        memory_manager=memory, project_state_store=project_state_store
+    )
+    security = SecurityManager()
+
+    registry = ToolRegistry()
+    registry.register_tool(ProjectStateShowTool(project_state_store))
+    registry.register_tool(ScheduleListTool(schedule_store))
+    registry.register_tool(MemoryTool(memory))
+    registry.register_tool(
+        HealthCheckTool(
+            registry=registry,
+            settings=_settings(),
+            inbox_store=inbox_store,
+            schedule_store=schedule_store,
+            quarantine_store=quarantine_store,
+            security_manager=security,
+            memory_manager=memory,
+            approval_history_store=approval_history,
+            workflow_history_store=workflow_history,
+        )
+    )
+
+    executor = ToolExecutor(
+        registry=registry, security_manager=security, logger=logger  # type: ignore[arg-type]
+    )
+    orchestrator = JarvisOrchestrator(
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+        security_manager=security,
+        memory_manager=memory,
+        logger=logger,  # type: ignore[arg-type]
+        context_assembler=context_assembler,
+        tool_selection_router=tool_selection_router,
+    )
+    return orchestrator, memory, schedule_store
+
+
+def test_health_check_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "Jarvis health check:" in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "health_check"
+    assert response.tool_result.success is True
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_schedule_list_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_SCHEDULE_LIST_EXECUTE_TEXT)
+    orchestrator, _, schedule_store = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    schedule_store.create(query="jarvis phase 91 news", time_of_day="09:00", name="daily digest")
+
+    response = orchestrator.handle_request("ask jarvis to: show my schedules")
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "jarvis phase 91 news" in response.message
+    assert "daily digest" in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "schedule_list"
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_memory_list_recent_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_MEMORY_LIST_RECENT_EXECUTE_TEXT)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    memory.save("Phase 91 Batch 1 vertical slice memory.")
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: what have I asked you to remember recently"
+    )
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "Phase 91 Batch 1 vertical slice memory." in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "memory"
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_memory_list_recent_never_reaches_the_save_operation() -> None:
+    """A structural, behavioural proof that memory_list_recent can only
+    ever read: saving a memory through this capability is impossible,
+    since the real MemoryTool.run() only ever receives
+    operation="list" - never a model-supplied value - for this
+    capability."""
+    router, _, logger = _router(_MEMORY_LIST_RECENT_EXECUTE_TEXT)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    before_count = memory.count()
+
+    orchestrator.handle_request(
+        "ask jarvis to: remember that Phase 91 introduced new capabilities"
+    )
+
+    assert memory.count() == before_count
+
+
+def test_health_check_and_schedule_list_and_memory_list_recent_reject_extra_arguments() -> None:
+    """Each new Batch 1 capability declares zero arguments, so any
+    non-empty "arguments" object is rejected by the existing, strict
+    parser before any preflight or execution is attempted."""
+    for capability_id in ("health_check", "schedule_list", "memory_list_recent"):
+        stray_argument_text = json.dumps(
+            {
+                "decision": "execute",
+                "capability_id": capability_id,
+                "arguments": {"unexpected": "value"},
+            }
+        )
+        router, provider, logger = _router(stray_argument_text)
+        orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+            router, logger
+        )
+
+        response = orchestrator.handle_request("ask jarvis to: do something")
+
+        assert response.success is False
+        assert "could not safely process" in response.message.lower()
+        assert len(_tool_call_events(logger)) == 0
+
+
+def test_wrongly_typed_arguments_container_is_rejected_for_new_capabilities() -> None:
+    """"arguments" must be a JSON object - an array, string, null,
+    number, or boolean is rejected outright, for every capability."""
+    for malformed_arguments in ('"not an object"', "[]", "null", "42", "true"):
+        malformed_text = (
+            '{"decision": "execute", "capability_id": "health_check", '
+            f'"arguments": {malformed_arguments}}}'
+        )
+        router, _, logger = _router(malformed_text)
+        orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+            router, logger
+        )
+
+        response = orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+        assert response.success is False
+        assert len(_tool_call_events(logger)) == 0
+
+
+def test_unsupported_capability_name_remains_rejected_alongside_new_capabilities() -> None:
+    unsupported_name_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "delete_everything",
+            "arguments": {},
+        }
+    )
+    router, _, logger = _router(unsupported_name_text)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: do something unsafe")
+
+    assert response.success is False
+    assert len(_tool_call_events(logger)) == 0
+
+
+def test_only_one_capability_executes_per_request() -> None:
+    """A structured decision names at most one capability_id - there is
+    no mechanism anywhere in the schema or the execution path for more
+    than one tool to execute per "ask jarvis to:" request."""
+    router, _, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_project_state_show_behavior_is_unaffected_by_new_capabilities() -> None:
+    router, provider, logger = _router(_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: show my project state")
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert response.tool_result.tool_name == "project_state_show"
+
+
+def test_memory_search_capability_id_is_not_recognised_yet() -> None:
+    """Batch 2's MEMORY_SEARCH does not exist yet - a model response
+    naming it must be rejected exactly like any other unknown
+    capability id."""
+    memory_search_text = json.dumps(
+        {"decision": "execute", "capability_id": "memory_search", "arguments": {"value": "x"}}
+    )
+    router, _, logger = _router(memory_search_text)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: search my memories for x")
+
+    assert response.success is False
+    assert len(_tool_call_events(logger)) == 0
 
 
 # --- Real execution / grounded response -----------------------------------------

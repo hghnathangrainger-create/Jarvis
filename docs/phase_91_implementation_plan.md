@@ -1,8 +1,8 @@
 # Jarvis — Phase 91 Implementation Plan
 
-**Status:** Planning gate — awaiting explicit approval before Batch 1 begins.
+**Status:** Batch 1 implemented and verified. Batch 2 (`MEMORY_SEARCH`) not yet started — Phase 91 remains open.
 **Version:** Phase 91 — Safe Intelligence Capability Expansion (medium milestone: planning gate + 2 batches)
-**Date:** 2026-07-20
+**Date:** 2026-07-20 (planning gate); Batch 1 implemented 2026-07-20
 
 ---
 
@@ -319,3 +319,39 @@ Both batches are purely additive to `intelligence/capability_catalog.py` and `in
 ## 25. `dashboard_test.txt` Confirmation
 
 Confirmed untouched, untracked, and uncommitted throughout this planning pass — observed only as a `git status --short` entry, never opened, read, staged, or otherwise interacted with. Neither batch in this plan touches any dashboard code or file.
+
+---
+
+## 26. Batch 1 Implementation and Verification Evidence
+
+**Implemented exactly as planned in §5/§7-§15**, with no scope deviation: `HEALTH_CHECK`, `SCHEDULE_LIST`, `MEMORY_LIST_RECENT` added to `CAPABILITY_CATALOG`, all zero-argument, GREEN, `SINGLE_TOOL`. `MEMORY_SEARCH` (Batch 2) was **not** implemented.
+
+**Files actually changed (all as predicted in §24's "Batch 1" row, no extras):**
+- `intelligence/capability_catalog.py` — three new `CapabilityId` members and `CAPABILITY_CATALOG` entries; `_FIXED_FIELD_BY_CAPABILITY: dict[CapabilityId, str]` generalized to `_FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]]` (a strict superset behaviorally — `project_state_update_focus`'s existing `field="focus"` injection is preserved unchanged, now expressed as `{"field": "focus"}`; `memory_list_recent` adds `{"operation": "list"}`).
+- `intelligence/planning.py` — `_TRUSTED_PLANNING_INSTRUCTION` text extended to describe all five model-selectable capabilities and their exact JSON shapes. No control-flow change: `select_tool()`'s existing `SINGLE_TOOL` branch handles all three new capabilities with zero new code, confirmed by direct testing.
+- `tools/builtin/help_tool.py`, `docs/user_guide.md` — documentation of the three new capabilities, preserving every existing required phrase (`ask jarvis to: <request>`, `AI_REASONING_ENABLED`, `no supported capability can satisfy`, `update only its focus field`, `requires your explicit approval`, `structured read-back`, `no arbitrary tool access, no autonomous behavior`).
+- `tests/unit/test_capability_catalog.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_orchestrator_ask_jarvis_to.py`, `tests/unit/test_help_tool.py` — new/updated focused tests (see below).
+
+**Confirmed unchanged (zero diff):** `core/orchestrator.py`, `core/command_router.py`, `core/request_models.py`, `intelligence/structured_output.py`, `intelligence/context.py`, `intelligence/verification.py`, `main.py`, `workflow/*`, `approval/*`, `tools/executor.py`, `tools/registry.py`, `tools/base_tool.py`, `security/security_manager.py`, every individual tool file, all dashboard code.
+
+**Exact capability behavior implemented:**
+- `HEALTH_CHECK` → real `health_check` tool, `arguments=()`, `tool_input == {}` always.
+- `SCHEDULE_LIST` → real `schedule_list` tool, `arguments=()`, `tool_input == {}` always.
+- `MEMORY_LIST_RECENT` → real `memory` tool, `arguments=()`, `tool_input == {"operation": "list"}` always — the `"operation"` key is a fixed literal from `_FIXED_ARGUMENTS_BY_CAPABILITY`, never model-supplied or model-overridable (the capability declares zero arguments, so the strict parser rejects any model-supplied `"operation"` key before `build_tool_input()` is ever reached — proven by `test_memory_list_recent_execute_with_stray_argument_is_rejected`).
+
+**Real `SecurityManager` preflight confirmed:** all three real actions (`"show system health"`, `"list schedules"`, `"list memories"`) classify GREEN via existing, unchanged `_RULES` entries — no new `SecurityManager` rule was added or needed. `intelligence/planning.py::_preflight_capability()`'s existing exact-tier-match check applies unchanged.
+
+**Real `ToolExecutor` execution confirmed:** each capability's one-step `StructuredPlan` is executed via `core/orchestrator.py`'s existing, unmodified `PlanningOutcomeKind.EXECUTABLE` branch, calling `self._executor.execute(...)` — the same real `ToolExecutor` every other tool call uses. Proven end-to-end in `tests/unit/test_orchestrator_ask_jarvis_to.py` with real, SQLite-backed `HealthCheckTool`/`ScheduleListTool`/`MemoryTool` instances (never mocks), asserting exactly one `tool_call` audit event per request.
+
+**No direct `tool.run()` call added:** `test_no_direct_tool_run_call_anywhere_in_planning_module` (pre-existing, unmodified) continues to pass against the extended `intelligence/planning.py`.
+
+**Test results:**
+- Focused (`test_capability_catalog.py` + `test_intelligence_planning.py` + `test_orchestrator_ask_jarvis_to.py` + `test_help_tool.py`): **309 passed, 0 failed**.
+- Phase 90 regressions (`test_ask_jarvis_to_routing.py`, `test_structured_output.py`, `test_orchestrator_update_focus_workflow.py`, `test_verification.py`, `test_project_state_verify_tool.py`) plus core regressions (`test_workflow_engine.py`, `test_approval_manager.py`, `test_tool_executor_approval.py`, `test_tool_executor_logger_isolation.py`, `test_security.py`, `test_security_injection_scan.py`, `test_security_unexpected_action.py`, `test_command_router.py`, `test_help_output_routing_consistency.py`, `test_project_state_store.py`, `test_project_state_show_tool.py`, `test_project_state_update_tool.py`, `test_health_check_tool.py`, `test_schedule_tools.py`, `test_memory_tool.py`): **901 passed, 0 failed**.
+- Full suite (`poetry run pytest -q`): **4627 passed, 3 skipped, 2 failed**. The 2 failures (`test_main_ai_wiring.py::test_ai_disabled_orchestrator_has_no_reasoning_engine`, `test_main_jarvis_brain_wiring.py::test_jarvis_brain_tool_reports_real_config_through_real_wiring`) are **pre-existing and environmental**, not caused by this batch: both assert AI reasoning is disabled by default, but this machine's real `.env`/environment currently has AI reasoning enabled (a real Anthropic API key is configured, separately noted as currently low on credits). Confirmed by `git stash`-ing every Batch 1 change and re-running both tests against the unmodified `e9abab3` baseline — they fail identically. Delta from the 4607/3/0 Batch 90-closure baseline: **+20 passed** (new Batch 1 tests) **+0 skipped, +2 pre-existing/environmental failures unrelated to this diff**.
+- Ruff (`poetry run ruff check` on every changed file): **clean, zero violations**.
+- `git diff --check`: **clean**.
+
+**Not implemented (confirmed):** `MEMORY_SEARCH`, `quarantine_list`, `workflow_history`, `approval_history`, `info`, `file_search`, `file_list`, `memory` `save`/`get`/`categories`, any YELLOW/RED capability, any multi-tool plan, chaining, retry, replan, or dashboard change.
+
+**Phase 91 remains open** — Batch 2 (`MEMORY_SEARCH`) requires its own separate approval before implementation begins.

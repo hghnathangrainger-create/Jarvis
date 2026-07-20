@@ -27,11 +27,14 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_three_batch_3_entries() -> None:
+def test_catalog_contains_exactly_the_six_phase_91_batch_1_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
     }
 
 
@@ -40,6 +43,9 @@ def test_no_other_capability_id_exists() -> None:
         "project_state_show",
         "project_state_update_focus",
         "project_state_verify_focus",
+        "health_check",
+        "schedule_list",
+        "memory_list_recent",
     }
 
 
@@ -67,7 +73,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_two_capabilities_are_model_selectable() -> None:
+def test_only_five_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -76,6 +82,9 @@ def test_only_two_capabilities_are_model_selectable() -> None:
     assert selectable == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
     }
 
 
@@ -83,6 +92,39 @@ def test_project_state_show_adapter_fields_are_exact() -> None:
     adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_SHOW]
     assert adapter.capability_id is CapabilityId.PROJECT_STATE_SHOW
     assert adapter.tool_name == "project_state_show"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_health_check_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.HEALTH_CHECK]
+    assert adapter.capability_id is CapabilityId.HEALTH_CHECK
+    assert adapter.tool_name == "health_check"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_schedule_list_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_LIST]
+    assert adapter.capability_id is CapabilityId.SCHEDULE_LIST
+    assert adapter.tool_name == "schedule_list"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_memory_list_recent_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_LIST_RECENT]
+    assert adapter.capability_id is CapabilityId.MEMORY_LIST_RECENT
+    assert adapter.tool_name == "memory"
     assert adapter.arguments == ()
     assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
     assert adapter.max_execution_tier is SecurityTier.GREEN
@@ -132,6 +174,32 @@ def test_build_tool_input_never_lets_model_choose_the_field() -> None:
     adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
     result = build_tool_input(adapter, {"value": "x", "field": "branch"})
     assert result["field"] == "focus"
+
+
+def test_build_tool_input_adds_no_fixed_arguments_for_health_check() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.HEALTH_CHECK]
+    assert build_tool_input(adapter, {}) == {}
+
+
+def test_build_tool_input_adds_no_fixed_arguments_for_schedule_list() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_LIST]
+    assert build_tool_input(adapter, {}) == {}
+
+
+def test_build_tool_input_adds_fixed_operation_for_memory_list_recent() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_LIST_RECENT]
+    assert build_tool_input(adapter, {}) == {"operation": "list"}
+
+
+def test_build_tool_input_never_lets_model_choose_the_operation() -> None:
+    """The "operation" key is always the fixed literal "list" for
+    memory_list_recent - never derived from, or overridable by, model-
+    supplied arguments (memory_list_recent declares zero arguments, so
+    this also proves a stray "operation" key smuggled through
+    somehow - e.g. by a bug elsewhere - could never override it)."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.MEMORY_LIST_RECENT]
+    result = build_tool_input(adapter, {"operation": "save"})
+    assert result["operation"] == "list"
 
 
 # --- Contract shape tests --------------------------------------------------

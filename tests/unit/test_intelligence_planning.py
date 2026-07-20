@@ -164,6 +164,58 @@ def _real_registry_with_project_state_show() -> ToolRegistry:
     return registry
 
 
+def _real_registry_with_health_check() -> ToolRegistry:
+    """A registry with the real, production HealthCheckTool registered.
+
+    HealthCheckTool.action_for() is a fixed string that never touches
+    any constructor dependency, so every dependency here is a bare
+    placeholder - select_tool() only ever calls action_for() during
+    preflight, never run(), so no dependency's real behaviour matters
+    for these tests."""
+    from tools.builtin.health_check_tool import HealthCheckTool
+
+    registry = ToolRegistry()
+    registry.register_tool(
+        HealthCheckTool(
+            registry=registry,
+            settings=None,  # type: ignore[arg-type]
+            inbox_store=None,  # type: ignore[arg-type]
+            schedule_store=None,  # type: ignore[arg-type]
+            quarantine_store=None,  # type: ignore[arg-type]
+            security_manager=None,  # type: ignore[arg-type]
+            memory_manager=None,  # type: ignore[arg-type]
+            approval_history_store=None,  # type: ignore[arg-type]
+            workflow_history_store=None,  # type: ignore[arg-type]
+        )
+    )
+    return registry
+
+
+def _real_registry_with_schedule_list() -> ToolRegistry:
+    """A registry with the real, production ScheduleListTool registered.
+
+    ScheduleListTool.action_for() is a fixed string that never touches
+    its ScheduleStore dependency, so a bare placeholder is sufficient
+    for a preflight-only test."""
+    from tools.builtin.schedule_list_tool import ScheduleListTool
+
+    registry = ToolRegistry()
+    registry.register_tool(ScheduleListTool(schedules=None))  # type: ignore[arg-type]
+    return registry
+
+
+def _real_registry_with_memory_list_recent() -> ToolRegistry:
+    """A registry with the real, production MemoryTool registered under
+    its real name "memory". MemoryTool.action_for() for the default
+    ("list") operation never touches its MemoryManager dependency, so a
+    bare placeholder is sufficient for a preflight-only test."""
+    from tools.builtin.memory_tool import MemoryTool
+
+    registry = ToolRegistry()
+    registry.register_tool(MemoryTool(memory_manager=None))  # type: ignore[arg-type]
+    return registry
+
+
 # --- Provider enablement/availability/failure -------------------------------
 
 
@@ -378,6 +430,96 @@ def test_real_green_preflight_succeeds_and_stores_the_real_tier() -> None:
     assert outcome.plan.steps[0].tool_name == "project_state_show"
     assert outcome.plan.steps[0].step_number == 1
     assert len(outcome.plan.steps) == 1
+
+
+_HEALTH_CHECK_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "health_check", "arguments": {}}
+)
+_SCHEDULE_LIST_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "schedule_list", "arguments": {}}
+)
+_MEMORY_LIST_RECENT_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "memory_list_recent", "arguments": {}}
+)
+
+
+def test_health_check_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="check jarvis's health",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "health_check"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.HEALTH_CHECK
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    assert outcome.plan.steps[0].arguments == {}
+    assert len(outcome.plan.steps) == 1
+
+
+def test_schedule_list_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_SCHEDULE_LIST_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show my schedules",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_schedule_list(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "schedule_list"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.SCHEDULE_LIST
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    assert outcome.plan.steps[0].arguments == {}
+    assert len(outcome.plan.steps) == 1
+
+
+def test_memory_list_recent_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_MEMORY_LIST_RECENT_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="what have I asked you to remember recently",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_memory_list_recent(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "memory"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.MEMORY_LIST_RECENT
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    # The fixed "operation": "list" was injected by build_tool_input(),
+    # never supplied or influenced by the model (whose own "arguments"
+    # for this capability was strictly validated as {}).
+    assert outcome.plan.steps[0].arguments == {"operation": "list"}
+    assert len(outcome.plan.steps) == 1
+
+
+def test_memory_list_recent_execute_with_stray_argument_is_rejected() -> None:
+    """memory_list_recent declares zero arguments, so a model response
+    naming any argument at all (including "operation") is rejected by
+    the strict parser before this capability's own fixed-operation
+    injection is ever reached - proving the model can never smuggle a
+    different operation through."""
+    stray_argument_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_list_recent",
+            "arguments": {"operation": "save"},
+        }
+    )
+    router, _ = _router(stray_argument_text)
+    outcome = select_tool(
+        request_text="what have I asked you to remember recently",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_memory_list_recent(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.plan is None
 
 
 def test_forced_yellow_preflight_is_rejected_before_execution() -> None:

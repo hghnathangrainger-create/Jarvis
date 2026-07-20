@@ -89,17 +89,18 @@ from tools.base_tool import ToolRequest
 from tools.registry import ToolRegistry
 
 #: The one fixed, Jarvis-authored trusted planning instruction (Section
-#: 26.C; extended for Batch 3). Supplied only through AIRouter.route()'s
-#: own system_instruction parameter - never mixed into any ContextItem,
-#: and never derived from, or influenced by, memory or ProjectState
-#: text. Echoes both valid response shapes verbatim, per Section 26.C's
-#: own requirement that the trusted instruction include the exact two
-#: valid objects. Explicitly names project_state_verify_focus as
-#: internal-only and forbidden from ever being offered - the parser
-#: (intelligence/structured_output.py) independently enforces this too,
-#: so a model that ignores this instruction is still rejected.
+#: 26.C; extended for Batch 3; extended for Phase 91, Batch 1). Supplied
+#: only through AIRouter.route()'s own system_instruction parameter -
+#: never mixed into any ContextItem, and never derived from, or
+#: influenced by, memory or ProjectState text. Echoes every valid
+#: response shape verbatim, per Section 26.C's own requirement that the
+#: trusted instruction include the exact valid objects. Explicitly
+#: names project_state_verify_focus as internal-only and forbidden from
+#: ever being offered - the parser (intelligence/structured_output.py)
+#: independently enforces this too, so a model that ignores this
+#: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly two capabilities "
+    "You are Jarvis's tool-selection planner. Exactly five capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -115,13 +116,25 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "explicit approval and will be verified with a structured read-back "
     "after it runs.\n"
     "\n"
-    'A third capability id, "project_state_verify_focus", exists only '
+    '3. capability id "health_check" - reports basic Jarvis system '
+    "health. Use this only when the request asks about Jarvis's health "
+    "or status. Takes no arguments.\n"
+    "\n"
+    '4. capability id "schedule_list" - lists your configured '
+    "web-search-summary schedules. Use this only when the request asks "
+    "to see or list schedules. Takes no arguments.\n"
+    "\n"
+    '5. capability id "memory_list_recent" - lists your most recently '
+    "stored memories. Use this only when the request asks to see or "
+    "list recently stored memories. Takes no arguments.\n"
+    "\n"
+    'A sixth capability id, "project_state_verify_focus", exists only '
     "internally - it is never a valid selection, is never selectable "
     "through your output, and must never appear in your response under "
     "any circumstances.\n"
     "\n"
-    "If neither project_state_show nor project_state_update_focus can "
-    "satisfy the request, you must return the exact unsupported object.\n"
+    "If no capability above can satisfy the request, you must return "
+    "the exact unsupported object.\n"
     "\n"
     "Respond with exactly one of these JSON objects, and nothing else:\n"
     "\n"
@@ -133,6 +146,18 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     '{"decision": "execute", "capability_id": '
     '"project_state_update_focus", "arguments": {"value": "the '
     'requested new focus"}}\n'
+    "\n"
+    "Execute (health check):\n"
+    '{"decision": "execute", "capability_id": "health_check", '
+    '"arguments": {}}\n'
+    "\n"
+    "Execute (schedule list):\n"
+    '{"decision": "execute", "capability_id": "schedule_list", '
+    '"arguments": {}}\n'
+    "\n"
+    "Execute (recent memories):\n"
+    '{"decision": "execute", "capability_id": "memory_list_recent", '
+    '"arguments": {}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'
