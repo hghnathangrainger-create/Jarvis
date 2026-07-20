@@ -1,8 +1,8 @@
 # Jarvis — Phase 92 Implementation Plan
 
-**Status:** Planning gate — awaiting explicit approval before Batch 1 begins.
+**Status:** Planning gate — awaiting explicit approval before Batch 1 begins. Amended once (§18) to extend the grounding contract from capability selection alone to also cover model-supplied executable string arguments — see §18 for the full amendment; Sections 1-17 below are preserved as the original planning record and should be read together with §18, which supersedes any conflicting detail in them (in particular §4, §6, §8, §10-14, and §16).
 **Version:** Phase 92 — Intelligence Core V1 Next-Milestone Planning Gate
-**Date:** 2026-07-20
+**Date:** 2026-07-20 (original); amended 2026-07-20
 
 ---
 
@@ -263,3 +263,137 @@ The Anthropic API account configured for this repository lacks sufficient credit
 ## 17. Note on This Planning Gate's Own Verification
 
 This is a planning-only gate: no production or test file was modified. The full suite was not re-run for this specific commit, per the task's own instruction ("Do not run the full suite unless repository convention requires it for documentation-only planning commits") — the same convention Phase 91's own planning gate (`e9abab3`) followed. The verified baseline quoted in §1 is the real, most recently confirmed full-suite result (Phase 91 closure, `05c4120`), re-stated here, not re-executed.
+
+---
+
+## 18. Planning Amendment — Executable Argument Grounding
+
+**Sections 1-17 above are preserved unchanged as the original planning record.** Direct repository inspection (below) found that the original plan's grounding contract, as written, covered only *capability selection* and left a materially identical gap open for *model-supplied executable argument values*. This section amends the plan to close that gap. This section **supersedes** any conflicting detail in Sections 1-17 (principally §4, §6, §8, §10-14, §16); anywhere this section is silent, Sections 1-17 still govern.
+
+### 18.1 Whether argument grounding currently exists
+
+**It does not.** Confirmed by direct inspection, not assumption:
+
+- `intelligence/structured_output.py::_validate_arguments()`/`_validate_string_argument()` validate an argument's *type* and *hygiene* only (non-empty, non-whitespace-only, ≤500 chars, no NUL, no leading/trailing control character) — never its relationship to `request_text`. The parser has no access to `request_text` at all; it only ever sees the raw model response.
+- `intelligence/planning.py::select_tool()` and `_preflight_capability()`: every use of `request_text` in this module was enumerated directly (`grep -n "request_text" intelligence/planning.py`) — it is used only to (a) send as `user_message` to the model, and (b) store verbatim as `StructuredPlan.goal`/`Plan.user_request` for disclosure. It is **never** compared against `parsed.arguments` or the constructed `tool_input` anywhere in this module.
+- `intelligence/capability_catalog.py::build_tool_input()` only copies, renames, and merges fixed keys — it performs no comparison against any request text (it does not even receive `request_text` as a parameter).
+- `core/orchestrator.py`'s `_start_update_focus_workflow()`/`_handle_ask_jarvis_to_request()` paths, and `MemoryTool`'s own `run()` for the `"search"` operation, contain no request-to-argument consistency check.
+- A repository-wide search for `grounded`/`grounding`/`attribut`/`consisten` across every `.py` file found no match related to request-argument attribution — every "grounded" hit refers to the existing, unrelated *response*-grounding guarantee (a response is grounded in the real `ToolResult`, a completely different property).
+- No existing test (`tests/unit/test_structured_output.py`, `test_intelligence_planning.py`, `test_orchestrator_ask_jarvis_to.py`, `test_orchestrator_update_focus_workflow.py`) asserts any request-to-argument consistency. On the contrary: most of `test_intelligence_planning.py`'s existing update-focus tests deliberately pair `request_text="update my focus"` with a fixed fake model value of `"a new focus value"` — two strings that share no meaningful content — precisely because today nothing checks the relationship between them; these tests exist purely to exercise workflow-construction mechanics (tier handling, step shape, preflight-mismatch handling), decoupled from content.
+
+### 18.2 The exact uncovered risk
+
+A capability can be genuinely relevant to a live request (and would pass the new capability-selection grounding check from §5/§6) while the specific value the model supplies for its one executable argument is fabricated, silently substituted, or altered — and nothing today would catch this before `SecurityManager` preflight, `ApprovalManager.create_request()` (for the YELLOW capability), or `ToolExecutor.execute()`. Concretely: a request asking to search memories for one subject could execute a search for an entirely different subject the model invented; a request asking to set the project focus to one value could create a real, user-facing YELLOW approval for a different focus value than the one actually requested — and if approved (reasonably, since the approval UI shows the *real* value the model supplied, not what was actually asked), the durable focus verifier would faithfully confirm that the wrong value was stored, exactly as requested of it. Verification proves the write matches what was *approved*; it was never designed to prove the approved value matches what was *originally asked for* — that is a distinct property this amendment adds.
+
+### 18.3 Exact amended capability-grounding rule
+
+Unchanged in mechanism from §10/§11 of the original plan, refined only in keyword selection to satisfy the explicit generic-term constraint (§18.5):
+
+For each of the 6 model-selectable capabilities, a hand-maintained `grounding_keywords: tuple[str, ...]` of **specific, non-generic** domain terms:
+
+| Capability | `grounding_keywords` |
+|---|---|
+| `PROJECT_STATE_SHOW` | `("focus", "branch", "commit", "phase", "project state")` |
+| `PROJECT_STATE_UPDATE_FOCUS` | `("focus",)` |
+| `HEALTH_CHECK` | `("health",)` |
+| `SCHEDULE_LIST` | `("schedule", "schedules")` |
+| `MEMORY_LIST_RECENT` | `("memory", "memories", "remember", "remembered")` |
+| `MEMORY_SEARCH` | `("memory", "memories", "remember", "remembered")` |
+
+A single-word keyword is matched by token membership in the request's own tokenized, casefolded terms. The one multi-word entry, `"project state"`, is matched as a literal, normalized, adjacent-phrase substring of the request text — deliberately **not** decomposed into `"project"` and `"state"` checked independently, since both of those words are on the generic-term exclusion list (§18.5) and must never grounded anything alone. A request is capability-grounded if **at least one** of its selected capability's `grounding_keywords` entries matches.
+
+`MEMORY_LIST_RECENT` and `MEMORY_SEARCH` intentionally share the same keyword set — capability-selection grounding only needs to confirm the request is plausibly *about memory at all*; distinguishing "list recent" from "search for X" is already handled structurally (one capability takes no argument, the other requires one) and, for `MEMORY_SEARCH` specifically, further by argument-attribution grounding (§18.4).
+
+### 18.4 Exact amended string-argument attribution rule
+
+Applies only to a capability that declares a string argument — today, exactly `PROJECT_STATE_UPDATE_FOCUS` and `MEMORY_SEARCH`'s `value`. Runs only after that capability has already passed capability-selection grounding (§18.3); if capability-selection grounding fails, argument-attribution grounding is never reached (moot).
+
+**Step 1 — normalize.** Both `request_text` and the argument value are independently normalized: casefold, collapse runs of internal whitespace to a single space, strip leading/trailing whitespace. This normalization is used only to *decide* attribution — the original, validated argument value is never altered; if accepted, the exact, unmodified, already-validated value proceeds into `build_tool_input()` exactly as today.
+
+**Step 2 — primary check: exact normalized containment.** If the normalized argument value appears as a contiguous substring of the normalized request text, the argument is **accepted**. This is the common case for both real capabilities: e.g. request `"search my memories for the deployment checklist"` / value `"the deployment checklist"`; request `"update my project focus to batch 3 verification and confirm it"` / value `"batch 3 verification"`.
+
+**Step 3 — fallback check: significant-term attribution.** If Step 2 fails, tokenize the argument value the same way `intelligence/context.py::derive_query_terms()` tokenizes (alphanumeric-run splitting, casefold) but against a **grounding-specific exclusion set**, not `derive_query_terms()`'s own `_STOPWORDS`/4-character minimum: exclude common English stopwords (reusing `intelligence.context._STOPWORDS`) **and** the explicit generic command/domain-word set from §18.5, with **no minimum token length** (unlike `derive_query_terms()`, since a short but specific value token — e.g. a version number or an acronym — must still count as real content; argument text is short, user-authored, and not a memory-relevance search string, so `derive_query_terms()`'s own 4-character/5-term memory-relevance tuning is not reused here, only its tokenizer). Call the result the value's *significant terms*.
+- If the value's significant-term set is **empty** (the entire value reduces to stopwords/generic terms), the argument is **rejected** — fail closed, exactly as required: an argument with no attributable specific content can never be accepted merely because it passed hygiene validation.
+- Otherwise, tokenize `request_text` identically into its own significant-term set, and **accept only if every one of the value's significant terms is present in the request's significant terms** (i.e. the value's terms are a subset of the request's terms). Any single significant term present in the value but absent from the request causes **rejection** — this is what correctly rejects a partially-overlapping-but-expanded value (e.g. value `"the deployment checklist and also delete everything"` against the same request above: `"delete"`/`"everything"` are not in the request → rejected).
+
+**Never:** invents, paraphrases, replaces, trims, truncates, coerces, or otherwise modifies the argument value. The rule only ever answers accept/reject; the executable value is either the original, unchanged validated string, or the request is refused entirely before it is ever used.
+
+### 18.5 Why the rules are deterministic and deny-only
+
+Both rules are pure functions of two already-real strings (`request_text`, and — for argument-attribution — the already-validated argument value) using only casefold/whitespace/substring/token-set operations — no AI call, no embedding, no probability, no learned model of any kind, and no external state. Both rules can only ever move an otherwise-proceeding decision to a refusal; neither rule can cause an otherwise-invalid decision (a malformed structured output, an unsupported capability, a hygiene-failing argument) to become valid. This mirrors the existing, load-bearing `_preflight_capability()` exact-tier-match design precedent exactly: a new, independent gate that can only narrow, never widen, what proceeds.
+
+### 18.6 How generic-term false positives are prevented
+
+A new, explicit, hand-maintained exclusion set — distinct from, and applied in addition to, `intelligence.context._STOPWORDS` — is defined for grounding purposes only:
+
+```python
+_GENERIC_GROUNDING_TERMS: frozenset[str] = frozenset({
+    "show", "list", "get", "find", "search", "update", "change", "set",
+    "jarvis", "project", "state",
+})
+```
+
+This set is applied identically in two places: (a) implicitly, by construction, in the hand-chosen `grounding_keywords` table (§18.3), which contains none of these words as standalone entries (the sole multi-word exception, `"project state"`, is matched only as an adjacent phrase, never via either word alone); and (b) explicitly, in the significant-term tokenizer (§18.4 Step 3), so a value consisting only of these words plus stopwords (e.g. a hypothetical adversarial value like `"update the project state"`) reduces to an empty significant-term set and is rejected outright by Step 3's fail-closed rule, never accepted merely because a generic word happens to match. This directly satisfies the requirement that "a model-supplied argument containing unrelated meaningful terms must be refused even when one generic word overlaps," and its inverse — a generic word alone must never be sufficient to accept anything.
+
+### 18.7 How false refusals are bounded and tested
+
+- **Capability-selection grounding**: every existing real vertical-slice phrasing already used in Phase 90/91 tests (`"show my project state"`, `"update my project focus to X"`, `"check jarvis's health"`, `"show my schedules"`, `"what have I asked you to remember recently"`, `"search my memories for the deployment checklist"`) is re-verified in Batch 1 to satisfy its own capability's `grounding_keywords` — none require a wording change.
+- **Argument-attribution grounding**: direct inspection of `tests/unit/test_intelligence_planning.py` found that most existing update-focus tests use `request_text="update my focus"` paired with a fixed fake value `"a new focus value"` that shares no content with it — these two strings were never meant to be content-consistent (they test workflow mechanics, not content fidelity). **Batch 1 must update these specific test fixtures'** `request_text` (not their assertions, not their intent) to genuinely contain their paired fake value — e.g. `request_text="update my focus"` becomes `request_text="update my focus to a new focus value"` — a mechanical, low-risk, disclosed fixture change, not a behavior change. `tests/unit/test_orchestrator_update_focus_workflow.py`'s own `_REQUEST` constant (`"...update my project focus to batch 3 verification and confirm it"`) is paired, in several tests, with a fake value of `"new focus value"` (unrelated) — these fixtures need the same treatment. `tests/unit/test_orchestrator_ask_jarvis_to.py`'s `MEMORY_SEARCH` tests already use naturally consistent request/value pairs (`"search my memories for deployment checklist"` / `"deployment checklist"`) and need no fixture change. This finding is treated as an explicit, bounded, pre-identified Batch 1 task (§18.9), not a surprise regression.
+- Bounded, adversarial rejection tests (§18.10) confirm the rule cannot be defeated by injected/retrieved context, since it only ever consults `request_text` and the argument value — never `AssembledContext`/memory/project-state content.
+
+### 18.8 Updated outcome/refusal design
+
+One new, shared public `PlanningOutcomeKind` member — `UNGROUNDED_SELECTION` — covers both failure classes, distinguished only by a deterministic, bounded `detail` string (mirroring how `INVALID_OUTPUT` already carries a bounded `detail` for many distinct parser failures without needing a separate outcome kind per reason). This is the smallest design that still supports precise testing and honest handling:
+
+- Malformed structured output → existing `INVALID_OUTPUT` (unchanged).
+- A structurally valid `"unsupported"` decision → existing `UNSUPPORTED` (unchanged).
+- A structurally valid `"execute"` decision whose capability is not grounded in the request → new `UNGROUNDED_SELECTION`, `detail` naming the capability-grounding failure (e.g. `"the selected capability does not appear related to your request"`).
+- A structurally valid `"execute"` decision whose capability is grounded but whose argument is not attributable to the request → new `UNGROUNDED_SELECTION`, `detail` naming the argument-attribution failure (e.g. `"the supplied value does not appear to come from your request"`) — never the raw, rejected value itself, and never any retrieved memory/context content.
+
+Every `UNGROUNDED_SELECTION` outcome guarantees, by construction (it is returned from `select_tool()` before any of the following are ever called): no `SecurityManager.classify_action()` call beyond what capability-selection grounding itself never performs, no `ApprovalManager.create_request()`, no `ToolExecutor.execute()`, no verifier call, no write, and no memory-tool result of any kind is ever produced or exposed.
+
+### 18.9 Updated Batch 1 and Batch 2 scope
+
+**Batch 1 — Deterministic Grounding Contract (capability + argument), internal only:**
+- Add `grounding_keywords` to every model-selectable `CapabilityAdapter` (table in §18.3).
+- Implement capability-selection grounding (token/phrase matching against `grounding_keywords`).
+- Implement argument-attribution grounding (normalized containment + significant-term fallback, §18.4), applied only to `PROJECT_STATE_UPDATE_FOCUS`/`MEMORY_SEARCH`.
+- Add the new `_GENERIC_GROUNDING_TERMS` exclusion set (§18.6).
+- Add the new `UNGROUNDED_SELECTION` `PlanningOutcomeKind` member and wire both grounding checks into `select_tool()`, in this order: parse → (if EXECUTE) capability-selection grounding → (if the capability declares a string argument) argument-attribution grounding → existing `_preflight_capability()` → existing plan construction. No orchestrator-level response wiring beyond the minimum needed to construct/return the new outcome.
+- Update the pre-identified, content-decoupled test fixtures in `test_intelligence_planning.py`/`test_orchestrator_update_focus_workflow.py` (§18.7) so their `request_text`/value pairs are mutually consistent, preserving every existing test's original assertion intent.
+- Focused unit and adversarial tests (§18.10).
+- Stop/report; explicit approval required before Batch 2.
+
+**Batch 2 — Orchestrator Integration, Grounded Refusal, Full Regression, Docs** (unchanged in shape from the original plan's §11, extended to also prove the argument-attribution path):
+- Wire `UNGROUNDED_SELECTION` into `core/orchestrator.py`'s response construction, with an `intelligence_trace` entry, using a distinct, honest, non-sensitive message per `detail` class.
+- Prove structurally and behaviorally: no preflight, no approval, no execution, no verification, no memory-result exposure on either refusal path.
+- Full regression across every Phase 90/91 capability, including `PROJECT_STATE_UPDATE_FOCUS`'s real YELLOW approval and durable focus-verifier flow with a *legitimately grounded* focus value (must remain bit-for-bit unaffected).
+- Update `docs/user_guide.md`/`tools/builtin/help_tool.py` only if the new refusal needs user-facing disclosure.
+- Full suite + Ruff + `git diff --check`.
+- Stop/report; explicit approval required before Phase 92 closes.
+
+Two batches remain sufficient. Repository inspection found no evidence this is unsafe or unrealistic: both grounding checks are small, pure functions reusing only already-existing tokenization/normalization patterns, the required test-fixture updates are mechanical and already precisely identified (§18.7), and no new persistence, dependency, or cross-cutting architectural change is introduced.
+
+### 18.10 Updated required tests
+
+**Capability grounding** (extends §12 of the original plan): relevant phrasing accepted for every one of the 6 capabilities using their real vertical-slice test phrasing; a request clearly about one capability with a different capability_id selected is rejected; a request containing only generic words (`"show"`, `"update"`, `"jarvis"`, `"project"`, `"state"` in isolation, never as the `"project state"` phrase) never grounds any capability; a request genuinely about one capability's domain does not ground an unrelated capability even when the model selects it; an adversarial memory/context item naming an unrelated capability's own domain words cannot ground a selection absent from `request_text` itself (the check never consults `AssembledContext`).
+
+**Argument grounding**, for `MEMORY_SEARCH`: a value attributable via exact containment is accepted; a value attributable only via significant-term subset (different case/punctuation/order) is accepted; a wholly model-invented, unrelated value is rejected; a value that is a superset of request content (contains extra, unrelated significant terms) is rejected; a value reducing entirely to stopwords/generic terms is rejected (fail-closed); rejection is proven to cause zero `MemoryTool` invocation and to expose zero memory content in the response or trace.
+
+**Argument grounding**, for `PROJECT_STATE_UPDATE_FOCUS`: a value attributable to the request is accepted through to a real pending YELLOW approval, exactly as today; a different or expanded model-invented value is rejected with zero `ApprovalManager.create_request()` call (proven via `approvals.list_pending() == []`); the existing, real, legitimately-grounded YELLOW approval → resume → write → durable focus-verification flow (`tests/unit/test_orchestrator_update_focus_workflow.py`) is fully re-run and must remain unaffected once its fixtures are updated per §18.7.
+
+**Structural safety**: grounding is proven (via direct call-order assertions and/or structural AST checks, mirroring this repository's existing `test_no_direct_tool_run_call_anywhere_in_planning_module` pattern) to run after parsing/argument-hygiene validation and before `_preflight_capability()`/`ApprovalManager`/`ToolExecutor`; grounding is proven to only ever narrow (never widen) an outcome — a decision already invalid for any other reason is never made valid by passing grounding; no second AI call is introduced anywhere in either check; no confidence score, probability, or learned-model output is introduced; `ask jarvis:`'s advisory path and its own, separate parser (`AIReasoningEngine._parse()`) are proven completely untouched.
+
+### 18.11 Updated acceptance criteria (extends §13)
+
+9. Every model-supplied string argument for `PROJECT_STATE_UPDATE_FOCUS`/`MEMORY_SEARCH` is proven attributable to `request_text` before it can reach preflight, approval, or execution.
+10. A fabricated, substituted, or materially-expanded argument value is refused before `SecurityManager` preflight, before `ApprovalManager.create_request()`, and before `ToolExecutor.execute()` — proven by direct assertion, not inference.
+11. Zero-argument capabilities (`PROJECT_STATE_SHOW`, `HEALTH_CHECK`, `SCHEDULE_LIST`, `MEMORY_LIST_RECENT`) are proven unaffected by the argument-attribution rule (it is never invoked for them).
+12. The pre-identified existing test-fixture updates (§18.7) are completed with no change to any test's original assertion intent.
+
+### 18.12 Explicit stop conditions (extends §16)
+
+- Stop and report before implementing if any currently-existing, real vertical-slice request phrasing for any of the 6 capabilities cannot satisfy the §18.3 `grounding_keywords` table without a false refusal.
+- Stop and report before implementing if any currently-existing, real vertical-slice `MEMORY_SEARCH`/`PROJECT_STATE_UPDATE_FOCUS` value/request pairing (after the disclosed, mechanical §18.7 fixture updates) still cannot satisfy the §18.4 attribution rule without a false refusal.
+- Stop and report if implementing argument-attribution grounding is found, on inspection during Batch 1, to require any change to `intelligence/structured_output.py`'s parsing/validation logic, `build_tool_input()`'s signature, or the executable value itself (it should not — grounding only ever decides accept/reject on the already-validated value).
+- Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
