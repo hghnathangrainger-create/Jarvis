@@ -749,3 +749,83 @@ In addition to every test already specified in §19.10 (superseded only where th
 - Stop and report if punctuation or suffix handling is found to require anything beyond the single, narrow, two-sided terminal-character rule in §20.5 — never introduce broad punctuation normalization.
 - Stop and report if any part of this design is found to require a probabilistic, learned, or similarity-scored judgment of any kind — the entire contract must remain deterministic string/token/substring logic only.
 - Stop after Batch 2's report. Do not begin Phase 93, additional capabilities, verification generalization, or any other unrelated work without Nathan's explicit approval.
+
+## 21. Batch 1 Implementation Evidence
+
+**Status: Batch 1 complete and committed. Phase 92 remains open — Batch 2 (final, per-reason user-facing refusal wording) has not been started.**
+
+### 21.1 Files changed
+
+- `intelligence/grounding.py` (new) — the deterministic, deny-only `ground_decision()` contract: the negation/conflict gate, the six `_IntentSignature` definitions, catalogue-wide uniqueness evaluation, and the two marker-based argument-span extractors, exactly per §20.
+- `intelligence/planning.py` (modified) — added `PlanningOutcomeKind.UNGROUNDED_SELECTION`; wired `ground_decision()` into `select_tool()` immediately after capability-adapter lookup and before `_preflight_capability()`, so both the `EXECUTABLE` and `EXECUTABLE_WORKFLOW` paths are covered by the same single check.
+- `core/orchestrator.py` (modified) — added the fixed `_ASK_JARVIS_TO_UNGROUNDED_MESSAGE` constant and a minimal branch in `_handle_ask_jarvis_to_request()` returning an honest `success=False` response for `UNGROUNDED_SELECTION`, placed before the `EXECUTABLE`/`EXECUTABLE_WORKFLOW` handling that would otherwise assume a populated plan/workflow_plan. This is crash-prevention wiring only; Batch 2 owns the final, per-reason public wording.
+- `tests/unit/test_grounding.py` (new, 71 tests) — direct unit coverage of `ground_decision()` and its private helpers: real per-capability grounding, uniqueness/collision cases, negation markers (including false-positive avoidance), both capabilities' argument-span rules, terminal-punctuation policy, and structural/contract-shape proofs.
+- `tests/unit/test_intelligence_planning.py` (modified: 9 existing fixture edits + 10 new tests, 33 → 43 tests) — new tests prove `select_tool()`'s real wiring: ungrounded-capability and ungrounded-argument outcomes, grounding running before any `SecurityManager.classify_action()` call (via a real counting subclass, not a mock), adversarial `AssembledContext` content failing to ground a capability the live request never asked for, and that an already-`INVALID_OUTPUT` decision is never widened by grounding.
+- `tests/unit/test_orchestrator_ask_jarvis_to.py` (modified: 1 existing fixture edit + 4 new tests, 41 → 45 tests) — new tests prove zero `ToolExecutor` calls and zero approvals on an ungrounded `EXECUTABLE`-path refusal, and that a fabricated `memory_search` value never exposes real stored memory content.
+- `tests/unit/test_orchestrator_update_focus_workflow.py` (modified extensively: `_REQUEST`/all `_update_focus_text()` values realigned to `"batch 3 verification"` + 4 new tests, 23 → 27 tests) — new tests prove zero pending approvals and zero store writes on both an argument-mismatch refusal and a negated-request refusal on the workflow (`EXECUTABLE_WORKFLOW`) path, a structural proof the `UNGROUNDED_SELECTION` branch never calls `_start_update_focus_workflow()`, and that the refusal message never echoes the rejected candidate value.
+
+`dashboard_test.txt` was not opened, read, staged, or otherwise touched at any point during this batch.
+
+### 21.2 Production grounding architecture (as implemented)
+
+`ground_decision(*, request_text, capability_id, arguments) -> GroundingResult` is a pure function: no AI provider call, no I/O, no retained state between calls, no argument beyond the three named above (verified by a dedicated signature-purity test in `test_grounding.py`). Order of internal checks, matching §20.3 exactly:
+
+1. Negation/conflict gate (§20.6) — checked first, unconditionally, for every capability including zero-argument ones.
+2. Catalogue-wide signature evaluation against all six `_IntentSignature` entries — empty match set, multiple-match set, and selected-not-unique-match are each refused with their own distinct reason.
+3. For the two capabilities with a declared string argument (`PROJECT_STATE_UPDATE_FOCUS`, `MEMORY_SEARCH`), marker-based single-span extraction followed by exact normalized-equality comparison against the model's already-validated value.
+
+`select_tool()` calls `ground_decision()` immediately after resolving the capability adapter and before `_preflight_capability()` — confirmed both by direct code inspection and by `test_ungrounded_selection_never_reaches_security_manager_preflight`, which proves a real, counting `SecurityManager` subclass records zero `classify_action()` calls on refusal, while `test_grounded_selection_still_reaches_security_manager_preflight` proves the same fixture records exactly one call for a genuinely grounded request (ruling out the zero-call result being a fixture artifact).
+
+### 21.3 Exact final six-capability signature table (as implemented, matches §20.2 with one disclosed narrowing — see §21.6)
+
+Implemented verbatim from §20.2 for `PROJECT_STATE_SHOW`, `PROJECT_STATE_UPDATE_FOCUS`, `SCHEDULE_LIST`, `MEMORY_LIST_RECENT`, and `MEMORY_SEARCH`. `HEALTH_CHECK`'s domain requirement was narrowed from §20.2's `"health"` or `"status"` to `"health"` only — see §21.6 for the investigation and reasoning.
+
+### 21.4 Catalogue-wide uniqueness (as implemented)
+
+`_grounded_capability_ids(request_text)` evaluates every one of the six signatures against the live request and returns the `frozenset` of matches. `ground_decision()` refuses on an empty set (`no_signature_matched`), a set with more than one member (`multiple_signatures_matched`), and a singleton set whose sole member is not the model-selected `capability_id` (`selected_capability_not_unique_match`) — otherwise the unique member equals the selection and evaluation proceeds. All three cases, plus the "genuinely grounded and matching" case, are directly tested in both `test_grounding.py` and, through the real `select_tool()`, in `test_intelligence_planning.py`.
+
+### 21.5 Negation markers and argument-span/punctuation behavior (as implemented, matches §20.6/§20.4/§20.5 exactly)
+
+Negation gate: whole-word markers `" not "`, `" never "` (space-padded substring match); contraction substrings `"don't"`, `"doesn't"`, `"isn't"`, `"won't"`, `"can't"` (matched after curly-apostrophe-to-straight normalization); phrase substrings `"cannot"`, `"instead of"`, `"rather than"`, `"but not"`. `"notebook"`/`"notice"`/`"whenever"`/`"nevertheless"` do not trigger — directly tested.
+
+Argument spans: `MEMORY_SEARCH` uses marker `" for "`; `PROJECT_STATE_UPDATE_FOCUS` uses marker `" to "`. Each requires the marker to occur exactly once (zero or multiple → rejected), a non-empty trimmed span, and no internal `" or "` disjunction. The model's value is compared to the span via exact normalized-equality (casefold, whitespace-collapse, at most one trailing `.`/`!`/`?` stripped from each side independently) — never containment, never a fuzzy or partial match.
+
+### 21.6 Disclosed implementation deviations from §20
+
+Two deliberate, investigated deviations from the plan's exact wording were made during implementation, both narrowing (never widening) what is accepted, and both are safe:
+
+1. **`HEALTH_CHECK` domain narrowed to `"health"` only, dropping `"status"`.** §20.2 allowed `"health"` or `"status"` as domain evidence, sourced from shipped instructional text rather than any real test. Per the task's own required stop-condition check, `tests/unit/test_orchestrator_ask_jarvis_to.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_health_check_tool.py`, `docs/user_guide.md`, and `tools/builtin/help_tool.py` were inspected and confirmed that no test or documented behavior requires bare `"status"` as sufficient domain evidence — only `"check jarvis's health"` is real, tested language. Since `"status"` alone is materially more generic and collision-prone than `"health"` (e.g. it appears in "check project status", "check schedule status"), it was dropped entirely rather than kept. No stop condition was triggered by this finding, since the investigation confirmed narrowing was safe rather than finding a conflict requiring escalation.
+2. **`UngroundedReason` carries seven values, not six.** §20.9 merged the argument-span failure modes (marker missing entirely vs. marker ambiguous/empty/disjunctive) into a single `ambiguous_argument_span` detail. During implementation, the zero-occurrences case (no marker at all) was given its own distinct `missing_argument_span` reason, separate from `ambiguous_argument_span` (marker present but multiple times, or the extracted span is empty or contains a disjunction), since these are diagnostically distinct situations sharing no common cause. This is purely additional granularity in an internal, non-user-facing detail string — it changes no refusal/acceptance outcome and satisfies §20.9's own stated invariant that no detail string ever exposes sensitive content.
+
+No other deviation from §20's design was made. No new capability, write action, security rule, retry/replan behavior, or autonomous behavior was introduced.
+
+### 21.7 Evidence refusals cause zero side effects
+
+Directly proven, not merely asserted:
+- `test_ungrounded_selection_never_reaches_security_manager_preflight` (planning-level, `EXECUTABLE` path) — zero `classify_action()` calls.
+- `test_ungrounded_selection_causes_zero_tool_executor_calls` / `test_ungrounded_selection_creates_no_approval` (orchestrator-level, `EXECUTABLE` path) — zero tool-call log events, zero pending approvals.
+- `test_ungrounded_memory_search_argument_never_exposes_search_results` (orchestrator-level) — a fabricated `memory_search` value never reaches the real `MemoryTool`, so stored memory content already present is never exposed in the refusal response.
+- `test_ungrounded_update_focus_value_creates_no_approval_and_no_write` / `test_negated_update_focus_request_creates_no_approval_and_no_write` (orchestrator-level, `EXECUTABLE_WORKFLOW` path) — zero pending approvals, `ProjectStateStore.get()` remains `None`.
+- `test_ungrounded_update_focus_never_reaches_workflow_engine` — structural AST proof that the `UNGROUNDED_SELECTION` branch in `_handle_ask_jarvis_to_request()` never calls `_start_update_focus_workflow()`, the sole path capable of reaching `WorkflowEngine.run()`.
+- `test_ungrounded_update_focus_response_message_never_leaks_the_candidate_value` — the fixed refusal message never echoes the rejected argument value.
+
+### 21.8 Test fixture wording changes and why each was required
+
+- `"what have I asked you to remember recently"` → `"show me what I have asked you to remember recently"` (three occurrences: two in `test_intelligence_planning.py`, one in `test_orchestrator_ask_jarvis_to.py`) — the original phrasing contains no listing/display action token (`"show"`/`"list"`), failing the corrected `MEMORY_LIST_RECENT` signature (§20.1/§20.10); this is the one compatibility restriction disclosed in §20.10, resolved exactly as specified there.
+- `_REQUEST` and every `_update_focus_text()` fake-model value in `test_orchestrator_update_focus_workflow.py`, plus the matching literal-value assertions, realigned to a single consistent value, `"batch 3 verification"` — most existing tests paired a fixed fake value with a `request_text` that never actually contained it (a pre-existing inconsistency invisible before argument grounding existed, since nothing previously checked the two against each other); this was disclosed and pre-authorized as necessary mechanical work in §19.7/§20.10, and the trailing `"and confirm it"` clause was dropped from `_REQUEST` per the final §20.7 decision.
+- `request_text="update my focus",` → `request_text="update my focus to a new focus value",` (9 occurrences in `test_intelligence_planning.py`) — same category of pre-existing request/value inconsistency, corrected the same way.
+- No fixture wording was weakened to make a test pass; every change either supplied missing action evidence the corrected signature genuinely requires, or made an already-intended request/value pairing actually consistent.
+
+### 21.9 Verification results
+
+- Focused: `test_grounding.py` (71), `test_intelligence_planning.py` (43), `test_orchestrator_ask_jarvis_to.py` (45), `test_orchestrator_update_focus_workflow.py` (27) — **186 passed**, run together.
+- Broader Phase 90/91 regression sweep (approval manager/history/audit/models/prompt, capability catalog, CLI approval, core approval, health check tool + wiring, pending-approval wiring, project-state wiring/store/show/update/verify tools, memory tool, orchestrator context-query/workflow-commands, pending approval store, structured output, tool executor approval + logger isolation, verification): **649 passed**.
+- Full suite, normal environment: **4747 passed, 3 skipped**.
+- Full suite, `AI_REASONING_ENABLED=false`: **4747 passed, 3 skipped** — identical counts to the normal run.
+- Ruff (`ruff check` on all seven changed/new files: `core/orchestrator.py intelligence/planning.py intelligence/grounding.py tests/unit/test_intelligence_planning.py tests/unit/test_orchestrator_ask_jarvis_to.py tests/unit/test_orchestrator_update_focus_workflow.py tests/unit/test_grounding.py`): **All checks passed! Exit code 0.** No new or pre-existing findings.
+- `git diff --check` (tracked changes, plus the two new files included via `git add -N`): **exit code 0**. Only pre-existing `LF will be replaced by CRLF` advisory notices on Windows `core.autocrlf`, not whitespace errors — identical in kind to every prior phase's result.
+- Final `git status --short` before commit: five modified files (`core/orchestrator.py`, `intelligence/planning.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_orchestrator_ask_jarvis_to.py`, `tests/unit/test_orchestrator_update_focus_workflow.py`) and two new files (`intelligence/grounding.py`, `tests/unit/test_grounding.py`); `dashboard_test.txt` remains untracked and untouched.
+
+### 21.10 Confirmation of scope boundaries
+
+No new capability, write action, security rule, retry/replan/multi-tool-plan behavior, embedding, confidence score, or autonomous behavior was added. `ground_decision()` can only ever refuse an outcome the existing structured-output parser and capability catalog already produced — it never approves, repairs, widens, or modifies a decision. Phase 92 remains open; Batch 2 (final, per-reason user-facing refusal wording) has not been started, and no Batch 2 documentation was added in this section.

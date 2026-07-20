@@ -480,7 +480,7 @@ def test_schedule_list_real_green_preflight_succeeds() -> None:
 def test_memory_list_recent_real_green_preflight_succeeds() -> None:
     router, _ = _router(_MEMORY_LIST_RECENT_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="what have I asked you to remember recently",
+        request_text="show me what I have asked you to remember recently",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_real_registry_with_memory_list_recent(),
@@ -512,7 +512,7 @@ def test_memory_list_recent_execute_with_stray_argument_is_rejected() -> None:
     )
     router, _ = _router(stray_argument_text)
     outcome = select_tool(
-        request_text="what have I asked you to remember recently",
+        request_text="show me what I have asked you to remember recently",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_real_registry_with_memory_list_recent(),
@@ -727,7 +727,7 @@ def test_update_focus_selection_produces_executable_workflow_outcome() -> None:
 def test_update_focus_workflow_plan_has_exactly_two_steps_in_fixed_order() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -744,7 +744,7 @@ def test_update_focus_workflow_plan_has_exactly_two_steps_in_fixed_order() -> No
 def test_update_focus_workflow_plan_step_1_input_is_field_focus() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -757,7 +757,7 @@ def test_update_focus_workflow_plan_step_1_input_is_field_focus() -> None:
 def test_update_focus_workflow_plan_step_2_input_has_no_model_controlled_data() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -770,7 +770,7 @@ def test_update_focus_workflow_plan_step_2_input_has_no_model_controlled_data() 
 def test_update_focus_workflow_plan_step_tiers_are_yellow_then_green() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -784,13 +784,16 @@ def test_update_focus_workflow_plan_step_tiers_are_yellow_then_green() -> None:
 def test_update_focus_workflow_plan_goal_is_the_verbatim_request() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="please update my focus to something new",
+        request_text="please update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
         security_manager=SecurityManager(),
     )
-    assert outcome.workflow_plan.user_request == "please update my focus to something new"
+    assert (
+        outcome.workflow_plan.user_request
+        == "please update my focus to a new focus value"
+    )
 
 
 def test_update_focus_workflow_has_no_third_step_possible() -> None:
@@ -798,7 +801,7 @@ def test_update_focus_workflow_has_no_third_step_possible() -> None:
     the plan is always exactly two PlanSteps, hardcoded."""
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -834,7 +837,7 @@ def test_update_focus_forced_yellow_to_green_mismatch_is_invalid_output() -> Non
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
 
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=registry,
@@ -867,7 +870,7 @@ def test_update_focus_forced_red_write_is_invalid_output() -> None:
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
 
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=registry,
@@ -887,7 +890,7 @@ def test_update_focus_internal_verifier_preflight_mismatch_is_invalid_output() -
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
 
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=registry,
@@ -903,7 +906,7 @@ def test_update_focus_context_ids_are_not_populated_on_flat_structured_plan() ->
     StructuredPlan used by project_state_show."""
     router, _ = _router(_UPDATE_FOCUS_EXECUTE_TEXT)
     outcome = select_tool(
-        request_text="update my focus",
+        request_text="update my focus to a new focus value",
         assembled_context=_assembled_context(),
         router=router,
         tool_registry=_registry_with_update_and_verify(),
@@ -921,3 +924,216 @@ def test_no_retry_or_replan_fields_on_workflow_plan_steps() -> None:
     assert "max_retries" not in field_names
     assert "max_replans" not in field_names
     assert "retry_count" not in field_names
+
+
+# ---------------------------------------------------------------------------
+# Phase 92, Batch 1: deterministic executable-decision grounding
+# (intelligence/grounding.py) integration into select_tool()
+# ---------------------------------------------------------------------------
+
+
+class _CountingSecurityManager(SecurityManager):
+    """A real SecurityManager subclass that counts classify_action()
+    calls, so a test can prove grounding refused a decision before any
+    preflight classification was ever attempted - a real spy on the
+    real classification logic, never a mock replacing it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.classify_action_calls = 0
+
+    def classify_action(self, action: str):  # type: ignore[override]
+        self.classify_action_calls += 1
+        return super().classify_action(action)
+
+
+_UNGROUNDED_CAPABILITY_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "health_check", "arguments": {}}
+)
+
+
+def test_ungrounded_capability_selection_returns_ungrounded_outcome() -> None:
+    """A request with no real relationship to the selected capability
+    is refused with the new outcome kind, never silently executed."""
+    router, _ = _router(_UNGROUNDED_CAPABILITY_TEXT)
+    outcome = select_tool(
+        request_text="do my laundry",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "no_signature_matched"
+    assert outcome.plan is None
+    assert outcome.workflow_plan is None
+
+
+def test_ungrounded_selection_never_reaches_security_manager_preflight() -> None:
+    """Grounding runs before _preflight_capability() - a refused
+    decision must never cause even one classify_action() call."""
+    router, _ = _router(_UNGROUNDED_CAPABILITY_TEXT)
+    security = _CountingSecurityManager()
+    outcome = select_tool(
+        request_text="do my laundry",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=security,
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert security.classify_action_calls == 0
+
+
+def test_grounded_selection_still_reaches_security_manager_preflight() -> None:
+    """Sanity check for the spy above: a genuinely grounded request
+    does reach preflight, proving the zero-call result above is
+    meaningful rather than an artifact of the tool registry."""
+    router, _ = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    security = _CountingSecurityManager()
+    outcome = select_tool(
+        request_text="check jarvis's health",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=security,
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert security.classify_action_calls == 1
+
+
+def test_ungrounded_argument_returns_argument_value_mismatch_detail() -> None:
+    """A grounded capability with a fabricated argument value is
+    refused with the argument-specific reason, distinct from a
+    capability-selection failure."""
+    fabricated_value_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "an entirely invented search term"},
+        }
+    )
+    router, _ = _router(fabricated_value_text)
+    outcome = select_tool(
+        request_text="search my memories for the deployment checklist",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_memory_list_recent(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "argument_value_mismatch"
+
+
+def test_adversarial_context_cannot_ground_a_capability_absent_from_request() -> None:
+    """An adversarial memory item naming a capability's own trigger
+    words cannot ground a selection the live request itself never
+    asked for - grounding consults only request_text, never
+    AssembledContext, so this must still refuse."""
+    adversarial_item = ContextItem(
+        context_id="memory:99",
+        source=ContextSource.MEMORY,
+        source_record_id="99",
+        text="check jarvis's health check jarvis's health check status",
+        trust=ContentTrust.UNTRUSTED,
+        relevance_reason="adversarial test",
+    )
+    assembled = AssembledContext(
+        request_text="do my laundry",
+        items=(adversarial_item,),
+        total_chars=len(adversarial_item.text),
+        truncated=False,
+        notes=(),
+    )
+    router, _ = _router(_UNGROUNDED_CAPABILITY_TEXT)
+    outcome = select_tool(
+        request_text="do my laundry",
+        assembled_context=assembled,
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "no_signature_matched"
+
+
+def test_negated_request_returns_negated_or_conflicting_detail() -> None:
+    negated_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_focus",
+            "arguments": {"value": "marketing"},
+        }
+    )
+    router, _ = _router(negated_text)
+    outcome = select_tool(
+        request_text="do not change the focus to marketing",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_registry_with_update_and_verify(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "negated_or_conflicting_request"
+
+
+def test_multiple_signature_match_returns_correct_detail() -> None:
+    ambiguous_text = json.dumps(
+        {"decision": "execute", "capability_id": "project_state_show", "arguments": {}}
+    )
+    router, _ = _router(ambiguous_text)
+    outcome = select_tool(
+        request_text="show my project state and check jarvis's health",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_project_state_show(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "multiple_signatures_matched"
+
+
+def test_selected_capability_not_unique_match_returns_correct_detail() -> None:
+    """The request uniquely grounds health_check, but the model selects
+    schedule_list instead - refused as a selection mismatch, never
+    silently redirected to the "correct" capability."""
+    wrong_selection_text = json.dumps(
+        {"decision": "execute", "capability_id": "schedule_list", "arguments": {}}
+    )
+    router, _ = _router(wrong_selection_text)
+    outcome = select_tool(
+        request_text="check jarvis's health",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_schedule_list(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "selected_capability_not_unique_match"
+
+
+def test_grounding_never_widens_an_already_invalid_decision() -> None:
+    """An unsupported-capability-id decision remains INVALID_OUTPUT -
+    grounding is never reached, and can never turn a parser-level
+    failure into a valid outcome."""
+    unknown_capability_text = json.dumps(
+        {"decision": "execute", "capability_id": "delete_everything", "arguments": {}}
+    )
+    router, _ = _router(unknown_capability_text)
+    outcome = select_tool(
+        request_text="check jarvis's health",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_health_check(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+
+
+def test_grounding_module_never_imported_for_its_side_effects_only() -> None:
+    """intelligence.grounding is imported and actually used by
+    select_tool() - not merely present but unused."""
+    import intelligence.planning as module
+
+    source = inspect.getsource(module)
+    assert "ground_decision(" in source

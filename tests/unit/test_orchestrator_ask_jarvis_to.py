@@ -358,7 +358,7 @@ def test_memory_list_recent_executes_through_real_tool_executor_and_grounds_resp
     memory.save("Phase 91 Batch 1 vertical slice memory.")
 
     response = orchestrator.handle_request(
-        "ask jarvis to: what have I asked you to remember recently"
+        "ask jarvis to: show me what I have asked you to remember recently"
     )
 
     assert response.success is True
@@ -937,3 +937,80 @@ def test_ask_jarvis_to_handler_never_touches_workflow_engine_or_approvals() -> N
     assert "self._approvals" not in source
     assert "os.system" not in source
     assert "subprocess" not in source
+
+
+# --- Phase 92, Batch 1: grounding refusal zero-side-effect tests (EXECUTABLE path) --
+
+
+def test_ungrounded_selection_causes_zero_tool_executor_calls() -> None:
+    """A structurally valid decision selecting health_check for a
+    request with no real relationship to it is refused by
+    intelligence.grounding.ground_decision() before preflight - the
+    real ToolExecutor is never invoked, unlike every genuine execution
+    proven above via _tool_call_events()."""
+    router, provider, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: do my laundry")
+
+    assert response.success is False
+    assert len(_tool_call_events(logger)) == 0
+    assert len(provider.received_requests) == 1
+
+
+def test_ungrounded_selection_creates_no_approval() -> None:
+    router, _, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    orchestrator.handle_request("ask jarvis to: do my laundry")
+
+    assert orchestrator.approvals.list_pending() == []
+
+
+def test_ungrounded_memory_search_argument_never_exposes_search_results() -> None:
+    """A fabricated memory_search value that does not match the live
+    request's own " for " span is refused before the real MemoryTool
+    ever runs - so no memory content (matching or otherwise) is ever
+    exposed in the response, unlike the real search proven by
+    test_memory_search_executes_through_real_tool_executor_and_grounds_response."""
+    fabricated_value_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "memory_search",
+            "arguments": {"value": "an entirely invented search term"},
+        }
+    )
+    router, _, logger = _router(fabricated_value_text)
+    orchestrator, memory, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+    memory.save("A private memory that must never be exposed by a refusal.")
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: search my memories for deployment checklist"
+    )
+
+    assert response.success is False
+    assert "A private memory that must never be exposed by a refusal." not in response.message
+    assert response.tool_result is None
+    assert len(_tool_call_events(logger)) == 0
+
+
+def test_grounded_health_check_is_unaffected_by_the_grounding_addition() -> None:
+    """Sanity check: the existing, genuinely grounded health_check
+    request (already covered above) still executes normally - the
+    grounding contract only ever removes unsafe outcomes, never
+    ordinary ones."""
+    router, provider, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_phase_91_batch_1_tools(
+        router, logger
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+    assert response.success is True
+    assert len(_tool_call_events(logger)) == 1

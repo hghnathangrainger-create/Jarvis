@@ -227,6 +227,19 @@ _ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE = (
     "Jarvis's AI provider could not process this request right now."
 )
 _ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX = "Jarvis could not safely process that request:"
+#: Phase 92, Batch 1: a minimal, honest placeholder for a structurally
+#: valid decision the deterministic grounding gate could not attribute
+#: to the live request (intelligence.grounding.ground_decision()) -
+#: never exposing the bounded internal reason code, the request, or
+#: any candidate/rejected value. Batch 2 owns refining this into
+#: distinct, per-reason public wording; this exists in Batch 1 only so
+#: PlanningOutcomeKind.UNGROUNDED_SELECTION has a safe, non-crashing
+#: response shape, exactly mirroring every other outcome kind's own
+#: fixed message.
+_ASK_JARVIS_TO_UNGROUNDED_MESSAGE = (
+    "Jarvis could not confirm that request clearly and safely matches an "
+    "allowlisted capability, so nothing was run."
+)
 #: Phase 90, Batch 3: the update-focus-and-verify workflow requires a
 #: real, configured WorkflowEngine - unlike Batch 2's project_state_show
 #: path, which only needs ToolExecutor.
@@ -1889,6 +1902,18 @@ class JarvisOrchestrator:
 
         if outcome.kind is PlanningOutcomeKind.EXECUTABLE_WORKFLOW:
             return self._start_update_focus_workflow(plan, outcome, session_id)
+
+        if outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION:
+            # Phase 92, Batch 1: refused before any preflight, approval,
+            # execution, or verification - see
+            # intelligence.grounding.ground_decision(). Batch 2 owns the
+            # final, per-reason public wording; this minimal branch only
+            # prevents a crash and never claims success.
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_UNGROUNDED_MESSAGE,
+                plan=plan,
+            )
 
         # PlanningOutcomeKind.EXECUTABLE: a real, GREEN-preflighted
         # StructuredPlan with exactly one step.

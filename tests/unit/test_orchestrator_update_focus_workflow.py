@@ -2,7 +2,12 @@
 test_orchestrator_update_focus_workflow.py
 
 Unit tests for the explicit "ask jarvis to: update my project focus to
-X and confirm it" write-and-verify workflow (Phase 90, Batch 3):
+X" write-and-verify workflow (Phase 90, Batch 3; the historical "and
+confirm it" trailing clause was dropped from _REQUEST in Phase 92,
+Batch 1 - see intelligence/grounding.py and
+docs/phase_92_implementation_plan.md, Section 20.7 - since it had no
+real functional or documented significance and only existed to
+preserve this file's own original illustrative wording):
 CommandRouter.match_ask_jarvis_to() ->
 JarvisOrchestrator._handle_ask_jarvis_to_request() ->
 intelligence.planning.select_tool() (EXECUTABLE_WORKFLOW) ->
@@ -179,14 +184,14 @@ def _in_memory_session_factory():
     return create_session_factory(engine)
 
 
-_REQUEST = "ask jarvis to: update my project focus to batch 3 verification and confirm it"
+_REQUEST = "ask jarvis to: update my project focus to batch 3 verification"
 
 
 # --- E. Approval tests -----------------------------------------------------------
 
 
 def test_update_focus_cannot_execute_without_approval() -> None:
-    router, provider = _router(_update_focus_text("new focus value"))
+    router, provider = _router(_update_focus_text("batch 3 verification"))
     session_factory = _in_memory_session_factory()
     orchestrator, project_state_store, *_ = _build_stack(session_factory, router)
 
@@ -198,7 +203,7 @@ def test_update_focus_cannot_execute_without_approval() -> None:
 
 
 def test_initial_request_creates_a_real_pending_approval() -> None:
-    router, _ = _router(_update_focus_text("new focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, *_rest, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -211,7 +216,7 @@ def test_initial_request_creates_a_real_pending_approval() -> None:
 
 
 def test_store_unchanged_while_pending() -> None:
-    router, _ = _router(_update_focus_text("new focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, *_ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -222,7 +227,7 @@ def test_store_unchanged_while_pending() -> None:
 
 
 def test_verifier_does_not_execute_while_pending() -> None:
-    router, _ = _router(_update_focus_text("new focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, _, _, _, _, _ = _build_stack(_in_memory_session_factory(), router)
 
     response = orchestrator.handle_request(_REQUEST)
@@ -235,7 +240,7 @@ def test_verifier_does_not_execute_while_pending() -> None:
 
 
 def test_approval_executes_the_workflow_exactly_once() -> None:
-    router, _ = _router(_update_focus_text("new focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -245,11 +250,11 @@ def test_approval_executes_the_workflow_exactly_once() -> None:
     final = orchestrator.execute_approved(response, decision)
 
     assert final.success is True
-    assert project_state_store.get().focus == "new focus value"
+    assert project_state_store.get().focus == "batch 3 verification"
 
 
 def test_decline_executes_zero_writes() -> None:
-    router, _ = _router(_update_focus_text("new focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -308,7 +313,7 @@ def test_durable_restart_end_to_end() -> None:
     initialize_database(engine)
     session_factory = create_session_factory(engine)
 
-    router, _ = _router(_update_focus_text("restart-tested focus"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, *_ = _build_stack(
         session_factory, router, durable=True
     )
@@ -348,7 +353,7 @@ def test_durable_restart_end_to_end() -> None:
     assert len(persisted_rows) == 1
     assert len(persisted_rows[0].plan_steps) == 2
     assert persisted_rows[0].plan_steps[0]["tool_input"]["value"] == (
-        "restart-tested focus"
+        "batch 3 verification"
     )
 
     # Reload order: pending approvals before paused workflows.
@@ -377,8 +382,8 @@ def test_durable_restart_end_to_end() -> None:
     final = orchestrator2.execute_approved(response, decision)
 
     assert final.success is True
-    assert "restart-tested focus" in final.message
-    assert project_state_store2.get().focus == "restart-tested focus"
+    assert "batch 3 verification" in final.message
+    assert project_state_store2.get().focus == "batch 3 verification"
 
 
 def test_no_transient_planning_object_required_after_restart() -> None:
@@ -446,7 +451,7 @@ class _FailingWriteTool:
 
 
 def test_exact_mismatch_reports_failed_verification() -> None:
-    router, _ = _router(_update_focus_text("intended value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, registry, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -465,11 +470,11 @@ def test_exact_mismatch_reports_failed_verification() -> None:
     assert "reported success" in final.message
     assert final.intelligence_trace[1] == "Step 2/2: verification failed."
     # The real write itself still genuinely happened.
-    assert project_state_store.get().focus == "intended value"
+    assert project_state_store.get().focus == "batch 3 verification"
 
 
 def test_write_failure_means_verifier_never_runs() -> None:
-    router, _ = _router(_update_focus_text("some value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, registry, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -490,7 +495,7 @@ def test_write_failure_means_verifier_never_runs() -> None:
 
 
 def test_pending_response_says_not_executed() -> None:
-    router, _ = _router(_update_focus_text("new focus"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, *_ = _build_stack(_in_memory_session_factory(), router)
 
     response = orchestrator.handle_request(_REQUEST)
@@ -502,7 +507,7 @@ def test_pending_response_says_not_executed() -> None:
 
 
 def test_approved_verified_response_is_grounded_in_real_values() -> None:
-    router, _ = _router(_update_focus_text("grounded focus value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -512,7 +517,7 @@ def test_approved_verified_response_is_grounded_in_real_values() -> None:
     final = orchestrator.execute_approved(response, decision)
 
     assert final.success is True
-    assert "grounded focus value" in final.message
+    assert "batch 3 verification" in final.message
     assert "Verification succeeded" in final.message
     assert len(final.intelligence_trace) == 2
     assert all(len(entry) <= 200 for entry in final.intelligence_trace)
@@ -520,7 +525,7 @@ def test_approved_verified_response_is_grounded_in_real_values() -> None:
 
 
 def test_declined_response_says_no_update_was_made() -> None:
-    router, _ = _router(_update_focus_text("new focus"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -534,7 +539,7 @@ def test_declined_response_says_no_update_was_made() -> None:
 
 
 def test_no_raw_dictionaries_in_intelligence_trace() -> None:
-    router, _ = _router(_update_focus_text("some private-looking value"))
+    router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, _, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -556,7 +561,7 @@ def test_existing_jarvis_response_callers_retain_empty_default_trace() -> None:
 
 
 def test_no_second_ai_call_after_execution() -> None:
-    router, provider = _router(_update_focus_text("no second call test"))
+    router, provider = _router(_update_focus_text("batch 3 verification"))
     orchestrator, _, _, _, approvals, _ = _build_stack(
         _in_memory_session_factory(), router
     )
@@ -636,3 +641,87 @@ def test_no_forbidden_imports_in_verification_module() -> None:
         "ApprovalManager",
     ):
         assert forbidden not in imported
+
+
+# --- K. Phase 92, Batch 1: grounding refusal zero-side-effect tests -----------------
+
+
+def test_ungrounded_update_focus_value_creates_no_approval_and_no_write() -> None:
+    """A structurally valid update-focus decision whose argument value
+    has no relationship to the live request is refused by
+    intelligence.grounding.ground_decision() before _preflight_capability()
+    ever runs - so no YELLOW approval is ever created and the store is
+    never touched, unlike the ordinary pending-approval path exercised
+    above by test_initial_request_creates_a_real_pending_approval."""
+    router, provider = _router(_update_focus_text("an entirely fabricated value"))
+    orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
+        _in_memory_session_factory(), router
+    )
+
+    response = orchestrator.handle_request(_REQUEST)
+
+    assert response.success is False
+    assert response.requires_confirmation is False
+    assert response.approval_request is None
+    assert approvals.list_pending() == []
+    assert project_state_store.get() is None
+    assert len(provider.received_requests) == 1
+
+
+def test_negated_update_focus_request_creates_no_approval_and_no_write() -> None:
+    """A request that explicitly negates the update ("do not ... ")
+    is refused by the negation gate - the very first check inside
+    ground_decision() - before any signature, argument, preflight, or
+    approval logic runs."""
+    router, _ = _router(_update_focus_text("batch 3 verification"))
+    orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
+        _in_memory_session_factory(), router
+    )
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: do not update my project focus to batch 3 verification"
+    )
+
+    assert response.success is False
+    assert response.requires_confirmation is False
+    assert approvals.list_pending() == []
+    assert project_state_store.get() is None
+
+
+def test_ungrounded_update_focus_never_reaches_workflow_engine() -> None:
+    """Structural proof, complementing the behavioural proofs above:
+    the UNGROUNDED_SELECTION branch in
+    JarvisOrchestrator._handle_ask_jarvis_to_request() returns directly
+    and never calls _start_update_focus_workflow() (the only path that
+    can reach WorkflowEngine.run())."""
+    import textwrap
+
+    import core.orchestrator as module
+
+    source = inspect.getsource(module.JarvisOrchestrator._handle_ask_jarvis_to_request)
+    tree = ast.parse(textwrap.dedent(source))
+
+    ungrounded_branch_calls_start_workflow = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test_source = ast.unparse(node.test)
+            if "UNGROUNDED_SELECTION" in test_source:
+                branch_source = ast.unparse(node)
+                if "_start_update_focus_workflow" in branch_source:
+                    ungrounded_branch_calls_start_workflow = True
+
+    assert ungrounded_branch_calls_start_workflow is False
+
+
+def test_ungrounded_update_focus_response_message_never_leaks_the_candidate_value() -> None:
+    """The refusal message is the fixed, generic Batch 1 wording - it
+    never echoes the fabricated/rejected argument value back to the
+    caller, unlike the real success message which does (see
+    test_approved_verified_response_is_grounded_in_real_values)."""
+    router, _ = _router(_update_focus_text("an entirely fabricated value"))
+    orchestrator, *_ = _build_stack(_in_memory_session_factory(), router)
+
+    response = orchestrator.handle_request(_REQUEST)
+
+    assert "an entirely fabricated value" not in response.message
+    assert response.plan is not None

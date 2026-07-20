@@ -78,6 +78,7 @@ from intelligence.capability_catalog import (
     build_tool_input,
 )
 from intelligence.context import AssembledContext, build_ai_context_block
+from intelligence.grounding import ground_decision
 from intelligence.structured_output import (
     ToolSelectionDecision,
     ToolSelectionParseError,
@@ -207,6 +208,12 @@ class PlanningOutcomeKind(Enum):
     #: Parsing/validation failed, or a selected capability failed its
     #: registry/security preflight - detail carries a bounded reason.
     INVALID_OUTPUT = "invalid_output"
+    #: A structurally valid "execute" decision that intelligence.
+    #: grounding.ground_decision() could not attribute to the live
+    #: request - detail carries one of UngroundedReason's bounded
+    #: values (Phase 92, Batch 1). No preflight, approval, execution,
+    #: or verification of any kind is ever attempted for this outcome.
+    UNGROUNDED_SELECTION = "ungrounded_selection"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,8 +273,12 @@ class PlanningOutcome:
         workflow_plan: Set only when kind is EXECUTABLE_WORKFLOW - a
             real, exactly-two-step planner.plan_models.Plan for the
             caller to run through WorkflowEngine.
-        detail: A short, bounded, non-sensitive reason, set only when
-            kind is INVALID_OUTPUT - never the raw model output.
+        detail: A short, bounded, non-sensitive reason, set when kind
+            is INVALID_OUTPUT (a raw ToolSelectionParseError.reason or
+            preflight-mismatch string) or UNGROUNDED_SELECTION (one of
+            UngroundedReason's bounded values) - never the raw model
+            output, the live request, a candidate argument span, or a
+            rejected value.
     """
 
     kind: PlanningOutcomeKind
@@ -350,6 +361,27 @@ def select_tool(
 
     assert parsed.capability_id is not None  # guaranteed for EXECUTE
     adapter = active_catalog[parsed.capability_id]
+
+    # Phase 92, Batch 1: the deterministic, deny-only grounding gate
+    # runs after parsing/argument validation and before any preflight,
+    # approval, execution, or verification - see intelligence/
+    # grounding.py's own module docstring for the full contract. This
+    # can only refuse an otherwise-proceeding decision; it never makes
+    # an invalid one valid, never touches SecurityManager/ApprovalManager/
+    # ToolExecutor, and consults only request_text and the already-
+    # validated arguments - never AssembledContext or any other
+    # retrieved/assembled content.
+    grounding = ground_decision(
+        request_text=request_text,
+        capability_id=parsed.capability_id,
+        arguments=parsed.arguments,
+    )
+    if not grounding.grounded:
+        assert grounding.reason is not None  # guaranteed when not grounded
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.UNGROUNDED_SELECTION,
+            detail=grounding.reason.value,
+        )
 
     preflight = _preflight_capability(
         adapter,
