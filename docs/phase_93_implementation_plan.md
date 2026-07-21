@@ -424,3 +424,47 @@ All six pre-existing capabilities' own tests pass entirely unmodified: `PROJECT_
 ### 20.14 Confirmation of scope boundaries
 
 No quarantine listing, general info, approval-history/workflow-history filter, history-record lookup by ID, user-selectable limit, filesystem-facing capability, new write capability, new verification strategy, new `SecurityManager` rule, security-tier change, arbitrary `ToolRegistry` exposure, multi-tool plan, retry, replanning, autonomous behavior, or any other out-of-scope item from this plan's exclusion list was added. The Phase 92 grounding vocabulary was broadened only by the two exact new signatures specified in this plan - no synonym, alias, or additional marker was introduced. Phase 93 remains open; Batch 2 (documentation reconciliation, final complete verification, completion report, closure) has not been started, and `docs/phase_93_completion_report.md` was not created in this batch.
+
+---
+
+## 21. Batch 2 Closure Evidence
+
+**Status: Batch 2 complete. Phase 93 is formally closed by this section and the accompanying `docs/phase_93_completion_report.md`. This closure batch was documentation- and verification-only - no production or test file was modified, since the mandatory re-audit below found no defect.**
+
+### 21.1 Mandatory Batch 1 re-audit (performed before any other closure work)
+
+Direct inspection of `5835604`'s diff, plus a direct `git diff d62951b..HEAD -- <file>` re-check of every file named in this batch's own instructions (`tools/builtin/approval_history_tool.py`, `tools/builtin/workflow_history_tool.py`, `approval/approval_history_store.py`, `workflow/workflow_history_store.py`, `security/security_manager.py`, `tools/executor.py`, `core/orchestrator.py`), confirmed **zero diff** to all seven of those files across the entire Phase 93 range - none was touched by Batch 1, and none needed to be. The only production diff, confirmed line-by-line, is exactly: two `CapabilityId` members, two `CAPABILITY_CATALOG` adapters, two `_FIXED_ARGUMENTS_BY_CAPABILITY` entries (`intelligence/capability_catalog.py`); two `_IntentSignature` entries (`intelligence/grounding.py`); a mechanical six-to-eight-capability text extension of `_TRUSTED_PLANNING_INSTRUCTION`, with zero control-flow change (`intelligence/planning.py`); and a truthful help-text extension (`tools/builtin/help_tool.py`).
+
+**Conclusion: no direct tool `run()` call, no direct store access from the Intelligence Core, no new `SecurityManager` rule, no changed security tier, no output-field expansion, no result-limit expansion, no retry, no replanning, no tool chaining, no second AI pass, and no autonomous behavior exists anywhere in Phase 93's diff.** No genuine defect was found, so this closure batch remained documentation- and verification-only, exactly as instructed.
+
+### 21.2 Final capability behavior (re-verified live, not merely re-read)
+
+Both `ground_decision()` (via `intelligence.grounding._grounded_capability_ids()`) and `SecurityManager.classify_action()` were exercised directly (not only through test files) during this closure pass:
+- `_grounded_capability_ids("show approval history")` → `{APPROVAL_HISTORY}` exactly; `_grounded_capability_ids("show workflow history")` → `{WORKFLOW_HISTORY}` exactly - each of the 8 signatures re-confirmed to produce exactly one, correct, unique match for its own real phrasing.
+- `SecurityManager().classify_action("show approval history").tier` → `SecurityTier.GREEN`; `SecurityManager().classify_action("show workflow history").tier` → `SecurityTier.GREEN`.
+- `tools/builtin/approval_history_tool.py:32` and `tools/builtin/workflow_history_tool.py:36` both still read `_DEFAULT_LIMIT = 20`, applied by each tool's own default `"history"` operation (`list_recent(limit=_DEFAULT_LIMIT)`) - directly re-confirmed by line inspection, not assumed. No stop condition was triggered.
+
+Both capabilities' final behavior exactly matches this section's own required specification (§21 of the Batch 2 task, mirrored from §20.2-§20.4 of this document): explicitly catalogued, zero AI-facing arguments, `SINGLE_TOOL`, GREEN, no verification strategy, trusted internal input `{"operation": "history"}`, the real tool's own unmodified 20-record bound, ordering, formatting, no-results wording, and error handling - and the model cannot supply `operation`, `status`, `request_id`/`workflow_id`, `filter`, or `limit` for either (rejected by the existing, unmodified structured-output validator before grounding is ever reached).
+
+### 21.3 Data-exposure closure statement
+
+Approval-history decision notes (`decision_reason`) and workflow-history `detail` fields, where already returned by the existing deterministic tools, are existing, previously-stored values - Phase 93 does not claim they are inherently non-sensitive, only that they are exactly the same values already shown by the pre-existing `show approval history`/`show workflow history` deterministic commands, now reachable through one additional phrasing. Phase 93 adds no new captured argument, payload, filesystem path, environment variable, configuration secret, or hidden internal field to either history record; it adds no exposure of quarantine records (quarantine listing remains deferred, unimplemented, and untouched - `tools/builtin/quarantine_list_tool.py` was not modified and is not catalogued). Every returned record is grounded directly in the real `ToolResult` the real tool produced; no unrestricted second AI pass rewrites, summarizes, or expands any record.
+
+### 21.4 Verification results (re-run at closure)
+
+- Focused (`test_capability_catalog.py`, `test_structured_output.py`, `test_grounding.py`, `test_intelligence_planning.py`, `test_orchestrator_ask_jarvis_to.py`, `test_orchestrator_update_focus_workflow.py`, `test_help_tool.py`, run together): **479 passed**.
+- Deterministic approval/workflow-history + command-router + executor regressions (`test_approval_history_store.py`, `test_approval_history_tool.py`, `test_workflow_history_store.py`, `test_workflow_history_tool.py`, `test_cli_workflow_history.py`, `test_command_router.py`, `test_tool_executor_approval.py`, `test_tool_executor_logger_isolation.py`): **622 passed**.
+- Broader Phase 90/91/92 regression sweep (approval manager/history/audit/models/prompt, CLI/core approval, health-check tool + wiring, pending-approval wiring, project-state wiring/store/tools, quarantine-list wiring, memory tool, orchestrator context-query/workflow-commands, pending approval store, verification): **451 passed**.
+- Full suite, normal environment: **4843 passed, 3 skipped** - identical to the verified Batch 1 baseline; zero change from re-running the identical committed code.
+- Full suite, `AI_REASONING_ENABLED=false`: **4843 passed, 3 skipped** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **4843 passed, 3 skipped** - identical (first run of this specific environment configuration for Phase 93; matches the other two exactly).
+- Ruff, Git-derived file set: `git diff --name-only d62951b..HEAD -- '*.py'` enumerates exactly **9** files (`intelligence/capability_catalog.py`, `intelligence/grounding.py`, `intelligence/planning.py`, `tests/unit/test_capability_catalog.py`, `tests/unit/test_grounding.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_orchestrator_ask_jarvis_to.py`, `tests/unit/test_structured_output.py`, `tools/builtin/help_tool.py`) - identical to Batch 1's own reported set, since this closure batch changed no Python file. `ruff check` on all 9: **all checks passed, exit code 0, zero findings** (no new, no pre-existing).
+- `git diff --check`: exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 21.5 Manual Anthropic API acceptance status
+
+Live Anthropic manual acceptance remains **postponed** because the configured API account lacks sufficient credits - an external account limitation, not a Jarvis production-code failure. No production behavior was changed to bypass it, and no live manual acceptance test is claimed to have passed. Phase 93 is closed on the basis of repository-level deterministic, fake-provider, grounding, security, `ToolExecutor`, real-SQLite, and full-suite tests (all real, all executed, all passing) - not on a live-model acceptance run, exactly as every prior phase closure has been.
+
+### 21.6 Formal closure
+
+Phase 93 - Safe Read-Only Audit History Expansion is closed as of this section and `docs/phase_93_completion_report.md`. Both `APPROVAL_HISTORY` and `WORKFLOW_HISTORY` remain zero-argument, GREEN, read-only, collision-free against all 8 catalogued signatures, hard-bounded at 20 records by their own unmodified real tools, and executed exclusively through the real, unmodified `ToolExecutor`. No out-of-scope behavior (quarantine listing, info, history filters, ID lookup, user-selectable limits, new writes, new verifiers, new security rules, retries, replanning, autonomous behavior, or any other item on this plan's exclusion list) was added in either batch. Phase 94 has not been started.
