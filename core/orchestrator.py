@@ -71,7 +71,11 @@ from intelligence.planning import (
     PlanningOutcomeKind,
     select_tool,
 )
-from intelligence.verification import VerificationOutcome, verify_focus_update
+from intelligence.verification import (
+    VerificationOutcome,
+    verify_focus_update,
+    verify_schedule_enabled_state,
+)
 from memory.memory_manager import MemoryManager
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
@@ -725,13 +729,12 @@ class JarvisOrchestrator:
                     else None
                 ),
             )
-            # Phase 90, Batch 3: recognised purely structurally (no new
-            # persisted marker, per Section 24.C.12) - never mistaken for
-            # any of the five pre-existing fixed Phase 15 workflows,
-            # whose own tool names never match this exact pair.
-            if self._is_update_focus_workflow_result(result):
-                return self._update_focus_workflow_result_to_response(result)
-            return self._workflow_result_to_response(result)
+            # Phase 90, Batch 3; generalized Phase 94, Batch 2: each real
+            # verified-workflow shape is recognised purely structurally
+            # (no new persisted marker, per Section 24.C.12) - never
+            # mistaken for any of the five pre-existing fixed Phase 15
+            # workflows, whose own tool names never match either pair.
+            return self._translate_verified_workflow_result(result)
 
         if self._is_pending_webpage_summary(response):
             return self._execute_approved_webpage_summary(response, decision)
@@ -2025,24 +2028,57 @@ class JarvisOrchestrator:
                 ),
             )
 
-        return self._update_focus_workflow_result_to_response(result)
+        return self._translate_verified_workflow_result(result)
+
+    def _translate_verified_workflow_result(
+        self, result: WorkflowResult
+    ) -> JarvisResponse:
+        """Dispatch a completed/paused two-step verified-workflow
+        WorkflowResult to its own capability-specific response
+        translator - recognised purely structurally, never a new
+        persisted marker (Section 24.C.12).
+
+        Shared by both the initial run() path (this method's own
+        caller, _start_update_focus_workflow) and the resume() path
+        (execute_approved()), so the dispatch itself is defined in
+        exactly one place (Phase 94, Batch 2 - generalizing Batch 3's
+        original single-workflow dispatch to a second trusted workflow
+        definition, per docs/phase_94_implementation_plan.md, Section
+        13). Adding a third verified workflow in some future phase
+        would extend this one method with one more named check - never
+        a generic, pluggable dispatch table.
+
+        Args:
+            result: A real WorkflowResult, from either run() or
+                resume().
+
+        Returns:
+            The capability-specific, verification-aware JarvisResponse
+            for whichever real workflow shape result.plan matches, or
+            the existing generic translation for any other workflow
+            shape (the five pre-existing fixed Phase 15 workflows).
+        """
+        if self._is_update_focus_workflow_result(result):
+            return self._update_focus_workflow_result_to_response(result)
+        if self._is_schedule_enable_workflow_result(result):
+            return self._schedule_enable_workflow_result_to_response(result)
+        return self._workflow_result_to_response(result)
 
     @staticmethod
     def _is_update_focus_workflow_result(result: WorkflowResult) -> bool:
         """Structurally recognise the Batch 3 update-focus-and-verify
         workflow shape - never a new persisted marker (Section 24.C.12).
 
-        Phase 94, Batch 1: the expected tool-name pair is now derived
-        from CAPABILITY_CATALOG's own trusted, static
+        Phase 94, Batch 1: the expected tool-name pair is derived from
+        CAPABILITY_CATALOG's own trusted, static
         paired_verify_capability_id field, rather than two literal
         string constants hardcoded inside this method - a small,
-        foundational generalization so a future TWO_STEP_WORKFLOW
-        capability's own catalog entry could, in principle, be
-        recognised the same structural way. No second capability is
-        recognised or added by this batch: PROJECT_STATE_UPDATE_FOCUS
-        remains the only TWO_STEP_WORKFLOW capability in the catalog,
-        so the real tool-name pair this method compares against is
-        unchanged ("project_state_update", "project_state_verify").
+        foundational generalization so a second TWO_STEP_WORKFLOW
+        capability's own catalog entry could be recognised the same
+        structural way. Phase 94, Batch 2 is that second capability
+        (see _is_schedule_enable_workflow_result immediately below) -
+        this method's own real tool-name pair is unchanged
+        ("project_state_update", "project_state_verify").
 
         Args:
             result: A real WorkflowResult, from either run() or resume().
@@ -2052,14 +2088,63 @@ class JarvisOrchestrator:
             tool names match PROJECT_STATE_UPDATE_FOCUS's own catalog-
             declared write tool and paired verify tool, exactly in
             order. Every one of the five pre-existing fixed Phase 15
-            workflows uses different tool names and so can never match
+            workflows, and the separate schedule-enable-and-verify
+            workflow, use different tool names and so can never match
             this check.
+        """
+        return JarvisOrchestrator._matches_two_step_workflow_shape(
+            result, CapabilityId.PROJECT_STATE_UPDATE_FOCUS
+        )
+
+    @staticmethod
+    def _is_schedule_enable_workflow_result(result: WorkflowResult) -> bool:
+        """Structurally recognise the Phase 94, Batch 2 schedule-
+        enable-and-verify workflow shape - never a new persisted
+        marker, exactly mirroring _is_update_focus_workflow_result's
+        own technique for the pre-existing workflow.
+
+        Args:
+            result: A real WorkflowResult, from either run() or resume().
+
+        Returns:
+            True only if result.plan has exactly two steps whose real
+            tool names match SCHEDULE_ENABLE's own catalog-declared
+            write tool and paired verify tool, exactly in order. Every
+            one of the five pre-existing fixed Phase 15 workflows, and
+            the separate update-focus-and-verify workflow, use
+            different tool names and so can never match this check.
+        """
+        return JarvisOrchestrator._matches_two_step_workflow_shape(
+            result, CapabilityId.SCHEDULE_ENABLE
+        )
+
+    @staticmethod
+    def _matches_two_step_workflow_shape(
+        result: WorkflowResult, write_capability_id: CapabilityId
+    ) -> bool:
+        """Shared structural-shape check both workflow recognizers use:
+        does result.plan's exact two-step tool-name pair match
+        write_capability_id's own catalog-declared write tool and
+        paired verify tool, in that order.
+
+        A private, non-public helper - never exposed as a way to check
+        an arbitrary capability_id against an arbitrary result; the two
+        real recognizers above are the only callers, each fixed to its
+        own one real capability id.
+
+        Args:
+            result: A real WorkflowResult, from either run() or resume().
+            write_capability_id: The one TWO_STEP_WORKFLOW capability
+                whose shape to check against.
+
+        Returns:
+            True only if the exact tool-name pair matches, in order.
         """
         steps = result.plan.steps
         if len(steps) != 2:
             return False
 
-        write_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+        write_adapter = CAPABILITY_CATALOG[write_capability_id]
         verify_capability_id = write_adapter.paired_verify_capability_id
         if verify_capability_id is None:
             return False
@@ -2148,6 +2233,100 @@ class JarvisOrchestrator:
         else:
             message = (
                 "Jarvis's update tool reported success, but verification "
+                "could not be completed, so the update is not confirmed."
+            )
+            success = False
+
+        return JarvisResponse(
+            success=success,
+            message=message,
+            plan=result.plan,
+            tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+            intelligence_trace=trace,
+        )
+
+    def _schedule_enable_workflow_result_to_response(
+        self, result: WorkflowResult
+    ) -> JarvisResponse:
+        """Translate a real schedule-enable-and-verify WorkflowResult
+        into a grounded, verification-aware JarvisResponse (Phase 94,
+        Batch 2 - docs/phase_94_implementation_plan.md, Section 14),
+        mirroring _update_focus_workflow_result_to_response's exact
+        shape for the second real verified workflow.
+
+        Never asks AI to judge success: verification is always the
+        real, exact-boolean-identity comparison
+        intelligence.verification.verify_schedule_enabled_state()
+        performs against the fixed, trusted expected state (always
+        True) and the verify step's real
+        ToolResult.metadata["enabled"].
+
+        Args:
+            result: The real WorkflowResult from run() or resume().
+
+        Returns:
+            A JarvisResponse honestly reflecting exactly one of:
+            pending approval (WAITING); the write step itself never
+            executed (failed/blocked/declined - no verification
+            attempted); or, once the write step completed, a real
+            VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE) grounded
+            in real values only - never AI prose, never a claimed
+            success the real results do not support.
+        """
+        if result.overall_status is StepStatus.WAITING:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: awaiting your approval to enable the "
+                    "schedule.",
+                ),
+            )
+
+        write_outcome = result.step_outcomes[0]
+        if write_outcome.status is not StepStatus.COMPLETED:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: enable did not execute; no verification "
+                    "attempted.",
+                ),
+            )
+
+        verify_outcome = (
+            result.step_outcomes[1] if len(result.step_outcomes) > 1 else None
+        )
+        schedule_id = write_outcome.step.tool_input.get("schedule_id")
+        verification = verify_schedule_enabled_state(
+            expected_enabled=True,
+            verify_tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+        )
+        trace = (
+            "Step 1/2: enable executed.",
+            f"Step 2/2: verification {verification.outcome.value}.",
+        )
+
+        if verification.outcome is VerificationOutcome.VERIFIED:
+            message = (
+                f"Jarvis enabled schedule {schedule_id}. Verification "
+                "succeeded - the stored state matches."
+            )
+            success = True
+        elif verification.outcome is VerificationOutcome.FAILED:
+            message = (
+                "Jarvis's enable tool reported success, but the structured "
+                "read-back found the schedule is not enabled - the update "
+                "is not confirmed."
+            )
+            success = False
+        else:
+            message = (
+                "Jarvis's enable tool reported success, but verification "
                 "could not be completed, so the update is not confirmed."
             )
             success = False

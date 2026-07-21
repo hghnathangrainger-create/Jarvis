@@ -43,7 +43,15 @@ Responsibilities:
       (PROJECT_STATE_VERIFY_FOCUS) from this catalog's own trusted data
       instead of a hardcoded literal - a small, foundational
       generalization intended to support a second TWO_STEP_WORKFLOW
-      capability in a later phase, without adding one yet.
+      capability in a later phase, without adding one yet. Phase 94,
+      Batch 2 is that later phase: it adds SCHEDULE_ENABLE
+      (model-selectable, YELLOW, single required integer argument
+      "schedule_id", executed only via the same deterministic two-step
+      WorkflowEngine plan shape PROJECT_STATE_UPDATE_FOCUS already
+      uses, now proven genuinely reusable) and
+      SCHEDULE_VERIFY_ENABLED_STATE (internal-only, the second
+      TWO_STEP_WORKFLOW pairing this catalog now carries, structurally
+      identical to PROJECT_STATE_VERIFY_FOCUS).
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -95,6 +103,8 @@ class CapabilityId(Enum):
     MEMORY_SEARCH = "memory_search"
     APPROVAL_HISTORY = "approval_history"
     WORKFLOW_HISTORY = "workflow_history"
+    SCHEDULE_ENABLE = "schedule_enable"
+    SCHEDULE_VERIFY_ENABLED_STATE = "schedule_verify_enabled_state"
 
 
 class ExecutionStrategy(Enum):
@@ -165,6 +175,19 @@ class CapabilityAdapter:
             model output - a trusted, static production mapping only.
             Defaults to None so every capability defined before Phase
             94 needs no change at all.
+        paired_verify_input_keys: Empty for every capability whose
+            paired verifier needs no data from the write step (e.g.
+            PROJECT_STATE_UPDATE_FOCUS's verifier reads a singleton
+            row, so it needs nothing). For a TWO_STEP_WORKFLOW
+            capability whose verifier needs to know *which* record to
+            re-read, the fixed, trusted names of keys to copy verbatim
+            from the write step's own already-validated tool_input into
+            the verify step's own tool_input (Phase 94, Batch 2 -
+            SCHEDULE_ENABLE sets this to ("schedule_id",), since its
+            verifier must target the exact same schedule the write step
+            did). A trusted, static, per-capability declaration only -
+            never model-supplied, never derived from parsed output.
+            Defaults to an empty tuple.
     """
 
     capability_id: CapabilityId
@@ -176,6 +199,7 @@ class CapabilityAdapter:
     verification_strategy_id: str | None
     internal_only: bool
     paired_verify_capability_id: CapabilityId | None = None
+    paired_verify_input_keys: tuple[str, ...] = ()
 
 
 #: The single source of truth for what the intelligence layer may
@@ -307,6 +331,38 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         max_execution_tier=SecurityTier.GREEN,
         verification_strategy_id=None,
         internal_only=False,
+    ),
+    CapabilityId.SCHEDULE_ENABLE: CapabilityAdapter(
+        capability_id=CapabilityId.SCHEDULE_ENABLE,
+        tool_name="schedule_enable",
+        description=(
+            "Re-enables one of your configured schedules by its exact id. "
+            "Requires your explicit approval, and the stored enabled "
+            "state is checked with a structured read-back after it runs."
+        ),
+        arguments=(
+            CapabilityArgumentSpec(name="schedule_id", type_name="int", required=True),
+        ),
+        allowed_strategy=ExecutionStrategy.TWO_STEP_WORKFLOW,
+        max_execution_tier=SecurityTier.YELLOW,
+        verification_strategy_id="schedule_enabled_exact_match",
+        internal_only=False,
+        paired_verify_capability_id=CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
+        paired_verify_input_keys=("schedule_id",),
+    ),
+    CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE: CapabilityAdapter(
+        capability_id=CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
+        tool_name="schedule_verify_enabled_state",
+        description=(
+            "Internal-only: reads back one schedule's current enabled "
+            "state to verify a prior enable. Never selectable by AI, "
+            "never a user command."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=True,
     ),
 }
 

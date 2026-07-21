@@ -394,24 +394,34 @@ def test_capability_adapter_field_is_never_exposed_as_a_model_facing_argument() 
         assert "paired_verify_capability_id" not in declared_argument_names
 
 
-def test_only_one_two_step_workflow_capability_exists_in_the_real_catalog() -> None:
-    """Phase 94, Batch 1 adds no second production workflow consumer -
-    PROJECT_STATE_UPDATE_FOCUS remains the only TWO_STEP_WORKFLOW
-    capability in the real, live CAPABILITY_CATALOG."""
-    two_step_capabilities = [
+def test_exactly_two_two_step_workflow_capabilities_exist_in_the_real_catalog() -> (
+    None
+):
+    """Phase 94, Batch 2 adds exactly one second production workflow
+    consumer, SCHEDULE_ENABLE - proving the Batch 1 foundation
+    generalization genuinely supports a second TWO_STEP_WORKFLOW
+    capability, and confirming no third one exists."""
+    two_step_capabilities = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
         if adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
-    ]
-    assert two_step_capabilities == [CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    }
+    assert two_step_capabilities == {
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.SCHEDULE_ENABLE,
+    }
 
 
-def test_no_schedule_enable_capability_exists_yet() -> None:
-    """Confirms Batch 1 added no Phase 94 capability expansion: no
-    CapabilityId member named for schedule-enable exists, and the real
-    catalog contains exactly the same nine members Phase 93 left it
-    with."""
-    assert not any("SCHEDULE_ENABLE" in member.name for member in CapabilityId)
+def test_schedule_enable_capability_exists_and_no_further_expansion_occurred() -> (
+    None
+):
+    """Confirms Batch 2 added exactly the two capabilities its own
+    scope names - SCHEDULE_ENABLE and SCHEDULE_VERIFY_ENABLED_STATE -
+    and nothing else: no SCHEDULE_DISABLE, no SCHEDULE_CREATE, and the
+    real catalog contains exactly these eleven members."""
+    assert any(member is CapabilityId.SCHEDULE_ENABLE for member in CapabilityId)
+    assert not any("SCHEDULE_DISABLE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_CREATE" in member.name for member in CapabilityId)
     assert {member.value for member in CapabilityId} == {
         "project_state_show",
         "project_state_update_focus",
@@ -422,66 +432,104 @@ def test_no_schedule_enable_capability_exists_yet() -> None:
         "memory_search",
         "approval_history",
         "workflow_history",
+        "schedule_enable",
+        "schedule_verify_enabled_state",
     }
 
 
-def test_no_schedule_verifier_strategy_id_exists_yet() -> None:
+def test_schedule_verifier_strategy_id_is_the_only_new_one() -> None:
     strategy_ids = {
         adapter.verification_strategy_id
         for adapter in CAPABILITY_CATALOG.values()
         if adapter.verification_strategy_id is not None
     }
-    assert strategy_ids == {"project_state_focus_exact_match"}
+    assert strategy_ids == {
+        "project_state_focus_exact_match",
+        "schedule_enabled_exact_match",
+    }
 
 
-def test_no_new_verification_function_exists_in_verification_module() -> None:
-    """intelligence/verification.py still defines exactly one verifier
-    function - no schedule-enabled-state verifier was added."""
+def test_exactly_two_verification_functions_exist_in_verification_module() -> None:
+    """intelligence/verification.py now defines exactly two verifier
+    functions - the pre-existing focus verifier, unmodified, plus the
+    one new schedule-enabled-state verifier Batch 2 adds. No generic
+    verifier registry or third function exists."""
     import intelligence.verification as module
 
     tree = ast.parse(inspect.getsource(module))
     function_names = {
         node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     }
-    assert function_names == {"verify_focus_update"}
+    assert function_names == {"verify_focus_update", "verify_schedule_enabled_state"}
 
 
 # --- 4. The orchestrator's structural recognizer is now catalog-driven -----
 
 
-def test_is_update_focus_workflow_result_no_longer_hardcodes_string_literals() -> None:
-    """Structural proof: the recognizer reads its expected tool-name
-    pair from CAPABILITY_CATALOG rather than two literal string
-    constants hardcoded inside the method body.
-
-    Checks only real ast.Constant string literals appearing in the
-    method's executable body - never its docstring (excluded here,
-    since the docstring itself now explains, in prose, the real string
-    values this method's behavior is unchanged against - exactly the
-    kind of prose that would false-positive a raw substring search)."""
+def _real_code_string_literals_and_names(source: str) -> tuple[set[object], set[str]]:
+    """Extract only real ast.Constant string literals and ast.Name
+    identifiers from a function's executable body - never its
+    docstring, which is parsed as a separate ast.Constant string Expr
+    and excluded here (Phase 92's own established false-positive-safe
+    structural-test technique, applied to source text rather than an
+    already-live function object)."""
     import textwrap
 
-    from core.orchestrator import JarvisOrchestrator
-
-    source = inspect.getsource(JarvisOrchestrator._is_update_focus_workflow_result)
     tree = ast.parse(textwrap.dedent(source))
     function_def = tree.body[0]
     assert isinstance(function_def, ast.FunctionDef)
-    body_without_docstring = function_def.body[1:]
-
+    body_without_docstring = ast.Module(
+        body=function_def.body[1:], type_ignores=[]
+    )
     string_literals = {
         node.value
-        for node in ast.walk(ast.Module(body=body_without_docstring, type_ignores=[]))
+        for node in ast.walk(body_without_docstring)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    assert "project_state_update" not in string_literals
-    assert "project_state_verify" not in string_literals
-
-    identifiers: set[str] = set()
-    for node in ast.walk(ast.Module(body=body_without_docstring, type_ignores=[])):
+    names: set[str] = set()
+    for node in ast.walk(body_without_docstring):
         if isinstance(node, ast.Name):
-            identifiers.add(node.id)
-    assert "CAPABILITY_CATALOG" in identifiers
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return string_literals, names
+
+
+def test_is_update_focus_workflow_result_no_longer_hardcodes_string_literals() -> None:
+    """Structural proof: the recognizer no longer contains the literal
+    tool-name strings itself - it delegates to the shared
+    _matches_two_step_workflow_shape() helper, which reads the exact
+    tool-name pair from CAPABILITY_CATALOG (Phase 94, Batch 2 further
+    factored the Batch 1 generalization into one shared helper, reused
+    by both real recognizers, rather than duplicating the catalog
+    lookup in each)."""
+    from core.orchestrator import JarvisOrchestrator
+
+    recognizer_literals, recognizer_names = _real_code_string_literals_and_names(
+        inspect.getsource(JarvisOrchestrator._is_update_focus_workflow_result)
+    )
+    assert "project_state_update" not in recognizer_literals
+    assert "project_state_verify" not in recognizer_literals
+    assert "_matches_two_step_workflow_shape" in recognizer_names
+
+    helper_literals, helper_names = _real_code_string_literals_and_names(
+        inspect.getsource(JarvisOrchestrator._matches_two_step_workflow_shape)
+    )
+    assert "project_state_update" not in helper_literals
+    assert "project_state_verify" not in helper_literals
+    assert "CAPABILITY_CATALOG" in helper_names
+
+
+def test_schedule_enable_recognizer_also_delegates_to_the_shared_helper() -> None:
+    """The second real recognizer reuses the identical shared helper -
+    proving the catalog-driven mechanism, not just its absence of
+    literals, is genuinely shared rather than duplicated."""
+    from core.orchestrator import JarvisOrchestrator
+
+    _literals, names = _real_code_string_literals_and_names(
+        inspect.getsource(JarvisOrchestrator._is_schedule_enable_workflow_result)
+    )
+    assert "_matches_two_step_workflow_shape" in names
 
 
 def test_is_update_focus_workflow_result_still_recognises_the_real_shape() -> None:

@@ -27,7 +27,7 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_nine_phase_93_batch_1_entries() -> None:
+def test_catalog_contains_exactly_the_eleven_phase_94_batch_2_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -38,6 +38,8 @@ def test_catalog_contains_exactly_the_nine_phase_93_batch_1_entries() -> None:
         CapabilityId.MEMORY_SEARCH,
         CapabilityId.APPROVAL_HISTORY,
         CapabilityId.WORKFLOW_HISTORY,
+        CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
     }
 
 
@@ -52,6 +54,8 @@ def test_no_other_capability_id_exists() -> None:
         "memory_search",
         "approval_history",
         "workflow_history",
+        "schedule_enable",
+        "schedule_verify_enabled_state",
     }
 
 
@@ -79,7 +83,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_eight_capabilities_are_model_selectable() -> None:
+def test_only_nine_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -94,6 +98,7 @@ def test_only_eight_capabilities_are_model_selectable() -> None:
         CapabilityId.MEMORY_SEARCH,
         CapabilityId.APPROVAL_HISTORY,
         CapabilityId.WORKFLOW_HISTORY,
+        CapabilityId.SCHEDULE_ENABLE,
     }
 
 
@@ -339,17 +344,38 @@ def test_capability_adapter_has_exact_fields() -> None:
         "verification_strategy_id",
         "internal_only",
         "paired_verify_capability_id",
+        "paired_verify_input_keys",
     }
 
 
-def test_paired_verify_capability_id_defaults_to_none_for_pre_phase_94_capabilities() -> (
+def test_paired_verify_input_keys_defaults_to_empty_except_for_schedule_enable() -> (
     None
 ):
-    """Phase 94, Batch 1: every capability defined before this batch
-    needs no change at all - the new field defaults to None for all of
-    them, and only PROJECT_STATE_UPDATE_FOCUS's own entry sets it."""
+    """Every capability except SCHEDULE_ENABLE needs no data threaded
+    from its write step into its verifier (PROJECT_STATE_UPDATE_FOCUS's
+    verifier reads a singleton row and needs nothing) - the field
+    defaults to an empty tuple for all of them."""
     for capability_id, adapter in CAPABILITY_CATALOG.items():
-        if capability_id is CapabilityId.PROJECT_STATE_UPDATE_FOCUS:
+        if capability_id is CapabilityId.SCHEDULE_ENABLE:
+            assert adapter.paired_verify_input_keys == ("schedule_id",)
+        else:
+            assert adapter.paired_verify_input_keys == ()
+
+
+def test_paired_verify_capability_id_defaults_to_none_except_for_the_two_write_workflows() -> (
+    None
+):
+    """Every capability that declares no paired verifier of its own
+    (everything except the two real TWO_STEP_WORKFLOW capabilities)
+    still defaults to None - the field was added in Phase 94, Batch 1
+    and needed no change for any of them; Phase 94, Batch 2 adds the
+    second real pairing, SCHEDULE_ENABLE -> SCHEDULE_VERIFY_ENABLED_STATE."""
+    capabilities_with_a_paired_verifier = {
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.SCHEDULE_ENABLE,
+    }
+    for capability_id, adapter in CAPABILITY_CATALOG.items():
+        if capability_id in capabilities_with_a_paired_verifier:
             continue
         assert adapter.paired_verify_capability_id is None
 
@@ -367,3 +393,86 @@ def test_execution_strategy_has_exactly_two_members() -> None:
         "single_tool",
         "two_step_workflow",
     }
+
+
+# --- Phase 94, Batch 2: SCHEDULE_ENABLE / SCHEDULE_VERIFY_ENABLED_STATE -----
+
+
+def test_schedule_enable_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE]
+    assert adapter.capability_id is CapabilityId.SCHEDULE_ENABLE
+    assert adapter.tool_name == "schedule_enable"
+    assert [spec.name for spec in adapter.arguments] == ["schedule_id"]
+    assert adapter.arguments[0].type_name == "int"
+    assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
+    assert adapter.max_execution_tier is SecurityTier.YELLOW
+    assert adapter.verification_strategy_id == "schedule_enabled_exact_match"
+    assert adapter.internal_only is False
+    assert (
+        adapter.paired_verify_capability_id
+        is CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+    )
+
+
+def test_schedule_verify_enabled_state_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE]
+    assert adapter.capability_id is CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+    assert adapter.tool_name == "schedule_verify_enabled_state"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is True
+    assert adapter.paired_verify_capability_id is None
+
+
+def test_schedule_enable_pairs_only_with_schedule_verify_enabled_state() -> None:
+    """No other capability - existing or new - names SCHEDULE_ENABLE's
+    verifier as its own paired verifier, and SCHEDULE_ENABLE names no
+    other capability."""
+    for capability_id, adapter in CAPABILITY_CATALOG.items():
+        if capability_id is CapabilityId.SCHEDULE_ENABLE:
+            continue
+        assert (
+            adapter.paired_verify_capability_id
+            is not CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+        )
+
+
+def test_no_second_user_facing_write_capability_was_added() -> None:
+    """Exactly two capabilities are TWO_STEP_WORKFLOW (the only
+    execution strategy that implies a write): PROJECT_STATE_UPDATE_FOCUS
+    and SCHEDULE_ENABLE - no SCHEDULE_DISABLE, SCHEDULE_CREATE, or any
+    other write capability exists."""
+    two_step_capabilities = {
+        capability_id
+        for capability_id, adapter in CAPABILITY_CATALOG.items()
+        if adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
+    }
+    assert two_step_capabilities == {
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.SCHEDULE_ENABLE,
+    }
+
+
+def test_no_schedule_disable_or_create_capability_exists() -> None:
+    assert not any("SCHEDULE_DISABLE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_CREATE" in member.name for member in CapabilityId)
+
+
+def test_build_tool_input_adds_no_fixed_arguments_for_schedule_enable() -> None:
+    """schedule_enable's own real tool input key ("schedule_id")
+    already matches its one declared argument's name one-to-one - no
+    rename, no fixed literal merge needed, unlike memory_search's
+    "value"->"query" rename or project_state_update_focus's fixed
+    "field" key."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE]
+    assert build_tool_input(adapter, {"schedule_id": 5}) == {"schedule_id": 5}
+
+
+def test_build_tool_input_adds_no_fixed_arguments_for_schedule_verify_enabled_state() -> (
+    None
+):
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE]
+    assert build_tool_input(adapter, {}) == {}

@@ -94,7 +94,9 @@ def test_evidence_is_bounded_to_200_characters() -> None:
 
 
 def test_no_retry_or_replan_mechanism_exists() -> None:
-    """Structural sanity: this module exposes exactly one function and
+    """Structural sanity: this module exposes exactly the two real
+    verifier functions (Phase 90's focus verifier, unmodified, and
+    Phase 94, Batch 2's schedule-enabled-state verifier) and each
     performs a single comparison - there is no loop, no retry
     parameter, and no replan concept anywhere in its API."""
     import inspect
@@ -106,7 +108,7 @@ def test_no_retry_or_replan_mechanism_exists() -> None:
         for name, obj in vars(module).items()
         if inspect.isfunction(obj) and obj.__module__ == module.__name__
     ]
-    assert functions == ["verify_focus_update"]
+    assert set(functions) == {"verify_focus_update", "verify_schedule_enabled_state"}
 
 
 # --- Contract shape tests ----------------------------------------------------

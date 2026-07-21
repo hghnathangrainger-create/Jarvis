@@ -29,6 +29,15 @@ Responsibilities:
       per-capability marker (Section 20.4), and require the model's
       already-validated value to equal that span exactly, under a
       narrow, documented normalization (Section 20.5).
+    - For the one capability with a model-supplied integer argument
+      (schedule_enable, Phase 94, Batch 2), extract the single
+      candidate numeric span from the live request using its own
+      fixed marker, and require the model's already-validated integer
+      to equal that span's parsed value exactly - the same marker +
+      single-occurrence + exact-equality technique as the string
+      extractors, applied to a second value type, never a new
+      attribution philosophy (docs/phase_94_implementation_plan.md,
+      Section 6).
 
 Does NOT:
     - Call an AI provider, compute a similarity score, or retain state
@@ -67,9 +76,16 @@ from enum import Enum
 
 from intelligence.capability_catalog import CapabilityId
 
-#: The one model-supplied argument name every argument-bearing
+#: The one model-supplied argument name every string argument-bearing
 #: capability in this catalog uses (Phase 90 Batch 3, Phase 91 Batch 2).
 _ARGUMENT_NAME = "value"
+
+#: The one model-supplied integer argument name SCHEDULE_ENABLE uses
+#: (Phase 94, Batch 2) - a distinct name and attribution mechanism from
+#: _ARGUMENT_NAME's string capabilities, since a schedule id is
+#: attributed via marker + exact integer equality, never marker +
+#: string equality.
+_NUMERIC_ARGUMENT_NAME = "schedule_id"
 
 _TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 
@@ -283,13 +299,15 @@ class _IntentSignature:
     qualifier_tokens: tuple[str, ...] = ()
 
 
-#: Exactly the eight model-selectable capabilities (Section 20.2's
+#: Exactly the nine model-selectable capabilities (Section 20.2's
 #: final table for the original six; docs/phase_93_implementation_plan.md
-#: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1).
-#: project_state_verify_focus is deliberately absent - it is
-#: internal_only and can never be a parsed EXECUTE decision's
-#: capability_id (intelligence/structured_output.py already rejects it
-#: before ground_decision() could ever be called with it).
+#: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1;
+#: docs/phase_94_implementation_plan.md, Section 6, for SCHEDULE_ENABLE,
+#: added Phase 94, Batch 2). project_state_verify_focus and
+#: schedule_verify_enabled_state are both deliberately absent - both
+#: are internal_only and can never be a parsed EXECUTE decision's
+#: capability_id (intelligence/structured_output.py already rejects
+#: either before ground_decision() could ever be called with it).
 _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
     CapabilityId.PROJECT_STATE_SHOW: _IntentSignature(
         action_tokens=("show",),
@@ -343,6 +361,14 @@ _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
         domain_tokens=("workflow", "workflows"),
         qualifier_tokens=("history",),
     ),
+    CapabilityId.SCHEDULE_ENABLE: _IntentSignature(
+        action_tokens=("enable",),
+        domain_tokens=("schedule", "schedules"),
+        # Phase 94, Batch 2: no qualifier needed - "enable" is not an
+        # action token of any other signature, so no collision requires
+        # a third, disambiguating dimension the way memory_list_recent/
+        # approval_history/workflow_history each need "recent"/"history".
+    ),
 }
 
 
@@ -382,7 +408,7 @@ def _signature_matches(
 
 
 def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
-    """Evaluate the live request against every one of the eight
+    """Evaluate the live request against every one of the nine
     catalogue signatures (Section 20.3's catalogue-wide rule) - never
     only the model-selected capability's own signature in isolation.
 
@@ -415,6 +441,16 @@ def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
 _ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: " to ",
     CapabilityId.MEMORY_SEARCH: " for ",
+}
+
+#: The one fixed, per-capability marker for a model-supplied *integer*
+#: argument (Phase 94, Batch 2) - real, currently-tested language
+#: ("enable **schedule** 5", matching core/command_router.py's own
+#: _SCHEDULE_ENABLE_PREFIXES grammar). Kept in its own dict, distinct
+#: from _ARGUMENT_MARKER_BY_CAPABILITY, since the extracted span is
+#: parsed and compared as an int, never as a string.
+_NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
+    CapabilityId.SCHEDULE_ENABLE: " schedule ",
 }
 
 
@@ -483,6 +519,53 @@ def _extract_argument_span(
     return span
 
 
+def _extract_numeric_argument_span(
+    normalized_request: str, marker: str
+) -> GroundingResult | int:
+    """Extract the single candidate integer argument (a schedule id)
+    from an already-normalized request, or return the exact bounded
+    refusal (Phase 94, Batch 2 - the numeric analogue of
+    _extract_argument_span, docs/phase_94_implementation_plan.md,
+    Section 6).
+
+    Applies the identical marker + single-occurrence discipline as
+    _extract_argument_span, but the candidate must additionally be
+    entirely decimal digits (str.isdigit()) once at most one trailing
+    terminal-punctuation character is stripped - no sign, no embedded
+    or trailing whitespace-separated extra token, no second numeric
+    target. Anything else is ambiguous, never guessed at.
+
+    Args:
+        normalized_request: The request, already passed through
+            _normalize().
+        marker: The capability's fixed marker (" schedule ").
+
+    Returns:
+        The parsed candidate integer on success, or a
+        GroundingResult(grounded=False, ...) describing exactly why no
+        single, usable numeric span could be established.
+    """
+    occurrences = normalized_request.count(marker)
+    if occurrences == 0:
+        return _reject(UngroundedReason.MISSING_ARGUMENT_SPAN)
+    if occurrences > 1:
+        return _reject(UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN)
+
+    index = normalized_request.find(marker)
+    span = normalized_request[index + len(marker) :].strip()
+    span = _strip_one_trailing_terminal_punctuation(span)
+    if not span:
+        return _reject(UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN)
+    if not span.isdigit():
+        # Anything not entirely decimal digits - a sign, a second
+        # whitespace-separated token, trailing non-numeric text, or
+        # any other shape - is ambiguous, never guessed at (no sign
+        # guessing, no number-word conversion, no fuzzy extraction).
+        return _reject(UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN)
+
+    return int(span)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -539,25 +622,44 @@ def ground_decision(
         return _reject(UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH)
 
     marker = _ARGUMENT_MARKER_BY_CAPABILITY.get(capability_id)
-    if marker is None:
-        # Zero-argument capability - capability-selection grounding is
-        # the entire check (Section 20: "Zero-argument capabilities
-        # require capability-selection grounding only").
+    if marker is not None:
+        normalized_request = _normalize(request_text)
+        span_outcome = _extract_argument_span(normalized_request, marker)
+        if isinstance(span_outcome, GroundingResult):
+            return span_outcome
+        candidate_span = span_outcome
+
+        value = arguments[_ARGUMENT_NAME]
+        assert isinstance(value, str)  # guaranteed by structured_output.py's own validation
+
+        normalized_span = _strip_one_trailing_terminal_punctuation(candidate_span)
+        normalized_value = _normalize_for_argument_comparison(value)
+
+        if normalized_span != normalized_value:
+            return _reject(UngroundedReason.ARGUMENT_VALUE_MISMATCH)
+
         return _GROUNDED
 
-    normalized_request = _normalize(request_text)
-    span_outcome = _extract_argument_span(normalized_request, marker)
-    if isinstance(span_outcome, GroundingResult):
-        return span_outcome
-    candidate_span = span_outcome
+    numeric_marker = _NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY.get(capability_id)
+    if numeric_marker is not None:
+        normalized_request = _normalize(request_text)
+        numeric_outcome = _extract_numeric_argument_span(normalized_request, numeric_marker)
+        if isinstance(numeric_outcome, GroundingResult):
+            return numeric_outcome
+        candidate_id = numeric_outcome
 
-    value = arguments[_ARGUMENT_NAME]
-    assert isinstance(value, str)  # guaranteed by structured_output.py's own validation
+        value = arguments[_NUMERIC_ARGUMENT_NAME]
+        # guaranteed by structured_output.py's own validation: a real
+        # int, never a bool (bool is explicitly excluded there since it
+        # is a Python int subclass).
+        assert isinstance(value, int) and not isinstance(value, bool)
 
-    normalized_span = _strip_one_trailing_terminal_punctuation(candidate_span)
-    normalized_value = _normalize_for_argument_comparison(value)
+        if candidate_id != value:
+            return _reject(UngroundedReason.ARGUMENT_VALUE_MISMATCH)
 
-    if normalized_span != normalized_value:
-        return _reject(UngroundedReason.ARGUMENT_VALUE_MISMATCH)
+        return _GROUNDED
 
+    # Zero-argument capability - capability-selection grounding is the
+    # entire check (Section 20: "Zero-argument capabilities require
+    # capability-selection grounding only").
     return _GROUNDED

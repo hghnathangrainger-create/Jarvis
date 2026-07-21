@@ -1,33 +1,45 @@
 """
 verification.py
 
-Exact, deterministic verification for Jarvis's one Batch 3 write
-workflow: "ask jarvis to: update my project focus to X and confirm
-it" (Phase 90, Batch 3; contracts fixed by
-docs/phase_90_implementation_plan.md, Sections 24.C.15/C.16 and the
-Batch 3 planning prompt).
+Exact, deterministic verification for Jarvis's verified write
+workflows: the original Batch 3 workflow, "ask jarvis to: update my
+project focus to X and confirm it" (Phase 90, Batch 3; contracts fixed
+by docs/phase_90_implementation_plan.md, Sections 24.C.15/C.16 and the
+Batch 3 planning prompt), and the Phase 94, Batch 2 schedule-enable
+workflow, "ask jarvis to: enable schedule <id>" (contracts fixed by
+docs/phase_94_implementation_plan.md, Section 14).
 
 Responsibilities:
     - Define VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE/
       NOT_REQUIRED) and VerificationResult - the only verification
-      contracts Batch 3 actually consumes.
+      contracts either workflow actually consumes.
     - Compare the write step's real, expected focus value against the
       verify step's real, structured ToolResult.metadata["focus"] -
       exact string equality only, never a substring, fuzzy match, or
       AI judgement call.
+    - Compare the fixed, trusted expected enabled state (always True)
+      against the verify step's real, structured
+      ToolResult.metadata["enabled"] - exact boolean identity only,
+      never a truthiness check or a comparison against anything
+      model-supplied.
 
 Does NOT:
     - Parse any tool's human-readable output text. Verification reads
       only ToolResult.metadata, which
-      tools/builtin/project_state_verify_tool.py already populates
-      with real, structured fields.
+      tools/builtin/project_state_verify_tool.py and
+      tools/builtin/schedule_verify_enabled_state_tool.py already
+      populate with real, structured fields.
     - Call ToolExecutor, WorkflowEngine, or any AI provider. This
       module is a pure function of two already-real values to a
-      VerificationResult.
+      VerificationResult, for either workflow.
     - Retry, replan, or re-run anything. A single call answers a
       single question once; the caller (core/orchestrator.py) decides
       what to do with the answer, and never calls this twice for the
       same workflow attempt.
+    - Accept a model-supplied expected value for the schedule-enable
+      verifier. The expected enabled state is always the fixed literal
+      True, supplied only by the trusted caller - never an argument a
+      model output could influence.
 """
 
 from __future__ import annotations
@@ -37,9 +49,15 @@ from enum import Enum
 
 from tools.base_tool import ToolResult
 
-#: The one verifier this phase defines. Fixed, not derived from any
-#: model output or configuration.
+#: The one verifier Phase 90, Batch 3 defines. Fixed, not derived from
+#: any model output or configuration.
 FOCUS_EXACT_MATCH_VERIFIER_ID = "project_state_focus_exact_match"
+
+#: The one verifier Phase 94, Batch 2 defines. Fixed, not derived from
+#: any model output or configuration - matches
+#: CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE].verification_strategy_id
+#: exactly.
+SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID = "schedule_enabled_exact_match"
 
 #: Evidence strings are bounded to this many characters - real, never
 #: fabricated, and never a raw dictionary or secret value.
@@ -133,4 +151,68 @@ def verify_focus_update(
         verifier_id=FOCUS_EXACT_MATCH_VERIFIER_ID,
         evidence=evidence,
         detail="the stored value does not match the requested value",
+    )
+
+
+def verify_schedule_enabled_state(
+    *, expected_enabled: bool, verify_tool_result: ToolResult | None
+) -> VerificationResult:
+    """Compare the fixed, trusted expected enabled state (always True)
+    against the real, structured verify-step result (Phase 94, Batch
+    2 - docs/phase_94_implementation_plan.md, Section 14).
+
+    Mirrors verify_focus_update()'s exact shape and outcome taxonomy,
+    with the one deliberate difference the underlying field's own type
+    requires: boolean identity comparison, never a string comparison.
+
+    Args:
+        expected_enabled: The fixed, trusted expected state - always
+            True for the enable workflow. Never model-supplied; the
+            caller (intelligence/planning.py's workflow-builder) always
+            passes the literal True, matching the write capability's
+            own intent, never a value read from parsed model output.
+        verify_tool_result: The verify step's real ToolResult, or None
+            if the verify step never ran at all (e.g. the write step
+            itself failed and the workflow stopped before step 2).
+
+    Returns:
+        VERIFIED if the verify step ran successfully and its
+        metadata["enabled"] is exactly expected_enabled. FAILED if the
+        verify step ran successfully but the values genuinely differ
+        (the schedule exists but is not enabled). UNAVAILABLE if the
+        verify step did not run, its ToolResult was not a success
+        (including a genuine missing-schedule failure), or its
+        metadata carried no usable "enabled" key.
+    """
+    if verify_tool_result is None or not verify_tool_result.success:
+        return VerificationResult(
+            outcome=VerificationOutcome.UNAVAILABLE,
+            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            evidence="",
+            detail="the verification step did not complete successfully",
+        )
+
+    actual = verify_tool_result.metadata.get("enabled")
+    if not isinstance(actual, bool):
+        return VerificationResult(
+            outcome=VerificationOutcome.UNAVAILABLE,
+            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            evidence="",
+            detail="the verification step returned no usable enabled state",
+        )
+
+    evidence = str(actual)
+    if actual is expected_enabled:
+        return VerificationResult(
+            outcome=VerificationOutcome.VERIFIED,
+            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            evidence=evidence,
+            detail=None,
+        )
+
+    return VerificationResult(
+        outcome=VerificationOutcome.FAILED,
+        verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+        evidence=evidence,
+        detail="the stored enabled state does not match the requested state",
     )

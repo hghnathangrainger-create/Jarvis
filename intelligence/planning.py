@@ -108,7 +108,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly eight capabilities "
+    "You are Jarvis's tool-selection planner. Exactly nine capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -152,10 +152,18 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "request asks to show or list your workflow history. Takes no "
     "arguments.\n"
     "\n"
-    'A ninth capability id, "project_state_verify_focus", exists only '
-    "internally - it is never a valid selection, is never selectable "
-    "through your output, and must never appear in your response under "
-    "any circumstances.\n"
+    '9. capability id "schedule_enable" - re-enables one of your '
+    "configured schedules by its exact id. Use this only when the "
+    "request explicitly asks to enable a specific schedule by id. "
+    "Include the exact schedule id in arguments.schedule_id (an "
+    "integer). This action requires your explicit approval and will "
+    "be verified with a structured read-back after it runs.\n"
+    "\n"
+    'Two further capability ids, "project_state_verify_focus" and '
+    '"schedule_verify_enabled_state", exist only internally - neither '
+    "is ever a valid selection, is never selectable through your "
+    "output, and must never appear in your response under any "
+    "circumstances.\n"
     "\n"
     "If no capability above can satisfy the request, you must return "
     "the exact unsupported object.\n"
@@ -194,6 +202,10 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "Execute (workflow history):\n"
     '{"decision": "execute", "capability_id": "workflow_history", '
     '"arguments": {}}\n'
+    "\n"
+    "Execute (enable schedule):\n"
+    '{"decision": "execute", "capability_id": "schedule_enable", '
+    '"arguments": {"schedule_id": 5}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'
@@ -582,6 +594,24 @@ def _build_write_and_verify_workflow_plan(
     if isinstance(verify_preflight, str):
         return f"internal verification capability preflight failed: {verify_preflight}"
     verify_tool_input, verify_decision = verify_preflight
+
+    # Phase 94, Batch 2: thread through any write-step values the
+    # verifier needs to identify its exact target (e.g. schedule_id),
+    # per write_adapter's own trusted, static paired_verify_input_keys
+    # declaration - never model-supplied a second time, never derived
+    # from anything but the write step's own already-validated
+    # tool_input. Empty for every capability that declares no such
+    # keys (e.g. project_state_update_focus, whose verifier reads a
+    # singleton row and needs nothing, so this is a no-op for it).
+    if write_adapter.paired_verify_input_keys:
+        verify_tool_input = {
+            **verify_tool_input,
+            **{
+                key: tool_input[key]
+                for key in write_adapter.paired_verify_input_keys
+                if key in tool_input
+            },
+        }
 
     write_tool = tool_registry.get_tool(write_adapter.tool_name)
     assert write_tool is not None  # guaranteed by the caller's own preflight

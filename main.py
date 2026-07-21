@@ -114,6 +114,7 @@ from tools.builtin import (
     ScheduleDisableTool,
     ScheduleEnableTool,
     ScheduleListTool,
+    ScheduleVerifyEnabledStateTool,
     WebSearchTool,
     WebpageReadTool,
     WorkflowHistoryTool,
@@ -258,6 +259,12 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(ScheduleListTool(schedule_store))
     registry.register_tool(ScheduleEnableTool(schedule_store))
     registry.register_tool(ScheduleDisableTool(schedule_store))
+    # Internal-only verifier for the "ask jarvis to: enable schedule
+    # <id>" workflow (Phase 94, Batch 2) - shares this exact same,
+    # already-constructed ScheduleStore, so execution and verification
+    # always observe identical durable state. Never reachable via
+    # CommandRouter grammar; never selectable by AI output.
+    registry.register_tool(ScheduleVerifyEnabledStateTool(schedule_store))
 
     # Web search (Phase 16): Jarvis's first external-network tool.
     # Read-only, GREEN, and deliberately provider-independent - this is

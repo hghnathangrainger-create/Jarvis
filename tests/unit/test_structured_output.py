@@ -888,3 +888,157 @@ def test_approval_history_and_workflow_history_declare_zero_arguments() -> None:
 def test_history_capabilities_are_not_internal_only() -> None:
     assert CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY].internal_only is False
     assert CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY].internal_only is False
+
+
+# --- Phase 94, Batch 2: schedule_enable validation --------------------------
+
+
+def _schedule_enable_text(arguments: object) -> str:
+    return json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "schedule_enable",
+            "arguments": arguments,
+        }
+    )
+
+
+def test_schedule_enable_valid_selection() -> None:
+    result = parse_tool_selection(
+        _schedule_enable_text({"schedule_id": 5}), CAPABILITY_CATALOG
+    )
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.SCHEDULE_ENABLE
+    assert result.arguments == {"schedule_id": 5}
+
+
+@pytest.mark.parametrize("schedule_id", [0, 1, 5, 999999999, -1])
+def test_schedule_enable_accepts_any_real_integer_with_no_invented_bounds(
+    schedule_id: int,
+) -> None:
+    """No maximum/minimum bound is declared or enforced at this schema
+    layer - CapabilityArgumentSpec(type_name="int") validates type
+    only; whether a given id corresponds to a real schedule is the real
+    ScheduleStore's own concern, checked later, never guessed at here."""
+    result = parse_tool_selection(
+        _schedule_enable_text({"schedule_id": schedule_id}), CAPABILITY_CATALOG
+    )
+    assert result.arguments == {"schedule_id": schedule_id}
+
+
+def test_schedule_enable_missing_schedule_id_is_rejected() -> None:
+    reason = _fails(_schedule_enable_text({}), catalog=CAPABILITY_CATALOG)
+    assert reason == "missing required argument"
+
+
+def test_schedule_enable_null_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": None}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+@pytest.mark.parametrize("schedule_id", [True, False])
+def test_schedule_enable_bool_schedule_id_is_rejected(schedule_id: bool) -> None:
+    """Python bool is an int subclass - isinstance(True, int) is True -
+    so this must be explicitly, deliberately rejected, never silently
+    accepted as 1/0."""
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": schedule_id}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_enable_string_schedule_id_is_rejected_not_coerced() -> None:
+    """"5" is never coerced to 5 - a JSON string is always rejected for
+    an int-typed argument, regardless of its content."""
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": "5"}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_enable_float_schedule_id_is_rejected_not_coerced() -> None:
+    """5.0 is never coerced to 5 - a JSON number with a decimal point
+    decodes to a Python float, always rejected for an int-typed
+    argument."""
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": 5.0}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_enable_array_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": [5]}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_enable_object_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_enable_text({"schedule_id": {"id": 5}}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+@pytest.mark.parametrize(
+    "stray_arguments",
+    [
+        {"schedule_id": 5, "enabled": True},
+        {"schedule_id": 5, "expected_enabled": True},
+        {"schedule_id": 5, "verifier": "schedule_enabled_exact_match"},
+        {"schedule_id": 5, "verification_strategy_id": "schedule_enabled_exact_match"},
+        {"schedule_id": 5, "tool_name": "schedule_enable"},
+        {"schedule_id": 5, "operation": "enable"},
+        {"schedule_id": 5, "schedule_name": "daily digest"},
+        {"enabled": True},
+    ],
+)
+def test_schedule_enable_rejects_any_extra_argument(
+    stray_arguments: dict[str, object],
+) -> None:
+    reason = _fails(
+        _schedule_enable_text(stray_arguments), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "unknown argument name in model output"
+
+
+@pytest.mark.parametrize(
+    "malformed_arguments_json",
+    ['"not an object"', "[]", "null", "42", "true", "false"],
+)
+def test_schedule_enable_rejects_malformed_arguments_container(
+    malformed_arguments_json: str,
+) -> None:
+    text = (
+        '{"decision": "execute", "capability_id": "schedule_enable", '
+        '"arguments": ' + malformed_arguments_json + "}"
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "arguments must be a JSON object"
+
+
+def test_schedule_enable_declares_exactly_one_required_int_argument() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE]
+    assert [spec.name for spec in adapter.arguments] == ["schedule_id"]
+    assert adapter.arguments[0].type_name == "int"
+    assert adapter.arguments[0].required is True
+
+
+def test_schedule_enable_is_not_internal_only() -> None:
+    assert CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE].internal_only is False
+
+
+def test_schedule_verify_enabled_state_is_rejected_from_ai_output_even_though_catalogued() -> (
+    None
+):
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "schedule_verify_enabled_state",
+            "arguments": {},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "capability is internal-only and cannot be selected"

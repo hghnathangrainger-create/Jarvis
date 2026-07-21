@@ -101,6 +101,11 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
     - ScheduleEnableTool: re-enables a schedule by id (Phase 21).
     - ScheduleDisableTool: disables a schedule by id (Phase 21) - the
       only way to stop a schedule from running; there is no delete tool.
+    - ScheduleVerifyEnabledStateTool: internal-only, reads back one
+      schedule's current enabled state as structured metadata (Phase
+      94, Batch 2) - never selectable by AI, never a user command;
+      reachable only as the fixed second step of the schedule-enable-
+      and-verify workflow.
     - ProjectStateUpdateTool: updates one field (branch, phase, commit,
       suite, focus) of Jarvis's manually-maintained project-state
       record (Phase 89, Batch 1). Never inspects git, a subprocess, or
@@ -146,6 +151,9 @@ from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
 from tools.builtin.schedule_enable_tool import ScheduleEnableTool
 from tools.builtin.schedule_list_tool import ScheduleListTool
+from tools.builtin.schedule_verify_enabled_state_tool import (
+    ScheduleVerifyEnabledStateTool,
+)
 from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
@@ -182,4 +190,5 @@ __all__ = [
     "ScheduleListTool",
     "ScheduleEnableTool",
     "ScheduleDisableTool",
+    "ScheduleVerifyEnabledStateTool",
 ]

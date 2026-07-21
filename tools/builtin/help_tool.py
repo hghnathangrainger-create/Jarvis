@@ -16,8 +16,10 @@ the new "ask jarvis to: <request>" tool-selection command; updated
 Phase 90, Batch 3 to describe the same command's new focus-update
 capability; updated Phase 93, Batch 1 to describe the same command's
 two new bounded audit-history capabilities (approval history, workflow
-history) - the internal-only project_state_verify tool is deliberately
-never documented here, since it is not a user command).
+history); updated Phase 94, Batch 2 to describe the same command's new
+verified schedule-enable capability - the internal-only
+project_state_verify/schedule_verify_enabled_state tools are
+deliberately never documented here, since neither is a user command).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -171,15 +173,20 @@ _HELP_LINES: tuple[str, ...] = (
     "read-only, no approval needed - the same data 'show jarvis project "
     "state'/'health check'/'list schedules'/'show memories'/'search "
     "memories'/'show approval history'/'show workflow history' already "
-    "report), or may update only its focus field "
-    "(requires your explicit approval, then a structured read-back checks "
-    "the stored value matches - verification can fail or be unavailable and "
-    "is always reported honestly, never assumed). May honestly report that "
-    "no supported capability can satisfy your request, or ask you to "
-    "restate an ambiguous, conflicting, or unconfirmable request more "
-    "directly. Zero retries, zero replans, no arbitrary tool access, no "
-    "autonomous behavior - a real result is only ever shown after the "
-    "real, unmodified tool actually runs.",
+    "report), or may update only its focus field, or enable one of your "
+    "existing schedules by its exact id (schedule ids come from 'list "
+    "schedules'/'show schedules' output) - either write action requires "
+    "your explicit approval, then a structured read-back checks the real "
+    "stored value matches what you approved - verification can fail or be "
+    "unavailable and is always reported honestly, never assumed; an "
+    "ambiguous or mismatched schedule id is refused, never guessed. There "
+    "is no AI-selectable way to disable a schedule; use 'disable schedule "
+    "<id>' directly. May honestly report that no supported capability can "
+    "satisfy your request, or ask you to restate an ambiguous, "
+    "conflicting, or unconfirmable request more directly. Zero retries, "
+    "zero replans, no arbitrary tool access, no autonomous behavior - a "
+    "real result is only ever shown after the real, unmodified tool "
+    "actually runs.",
 )
 
 

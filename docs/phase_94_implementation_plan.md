@@ -430,3 +430,54 @@ Confirmed by §21.12's own tests, by `git diff`/`git status` showing no change t
 ### 21.15 Scope confirmation
 
 No `SecurityManager` rule or tier was changed (re-confirmed: `security/security_manager.py` absent from the changed-file list). No new write path was introduced - the one and only executable write remains `PROJECT_STATE_UPDATE_FOCUS`'s own, pre-existing `project_state_update` tool call. No retry, replanning, or autonomous behavior exists anywhere in the new code. `docs/user_guide.md` and `tools/builtin/help_tool.py` were not touched. `docs/phase_94_completion_report.md` was not created. Phase 94 remains open; Batch 2 (adding `SCHEDULE_ENABLE` itself) and Phase 95 were not started.
+
+---
+
+## 22. Batch 2 implementation and verification evidence (as actually built)
+
+### 22.1 What was added
+
+Exactly one new user-facing capability, `SCHEDULE_ENABLE`, and its paired internal-only verifier, `SCHEDULE_VERIFY_ENABLED_STATE`, added to the real `CAPABILITY_CATALOG` alongside the existing nine entries (ten total; nine model-selectable, one internal-only). `SCHEDULE_ENABLE` is classified `TWO_STEP_WORKFLOW`, YELLOW, one required integer argument `schedule_id` (`CapabilityArgumentSpec(name="schedule_id", type_name="int", required=True)`), `verification_strategy_id="schedule_enabled_exact_match"`, `paired_verify_capability_id=CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE`, `paired_verify_input_keys=("schedule_id",)`. `SCHEDULE_VERIFY_ENABLED_STATE` is `internal_only=True`, GREEN, zero grounding signature, never model-selectable.
+
+### 22.2 Numeric argument-attribution mechanism
+
+`intelligence/grounding.py` gained a second, numeric argument-extraction path (`_extract_numeric_argument_span()`, marker `" schedule "`, exact-integer-equality check, no sign guessing, no coercion) alongside the pre-existing string-span extractor, dispatched from `ground_decision()`'s existing tail based on which extractor a capability's own trusted config declares it needs. Non-numeric, multi-token, multi-marker, and zero-marker cases all fall back to the same, pre-existing `AMBIGUOUS_ARGUMENT_SPAN` reason - no 8th reason was added, matching the plan's own explicit design allowance (§14).
+
+### 22.3 `paired_verify_input_keys` - a small, necessary addition beyond the original plan wording
+
+The original accepted plan (§10/§14) anticipated that the verify step would need to know which schedule to re-read, but did not name the implementation mechanism. Building `_build_write_and_verify_workflow_plan()`'s generalized version against a second real workflow surfaced the gap directly (`test_schedule_enable_workflow_plan_step_2_input_is_the_same_schedule_id` initially failed with `{} == {'schedule_id': 5}`). The fix: a new, generic, trusted, static `CapabilityAdapter.paired_verify_input_keys: tuple[str, ...] = ()` field, naming which keys to copy verbatim from the write step's own already-validated `tool_input` into the verify step's `tool_input`. Empty for `PROJECT_STATE_UPDATE_FOCUS` (unchanged behavior - verified by `test_real_update_focus_workflow_still_builds_the_exact_existing_plan` passing bit-for-bit), `("schedule_id",)` for `SCHEDULE_ENABLE`. Not schedule-specific, not hardcoded to any one capability, consistent with the plan's own stated intent.
+
+### 22.4 Orchestrator response-translation generalization
+
+A latent gap in `_start_update_focus_workflow`'s own final line (`return self._update_focus_workflow_result_to_response(result)` - hardcoded, never actually generalized in Batch 1 despite `execute_approved()`'s resume path being generalized) was found and fixed: both call sites now share one `_translate_verified_workflow_result()` method, matching the plan's own explicit anticipation (§9) that both dispatch points would need updating. `_is_update_focus_workflow_result`/new `_is_schedule_enable_workflow_result` both delegate to one private static helper, `_matches_two_step_workflow_shape(result, write_capability_id)`, parameterized only by the capability id to check - never a generic/pluggable dispatch table.
+
+### 22.5 Tool registration
+
+`ScheduleVerifyEnabledStateTool` registered in `main.py` immediately after the existing schedule tools, sharing the same `ScheduleStore` instance as `ScheduleEnableTool`/`ScheduleListTool` - confirmed by `test_schedule_verify_enabled_state_tool.py` and the coexistence/workflow tests reading back real store state after execution.
+
+### 22.6 Test coverage added this batch
+
+- `tests/unit/test_capability_catalog.py` - catalogue-shape tests for the two new adapters, `paired_verify_input_keys`/`paired_verify_capability_id` defaults, ten-entry/nine-model-selectable counts.
+- `tests/unit/test_structured_output.py` - "Phase 94, Batch 2" section: valid selection, boundary integers (negative/zero/large), explicit rejection of missing/null/bool/string/float/array/object for `schedule_id` (bool rejected via the existing, unmodified generic `isinstance(value, bool)` branch in `_validate_arguments()` - zero new production code needed for this case), extra-argument rejection, internal-only flag enforcement.
+- `tests/unit/test_grounding.py` - "Section 14": real phrasing, exact numeric extraction, wrong-id/missing/multiple-marker/multiple-candidate/ambiguous-trailing-text/negation/conflicting-request/action-without-domain/domain-without-action refusals, catalogue-wide non-collision (including against `SCHEDULE_LIST`), internal verifier absent from all signatures, unsupported-synonym rejection (activate/turn on/start/resume/switch on/reactivate/allow all refused).
+- `tests/unit/test_intelligence_planning.py` - `select_tool()`-level integration: two-step workflow shape/order, exact step 1/step 2 `tool_input` (including the `paired_verify_input_keys` merge), tiers, capability mismatch, wrong id, adversarial context, stray argument, bool rejection.
+- `tests/unit/test_trusted_workflow_foundation.py` - updated to reflect the legitimate two-workflow/eleven-entry/two-verifier-function state; new `test_schedule_enable_recognizer_also_delegates_to_the_shared_helper` (required extending the shared AST helper to also collect `ast.Attribute.attr`, not just `ast.Name.id`, since `JarvisOrchestrator._matches_two_step_workflow_shape(...)` parses as an attribute access).
+- `tests/unit/test_schedule_verify_enabled_state_tool.py` (new, 18 tests) - isolated tool-contract tests mirroring `test_project_state_verify_tool.py`.
+- `tests/unit/test_orchestrator_schedule_enable_workflow.py` (new, 31 tests) - full end-to-end orchestration: approval lifecycle (no execution before approval, exactly one pending approval, store unchanged while pending, decline performs zero writes, no fabricated approval), durable restart/resume, verification (exact mismatch, write failure skips verification, missing-schedule-at-execution honest failure, schedule-disappears-before-verification honest failure via a narrow test-double verifier, verifier-tool-failure honest reporting, already-enabled-schedule preserves the real tool's existing unconditional-success behavior), response/trace grounding (no raw dictionaries, no second AI call, ≤200-char trace entries), routing regressions (`ask jarvis:` advisory and the deterministic `show schedules` command both unaffected), structural checks (planning module never touches `ScheduleStore` directly, response translator never bypasses `WorkflowEngine`), Phase 92 zero-side-effect grounding refusals (wrong id, negation, capability mismatch), duplicate-resume/argument-immutability, and a coexistence test proving `PROJECT_STATE_UPDATE_FOCUS` and `SCHEDULE_ENABLE` dispatch correctly through one shared orchestrator/registry/executor/approvals/workflow-engine instance without cross-talk.
+
+### 22.7 Regression preservation
+
+`PROJECT_STATE_UPDATE_FOCUS` behavior is bit-for-bit unchanged: `intelligence/verification.py`'s `verify_focus_update()` was not modified (only a new, separate `verify_schedule_enabled_state()` function was added); `_build_write_and_verify_workflow_plan()`'s output for the focus capability is unchanged (`paired_verify_input_keys=()` means no merge occurs); every pre-existing test in `test_orchestrator_update_focus_workflow.py` (including Batch 1's `test_duplicate_resume_does_not_duplicate_the_write` and `test_approved_arguments_are_immutable_between_approval_and_execution`) passes unmodified. The new coexistence test additionally proves both workflows can run back-to-back on one real orchestrator instance without dispatch ambiguity.
+
+### 22.8 Verification results
+
+- Focused (all files touched this batch, run together - `test_capability_catalog.py`, `test_trusted_workflow_foundation.py`, `test_verification.py`, `test_structured_output.py`, `test_grounding.py`, `test_intelligence_planning.py`, `test_orchestrator_update_focus_workflow.py`, `test_orchestrator_schedule_enable_workflow.py`, `test_schedule_verify_enabled_state_tool.py`, `test_help_tool.py`, `test_command_router.py`): **1028 passed**.
+- Full suite, normal environment: **4981 passed, 3 skipped**.
+- Full suite, `AI_REASONING_ENABLED=false`: **4981 passed, 3 skipped** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **4981 passed, 3 skipped** - identical.
+- Ruff, Git-derived file set (`git diff --name-only 5a05044 -- '*.py'` plus untracked new `.py` files): exactly **17 files** - `core/orchestrator.py`, `intelligence/capability_catalog.py`, `intelligence/grounding.py`, `intelligence/planning.py`, `intelligence/verification.py`, `main.py`, `tests/unit/test_capability_catalog.py`, `tests/unit/test_grounding.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_structured_output.py`, `tests/unit/test_trusted_workflow_foundation.py`, `tests/unit/test_verification.py`, `tools/builtin/__init__.py`, `tools/builtin/help_tool.py`, `tests/unit/test_orchestrator_schedule_enable_workflow.py`, `tests/unit/test_schedule_verify_enabled_state_tool.py`, `tools/builtin/schedule_verify_enabled_state_tool.py`. `ruff check` on all 17: **all checks passed, exit code 0, zero findings**.
+- `git diff --check`: exit code 0 for both the working tree and the staged diff. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 22.9 Scope confirmation
+
+No `SCHEDULE_DISABLE`/`SCHEDULE_CREATE` capability, no schedule update/delete/name-targeting/search capability, no model-selectable expected-verification-state, no generic verifier registry, no arbitrary workflow steps, no retries/replanning/rollback, and no `SecurityManager` rule or tier change were added (`enable schedule` continues to classify YELLOW via its existing, unchanged rule; the verifier's own `list schedules` action continues to classify GREEN via its existing, unchanged rule). `docs/phase_94_completion_report.md` was not created. Phase 94 is not marked closed - Batch 3 (full regression/docs/closure) has not started, and Phase 95 has not started.
