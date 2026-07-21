@@ -321,3 +321,112 @@ Phase 94 may be closed only when: `SCHEDULE_ENABLE` executes end-to-end (groundi
 ## 20. Manual API Limitation
 
 Live Anthropic manual acceptance remains **postponed** because the configured API account lacks sufficient credits. This is an external account limitation, not a Jarvis code failure. No production behavior will be changed to bypass it. Phase 94, like Phases 90-93 before it, must remain fully verifiable through deterministic, fake-provider, and full-suite tests - never through a claimed live-model acceptance run.
+
+---
+
+## 21. Batch 1 Implementation Evidence
+
+**Status: Batch 1 complete and committed. Phase 94 remains open - Batch 2 (adding SCHEDULE_ENABLE itself) has not been started.**
+
+### 21.1 Schedule-ID viability checkpoint (performed before any code change)
+
+All eight mandatory items were directly re-confirmed from live production code, not assumed:
+
+1. **Canonical target**: `ScheduleEnableTool.run()` (`tools/builtin/schedule_enable_tool.py`) reads `request.input_data.get("schedule_id")` and calls `self._schedules.enable(schedule_id)` - `schedule_id` is the tool's one and only targeting field.
+2. **Real durable stored identifier**: `ScheduleRecord.id` is the primary key of `storage.models.ScheduleEntry`, a normal SQLAlchemy ORM table (`storage/models.py` line 480) - not a list position or any ephemeral value.
+3. **Restart-stable**: `ScheduleEntry` uses the exact same durable SQLite persistence mechanism as every other store in the repository (`ApprovalHistoryEntry`, `WorkflowHistoryEntry`, `ProjectStateStore`'s own table, etc.) - a database primary key survives a process restart by construction.
+4. **Unique**: primary-key semantics guarantee uniqueness by definition; `ScheduleStore.get()`/`.enable()`/`.disable()` all resolve via `db.get(ScheduleEntry, schedule_id)`, SQLAlchemy's own primary-key lookup.
+5. **User-obtainable today**: via the existing, real, deterministic `"show my schedules"`/`"list schedules"` command (`ScheduleListTool`, GREEN) - already reachable both deterministically and through the existing `SCHEDULE_LIST` Intelligence Core capability.
+6. **Clearly labelled**: `ScheduleListTool._format_entry()` renders each row as `"  [{record.id}]{label} '{query}' at {time} daily - {state}, last run: {last_run}"` - the bracketed `[id]` prefix exactly mirrors the established `[id]` convention already used by `WorkflowHistoryTool`/`ApprovalHistoryTool`.
+7. **`ScheduleStore.get(schedule_id)` consistency**: re-confirmed directly - `get()`, `enable()`, and `disable()` all call `db.get(ScheduleEntry, schedule_id)` against the identical table; `get()` is the exact same durable record `enable()` mutates.
+8. **YELLOW classification, no rule change**: `ScheduleEnableTool.action_for()` returns the fixed string `"enable schedule"`, which matches the existing, unmodified `security_manager.py` rule (line 223: `_Rule("enable schedule", SecurityTier.YELLOW, ...)`) - re-confirmed live via a direct `SecurityManager().classify_action("enable schedule")` call during this batch, returning `SecurityTier.YELLOW`.
+
+**All eight items passed. No schedule-list behavior was added or changed to manufacture viability - `tools/builtin/schedule_list_tool.py`, `tools/builtin/schedule_enable_tool.py`, `tools/builtin/schedule_disable_tool.py`, and `scheduling/schedule_store.py` were read only, never modified, in this batch.**
+
+### 21.2 Exact hardcoded workflow limitations found before the change
+
+Two, and only two, hardcoded pieces prevented a second `TWO_STEP_WORKFLOW` capability from being added later:
+
+1. `intelligence/planning.py::_build_update_focus_workflow_plan()` (line 550, pre-Batch-1): `verify_adapter = catalog.get(CapabilityId.PROJECT_STATE_VERIFY_FOCUS)` - a literal `CapabilityId` reference inside the function body, not derived from `write_adapter` at all. A second `TWO_STEP_WORKFLOW` capability would have silently been paired with `PROJECT_STATE_VERIFY_FOCUS` too - an actual correctness defect, not merely a style issue.
+2. `core/orchestrator.py::JarvisOrchestrator._is_update_focus_workflow_result()` (pre-Batch-1): two bare string literals, `"project_state_update"` and `"project_state_verify"`, hardcoded inside the method body, duplicating information the catalog already owns.
+
+Every other piece of the approval/workflow/resume architecture was re-confirmed, by direct `grep -in "project_state\|focus"` producing **zero matches**, to already be fully generic: `approval/approval_manager.py`, `approval/pending_approval_store.py`, `workflow/engine.py`, `workflow/paused_workflow_store.py`. None of these four files needed, or received, any change.
+
+### 21.3 Exact trusted foundation architecture implemented
+
+- **`intelligence/capability_catalog.py`**: one new field on the existing, frozen `CapabilityAdapter` dataclass - `paired_verify_capability_id: CapabilityId | None = None`. Defaults to `None`, so all eight capabilities defined before this batch need no change; only `PROJECT_STATE_UPDATE_FOCUS`'s own entry now explicitly sets `paired_verify_capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS`.
+- **`intelligence/planning.py`**: `_build_update_focus_workflow_plan()` renamed to `_build_write_and_verify_workflow_plan()` (matching this plan's own §13 anticipation); its one hardcoded literal replaced with `write_adapter.paired_verify_capability_id`, with an added explicit `None`-guard returning the same pre-existing honest failure string (`"the internal verification capability is not configured"`) when a write adapter has no paired verifier configured, or the named verifier is absent from the supplied catalog.
+- **`core/orchestrator.py`**: one new import (`from intelligence.capability_catalog import CAPABILITY_CATALOG, CapabilityId`); `_is_update_focus_workflow_result()` rewritten to derive its expected `(write_tool_name, verify_tool_name)` pair from `CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]` and its `paired_verify_capability_id`, instead of two literal strings. The method's own dispatch in `execute_approved()` is unchanged (still a single named check, since no second capability of this shape exists yet); `_update_focus_workflow_result_to_response()` is completely unmodified (still the correct, only-needed response translator for the one existing workflow).
+
+No dataclass, enum, mapping, or function name outside this exact set was introduced. No workflow-definition field of any kind is exposed to the model - `paired_verify_capability_id` is read only from the trusted, static `CapabilityAdapter`, never from parsed model output, `arguments`, or `tool_input` (directly proven: `test_workflow_builder_ignores_tool_input_contents_when_selecting_the_verifier`).
+
+### 21.4 Exact production configuration representing PROJECT_STATE_UPDATE_FOCUS
+
+```python
+CapabilityId.PROJECT_STATE_UPDATE_FOCUS: CapabilityAdapter(
+    ...,
+    verification_strategy_id="project_state_focus_exact_match",
+    internal_only=False,
+    paired_verify_capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
+),
+```
+
+This is the only catalog entry touched. All eight other entries are byte-for-byte unchanged (re-confirmed: `git diff` shows no line changed inside any other `CapabilityAdapter(...)` construction).
+
+### 21.5 Persistence-schema impact
+
+**None.** `planner/plan_models.py`, `workflow/paused_workflow_store.py`, `approval/pending_approval_store.py`, and `storage/models.py` were not modified at all in this batch (confirmed: absent from `git status --short`'s changed-file list). No persisted approval or paused-workflow row's shape changed in any way.
+
+### 21.6 Backward-compatibility evidence
+
+Because no persistence-affecting file changed, every previously-persisted `PROJECT_STATE_UPDATE_FOCUS` paused-workflow row remains resumable exactly as before, with zero migration of any kind required - re-confirmed behaviorally by `test_durable_restart_end_to_end` (in `tests/unit/test_orchestrator_update_focus_workflow.py`) passing unmodified, which exercises a real durable pause/restart/resume cycle end-to-end over a real SQLite session factory.
+
+### 21.7 Approval lifecycle preservation
+
+Re-confirmed via the full, unmodified existing test suite in `test_orchestrator_update_focus_workflow.py`: exactly one approval created (`test_initial_request_creates_a_real_pending_approval`), zero execution before approval (`test_update_focus_cannot_execute_without_approval`), zero verification while pending (`test_verifier_does_not_execute_while_pending`), decline performs zero writes (`test_decline_executes_zero_writes`), no fabricated approval from intelligence code (`test_no_fabricated_approval_is_ever_created_by_intelligence_code`) - all passing bit-for-bit unchanged after the generalization.
+
+### 21.8 Resume and duplicate-execution preservation
+
+`test_durable_restart_end_to_end` (pre-existing, unmodified) proves restart-safe resume continues to work. Two new tests added this batch: `test_duplicate_resume_does_not_duplicate_the_write` (a second `execute_approved()` call for an already-executed response/decision performs zero additional writes - the real, unmodified `_paused_workflow_id_for()` finds no still-paused workflow the second time and falls through to the existing, honest "no runnable tool for this action" response, never a second `resume()` or direct `ToolExecutor.execute()` call) and `test_approved_arguments_are_immutable_between_approval_and_execution` (mutating the fake AI provider's own future output after approval has zero effect on the already-durable, already-approved value that actually executes).
+
+### 21.9 Execution-input preservation
+
+`test_real_update_focus_workflow_still_builds_the_exact_existing_plan` (new) directly re-confirms `_build_write_and_verify_workflow_plan()` still produces `plan.steps[0].tool_name == "project_state_update"` and `plan.steps[0].tool_input == {"field": "focus", "value": <exact value>}` for the real capability - unchanged from before this batch.
+
+### 21.10 Verification-input and postcondition preservation
+
+Same test confirms `plan.steps[1].tool_name == "project_state_verify"` and `plan.steps[1].tool_input == {}` - unchanged. `intelligence/verification.py` itself was not modified at all (confirmed: absent from the changed-file list); `test_no_new_verification_function_exists_in_verification_module` (new) confirms the module still defines exactly one function, `verify_focus_update`.
+
+### 21.11 Public-response preservation
+
+`test_approved_verified_response_is_grounded_in_real_values`, `test_exact_mismatch_reports_failed_verification`, `test_write_failure_means_verifier_never_runs`, `test_declined_response_says_no_update_was_made`, and every other pre-existing response-shape test in `test_orchestrator_update_focus_workflow.py` pass unmodified - the exact success/mismatch/missing-state/tool-failure/verifier-failure wording is untouched, since `_update_focus_workflow_result_to_response()` itself was never edited.
+
+### 21.12 Anti-overgeneralization evidence
+
+- `test_only_one_two_step_workflow_capability_exists_in_the_real_catalog` - `PROJECT_STATE_UPDATE_FOCUS` remains the sole `TWO_STEP_WORKFLOW` entry in the real `CAPABILITY_CATALOG`.
+- `test_no_schedule_enable_capability_exists_yet` - the real `CapabilityId` enum still contains exactly the same nine members Phase 93 left it with; no member name contains `"SCHEDULE_ENABLE"`.
+- `test_no_schedule_verifier_strategy_id_exists_yet` - the only non-`None` `verification_strategy_id` anywhere in the catalog is still `"project_state_focus_exact_match"`.
+- `test_no_new_verification_function_exists_in_verification_module` - exactly one verifier function exists.
+- `test_workflow_builder_never_calls_forbidden_execution_or_ai_apis` (AST-based, docstring-excluded) - the generalized workflow-builder calls no `ToolExecutor`, `WorkflowEngine`, `ApprovalManager`, AI provider, or `.run()`.
+- `test_workflow_builder_signature_accepts_no_model_output_parameter` - the function's exact parameter set contains only trusted, already-resolved values.
+- `test_capability_adapter_field_is_never_exposed_as_a_model_facing_argument` - `paired_verify_capability_id` never appears as a declared `CapabilityArgumentSpec` name for any capability.
+- The test-local write/verify capability pairing used to prove genericity (`_test_local_write_and_verify_catalog()` in `tests/unit/test_trusted_workflow_foundation.py`) reuses two existing `CapabilityId` enum values purely as local dict keys; it is never assigned to, or merged into, the real `CAPABILITY_CATALOG` module object, is never registered in `main.py`, and adds no real user-facing capability - satisfying this batch's own explicit test-local-specification allowance.
+
+### 21.13 Confirmation no SCHEDULE_ENABLE capability or schedule verifier was added
+
+Confirmed by §21.12's own tests, by `git diff`/`git status` showing no change to `main.py`, `tools/builtin/help_tool.py`, or `docs/user_guide.md`, and by direct inspection: no `schedule_verify_enabled_state_tool.py` or equivalent file was created; no `SCHEDULE_ENABLE`/`SCHEDULE_VERIFY_ENABLED_STATE` `CapabilityId` member exists; no new grounding signature was added to `intelligence/grounding.py` (confirmed unmodified - absent from the changed-file list).
+
+### 21.14 Verification results
+
+- Focused (`test_trusted_workflow_foundation.py` (new, 17 tests), `test_capability_catalog.py`, `test_structured_output.py`, `test_grounding.py`, `test_intelligence_planning.py`, `test_orchestrator_ask_jarvis_to.py`, `test_orchestrator_update_focus_workflow.py`, `test_verification.py`, run together): **424 passed**.
+- Approval/workflow/executor/project-state regression sweep (approval manager/history/audit/models/prompt, CLI/core approval, pending approval store, tool executor approval + logger isolation, project-state show/store/update/verify tools): **301 passed**.
+- Phase 91-93 capability regression + command-router/help sweep (health-check tool + wiring, pending-approval wiring, project-state wiring, quarantine-list wiring, memory tool, orchestrator context-query/workflow-commands, approval-history/workflow-history store/tool/CLI, command router, help tool): **848 passed**.
+- Full suite, normal environment: **4864 passed, 3 skipped** (21 more than Phase 93's closing baseline of 4843 - exactly the 21 new tests added this batch).
+- Full suite, `AI_REASONING_ENABLED=false`: **4864 passed, 3 skipped** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **4864 passed, 3 skipped** - identical.
+- Ruff, Git-derived file set (tracked diff against HEAD plus the one new untracked file): exactly **6 files** - `core/orchestrator.py`, `intelligence/capability_catalog.py`, `intelligence/planning.py`, `tests/unit/test_capability_catalog.py`, `tests/unit/test_orchestrator_update_focus_workflow.py`, `tests/unit/test_trusted_workflow_foundation.py`. `ruff check` on all 6: **all checks passed, exit code 0, zero findings** (no new, no pre-existing).
+- `git diff --check`: exit code 0 (tracked changes plus the new file, checked via `git add -N`). Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 21.15 Scope confirmation
+
+No `SecurityManager` rule or tier was changed (re-confirmed: `security/security_manager.py` absent from the changed-file list). No new write path was introduced - the one and only executable write remains `PROJECT_STATE_UPDATE_FOCUS`'s own, pre-existing `project_state_update` tool call. No retry, replanning, or autonomous behavior exists anywhere in the new code. `docs/user_guide.md` and `tools/builtin/help_tool.py` were not touched. `docs/phase_94_completion_report.md` was not created. Phase 94 remains open; Batch 2 (adding `SCHEDULE_ENABLE` itself) and Phase 95 were not started.

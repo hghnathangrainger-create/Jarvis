@@ -62,6 +62,7 @@ from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
+from intelligence.capability_catalog import CAPABILITY_CATALOG, CapabilityId
 from intelligence.context import ContextAssembler, build_ai_context_block
 from intelligence.grounding import UngroundedReason
 from intelligence.planning import (
@@ -2031,22 +2032,44 @@ class JarvisOrchestrator:
         """Structurally recognise the Batch 3 update-focus-and-verify
         workflow shape - never a new persisted marker (Section 24.C.12).
 
+        Phase 94, Batch 1: the expected tool-name pair is now derived
+        from CAPABILITY_CATALOG's own trusted, static
+        paired_verify_capability_id field, rather than two literal
+        string constants hardcoded inside this method - a small,
+        foundational generalization so a future TWO_STEP_WORKFLOW
+        capability's own catalog entry could, in principle, be
+        recognised the same structural way. No second capability is
+        recognised or added by this batch: PROJECT_STATE_UPDATE_FOCUS
+        remains the only TWO_STEP_WORKFLOW capability in the catalog,
+        so the real tool-name pair this method compares against is
+        unchanged ("project_state_update", "project_state_verify").
+
         Args:
             result: A real WorkflowResult, from either run() or resume().
 
         Returns:
             True only if result.plan has exactly two steps whose real
-            tool names match this one fixed workflow's own shape,
-            exactly in order. Every one of the five pre-existing fixed
-            Phase 15 workflows uses different tool names and so can
-            never match this check.
+            tool names match PROJECT_STATE_UPDATE_FOCUS's own catalog-
+            declared write tool and paired verify tool, exactly in
+            order. Every one of the five pre-existing fixed Phase 15
+            workflows uses different tool names and so can never match
+            this check.
         """
         steps = result.plan.steps
         if len(steps) != 2:
             return False
+
+        write_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+        verify_capability_id = write_adapter.paired_verify_capability_id
+        if verify_capability_id is None:
+            return False
+        verify_adapter = CAPABILITY_CATALOG.get(verify_capability_id)
+        if verify_adapter is None:
+            return False
+
         return (
-            steps[0].tool_name == "project_state_update"
-            and steps[1].tool_name == "project_state_verify"
+            steps[0].tool_name == write_adapter.tool_name
+            and steps[1].tool_name == verify_adapter.tool_name
         )
 
     def _update_focus_workflow_result_to_response(

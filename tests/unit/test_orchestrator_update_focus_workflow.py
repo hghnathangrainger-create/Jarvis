@@ -253,6 +253,66 @@ def test_approval_executes_the_workflow_exactly_once() -> None:
     assert project_state_store.get().focus == "batch 3 verification"
 
 
+def test_duplicate_resume_does_not_duplicate_the_write() -> None:
+    """Phase 94, Batch 1 foundation check: calling execute_approved() a
+    second time with the same already-executed response/decision never
+    performs a second real write. The real, unmodified
+    _paused_workflow_id_for() only returns a workflow id for a workflow
+    the real WorkflowEngine instance still actually has paused - since
+    the first call already consumed it, the second call finds none and
+    falls through to the existing, unmodified "no runnable tool for
+    this action" honest response, never a second resume() or a second
+    direct ToolExecutor.execute() call."""
+    router, _ = _router(_update_focus_text("batch 3 verification"))
+    orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
+        _in_memory_session_factory(), router
+    )
+
+    response = orchestrator.handle_request(_REQUEST)
+    decision = approvals.approve(response.approval_request.request_id, decided_by="test")
+    first = orchestrator.execute_approved(response, decision)
+
+    assert first.success is True
+    assert project_state_store.get().focus == "batch 3 verification"
+
+    second = orchestrator.execute_approved(response, decision)
+
+    # The durable value is still exactly the one real write - never
+    # duplicated, never reverted, never re-applied a second time -
+    # regardless of what the second, already-consumed call itself
+    # reports.
+    assert project_state_store.get().focus == "batch 3 verification"
+    assert second.tool_result is None
+
+
+def test_approved_arguments_are_immutable_between_approval_and_execution() -> None:
+    """The paused Plan's own PlanStep.tool_input - not a fresh,
+    re-derived value - is what actually executes: proven by mutating
+    the *original* AI response text after the approval request already
+    exists (simulating a hypothetically-compromised/late-changing
+    input source) and confirming the durably-approved value, not any
+    later value, is what gets written."""
+    router, provider = _router(_update_focus_text("batch 3 verification"))
+    orchestrator, project_state_store, _, _, approvals, _ = _build_stack(
+        _in_memory_session_factory(), router
+    )
+
+    response = orchestrator.handle_request(_REQUEST)
+    decision = approvals.approve(response.approval_request.request_id, decided_by="test")
+
+    # Simulate a would-be-different value becoming available from the
+    # same fake provider after approval - this must have zero effect,
+    # since the already-built, already-approved Plan/PlanStep.tool_input
+    # is what resume() actually executes, never a freshly re-derived one.
+    provider._text = _update_focus_text("a completely different value")  # type: ignore[attr-defined]
+
+    final = orchestrator.execute_approved(response, decision)
+
+    assert final.success is True
+    assert project_state_store.get().focus == "batch 3 verification"
+    assert "a completely different value" not in final.message
+
+
 def test_decline_executes_zero_writes() -> None:
     router, _ = _router(_update_focus_text("batch 3 verification"))
     orchestrator, project_state_store, _, _, approvals, _ = _build_stack(

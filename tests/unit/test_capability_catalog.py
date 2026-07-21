@@ -338,7 +338,28 @@ def test_capability_adapter_has_exact_fields() -> None:
         "max_execution_tier",
         "verification_strategy_id",
         "internal_only",
+        "paired_verify_capability_id",
     }
+
+
+def test_paired_verify_capability_id_defaults_to_none_for_pre_phase_94_capabilities() -> (
+    None
+):
+    """Phase 94, Batch 1: every capability defined before this batch
+    needs no change at all - the new field defaults to None for all of
+    them, and only PROJECT_STATE_UPDATE_FOCUS's own entry sets it."""
+    for capability_id, adapter in CAPABILITY_CATALOG.items():
+        if capability_id is CapabilityId.PROJECT_STATE_UPDATE_FOCUS:
+            continue
+        assert adapter.paired_verify_capability_id is None
+
+
+def test_update_focus_paired_verify_capability_id_is_the_internal_verifier() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    assert (
+        adapter.paired_verify_capability_id
+        is CapabilityId.PROJECT_STATE_VERIFY_FOCUS
+    )
 
 
 def test_execution_strategy_has_exactly_two_members() -> None:

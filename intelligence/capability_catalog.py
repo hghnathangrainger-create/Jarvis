@@ -35,6 +35,15 @@ Responsibilities:
       approval_history, "approved"/"declined") operations - those
       remain reachable only through the existing deterministic command
       grammar, never through this AI-facing catalog.
+      Phase 94, Batch 1 adds no new capability, but adds
+      CapabilityAdapter.paired_verify_capability_id (defaulting to None
+      for every capability defined before this batch) so that
+      intelligence/planning.py's workflow-builder can look up
+      PROJECT_STATE_UPDATE_FOCUS's own paired internal verifier
+      (PROJECT_STATE_VERIFY_FOCUS) from this catalog's own trusted data
+      instead of a hardcoded literal - a small, foundational
+      generalization intended to support a second TWO_STEP_WORKFLOW
+      capability in a later phase, without adding one yet.
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -145,6 +154,17 @@ class CapabilityAdapter:
             CommandRouter's own grammar - False here, since
             project_state_show is already directly reachable via "show
             jarvis project state" (Phase 89).
+        paired_verify_capability_id: None for every SINGLE_TOOL
+            capability. For a TWO_STEP_WORKFLOW capability, the fixed,
+            trusted, internal-only capability id
+            intelligence/planning.py's workflow-builder must pair it
+            with as the workflow's own fixed second step (Phase 94,
+            Batch 1 - generalizing what was previously a literal,
+            hardcoded CapabilityId reference inside the workflow-
+            builder itself). Never selected, read, or influenced by
+            model output - a trusted, static production mapping only.
+            Defaults to None so every capability defined before Phase
+            94 needs no change at all.
     """
 
     capability_id: CapabilityId
@@ -155,6 +175,7 @@ class CapabilityAdapter:
     max_execution_tier: SecurityTier
     verification_strategy_id: str | None
     internal_only: bool
+    paired_verify_capability_id: CapabilityId | None = None
 
 
 #: The single source of truth for what the intelligence layer may
@@ -194,6 +215,7 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         max_execution_tier=SecurityTier.YELLOW,
         verification_strategy_id="project_state_focus_exact_match",
         internal_only=False,
+        paired_verify_capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
     ),
     CapabilityId.PROJECT_STATE_VERIFY_FOCUS: CapabilityAdapter(
         capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS,

@@ -32,12 +32,19 @@ Responsibilities:
     - For a valid "execute" decision naming a TWO_STEP_WORKFLOW
       capability (project_state_update_focus, Batch 3): perform the
       same preflight for the write step (expecting exactly YELLOW),
-      additionally preflight the fixed internal verifier capability
+      additionally preflight its paired internal verifier capability
       (expecting exactly GREEN), and deterministically construct a
       real, exactly-two-step planner.plan_models.Plan for the caller
       to run through the real, unmodified WorkflowEngine. The AI never
       selects, orders, or configures the verifier step - it is always
-      the second, fixed step of this one workflow shape.
+      the second, fixed step of this one workflow shape. Phase 94,
+      Batch 1 generalizes this pairing: the verifier capability id is
+      read from the selected capability's own
+      CapabilityAdapter.paired_verify_capability_id field (a trusted,
+      static catalog value) rather than a literal hardcoded inside this
+      module, so a second TWO_STEP_WORKFLOW capability could declare
+      its own pairing in a future phase with no further change to this
+      function - though no second one is added by this batch.
     - For a valid "unsupported" decision: return that outcome directly,
       with no plan, no preflight, and no tool involvement of any kind.
 
@@ -413,7 +420,7 @@ def select_tool(
     tool_input, preflight_decision = preflight
 
     if adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW:
-        workflow_outcome = _build_update_focus_workflow_plan(
+        workflow_outcome = _build_write_and_verify_workflow_plan(
             request_text,
             tool_input=tool_input,
             write_adapter=adapter,
@@ -505,7 +512,7 @@ def _preflight_capability(
     return tool_input, preflight_decision
 
 
-def _build_update_focus_workflow_plan(
+def _build_write_and_verify_workflow_plan(
     request_text: str,
     *,
     tool_input: dict[str, object],
@@ -517,18 +524,29 @@ def _build_update_focus_workflow_plan(
     catalog: Mapping[CapabilityId, CapabilityAdapter],
 ) -> Plan | str:
     """Deterministically construct the fixed, exactly-two-step Plan for
-    the update-focus-and-verify workflow (Batch 3).
+    a TWO_STEP_WORKFLOW capability's write-and-verify workflow (Phase
+    90, Batch 3's original update-focus-and-verify shape; generalized
+    in Phase 94, Batch 1 to read its paired verifier from
+    write_adapter.paired_verify_capability_id - a trusted, static
+    catalog field - instead of a literal, hardcoded CapabilityId).
 
     The AI never selects, orders, or configures the verifier step: this
-    function always pairs PROJECT_STATE_UPDATE_FOCUS with the fixed
-    internal PROJECT_STATE_VERIFY_FOCUS capability, in this fixed order,
-    with no model-controlled data in step 2's input.
+    function always pairs write_adapter with whichever fixed, internal
+    capability its own catalog entry names as
+    paired_verify_capability_id, in this fixed order, with no model-
+    controlled data in step 2's input. Today exactly one capability
+    (PROJECT_STATE_UPDATE_FOCUS) declares TWO_STEP_WORKFLOW, and its
+    paired_verify_capability_id is PROJECT_STATE_VERIFY_FOCUS - so this
+    generalization changes no observable behavior yet, and adds no
+    second workflow capability of its own.
 
     Args:
         request_text: The verbatim natural request (becomes Plan.user_request).
         tool_input: The write step's already-validated, already-built
-            tool input (``{"field": "focus", "value": ...}``).
-        write_adapter: PROJECT_STATE_UPDATE_FOCUS's catalog entry.
+            tool input (``{"field": "focus", "value": ...}`` for the
+            one capability that exists today).
+        write_adapter: The selected TWO_STEP_WORKFLOW capability's
+            catalog entry.
         write_tier: The write step's real, already-confirmed preflight
             tier (always YELLOW, per _preflight_capability's own check).
         tool_registry: Used only for has_tool()/get_tool() for the
@@ -542,12 +560,15 @@ def _build_update_focus_workflow_plan(
 
     Returns:
         A real, two-step Plan ready for WorkflowEngine.run(), or a
-        short, bounded failure reason string if the internal verifier
-        capability itself fails its own preflight (an internal
-        configuration problem, never exposed as if it were the user's
-        own mistake).
+        short, bounded failure reason string if the paired verifier
+        capability is not configured, not present in the catalog, or
+        itself fails its own preflight (an internal configuration
+        problem, never exposed as if it were the user's own mistake).
     """
-    verify_adapter = catalog.get(CapabilityId.PROJECT_STATE_VERIFY_FOCUS)
+    if write_adapter.paired_verify_capability_id is None:
+        return "the internal verification capability is not configured"
+
+    verify_adapter = catalog.get(write_adapter.paired_verify_capability_id)
     if verify_adapter is None:
         return "the internal verification capability is not configured"
 
