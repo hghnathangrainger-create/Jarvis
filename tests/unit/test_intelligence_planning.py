@@ -759,7 +759,7 @@ class _FakeScheduleVerifyEnabledStateTool(BaseTool):
         return "test double for schedule_verify_enabled_state"
 
     def action_for(self, request: ToolRequest) -> str:
-        return "list schedules"
+        return "show schedule enabled state"
 
     def run(self, request: ToolRequest) -> ToolResult:
         return self.ok("should never run")

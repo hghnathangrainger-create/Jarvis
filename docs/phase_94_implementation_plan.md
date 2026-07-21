@@ -484,9 +484,11 @@ No `SCHEDULE_DISABLE`/`SCHEDULE_CREATE` capability, no schedule update/delete/na
 
 ---
 
-## 23. Batch 3 Closure Evidence
+## 23. Batch 3 Closure Evidence (superseded in part by §24 - see note)
 
-**Status: Batch 3 complete. Phase 94 is formally closed by this section and the accompanying `docs/phase_94_completion_report.md`. This closure batch was documentation- and verification-only - no production or test file was modified, since the mandatory re-audit below found no defect.**
+**Note added during §24's later, deeper audit: this section's own re-audit correctly found zero *scope-creep* defect (no forbidden capability, no new SecurityManager rule, no out-of-scope behavior), but a subsequent, more targeted architectural review (§24) found two real, narrower defects this pass did not check for - the verifier's action-string honesty, and genuine per-capability branching still present in the orchestrator's dispatch method. §23.2's classification table below is superseded by §24's corrected version. Preserved here unmodified for an honest paper trail of what each audit pass actually checked.**
+
+**Status at the time this section was written: Batch 3 complete, no production/test file modified. §24 records what changed after that status turned out to be premature.**
 
 ### 23.1 Mandatory full-range re-audit (performed before any other closure work)
 
@@ -511,6 +513,51 @@ Both re-confirmed live during this closure pass via direct `SecurityManager().cl
 - Full suite, `PYTHON_DOTENV_DISABLED=1`: **4981 passed, 3 skipped** - identical.
 - Ruff, full Phase 94 Git-derived file set (`git diff --name-only cfd1fee..HEAD -- '*.py'`): exactly **18 files** (Batch 1's 6 plus Batch 2's 12 new/additionally-touched files, all still present in the full range). `ruff check` on all 18: **all checks passed, exit code 0, zero findings** (no new, no pre-existing).
 - `git diff --check` (full range, working tree): exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+---
+
+## 24. Batch 3 (Final) — Deeper Architecture Audit, Correction, and True Closure
+
+**Status: this section supersedes §23's classification claim and closure declaration. Phase 94 is formally closed by this section together with the rewritten `docs/phase_94_completion_report.md`.**
+
+### 24.1 Why a second audit pass was needed
+
+§23's re-audit checked for *scope creep* (forbidden capabilities, new security rules, out-of-scope files) and found none - correctly. It did not specifically check whether the verifier's own `action_for()` string honestly described its behavior, nor whether the orchestrator's verified-workflow dispatch mechanism had genuinely eliminated per-capability branching (as opposed to merely factoring the *recognition* of each branch into a shared helper while still branching on each named capability at the call site). A follow-up review targeted exactly these two questions, plus explicit cancellation/expiry lifecycle evidence, and found two real, narrow defects plus one honest architectural limitation to document.
+
+### 24.2 Defect 1 — verifier action-string honesty (corrected)
+
+`ScheduleVerifyEnabledStateTool.action_for()` returned `"list schedules"` - a string reused verbatim from `ScheduleListTool` purely to reuse an already-GREEN rule, even though this tool reads exactly one schedule, never a list. Corrected to `"show schedule enabled state"`, which honestly describes a one-schedule read and still classifies GREEN through the existing, generic, unmodified `"show"` rule - re-verified live: `SecurityManager().classify_action("show schedule enabled state").tier -> SecurityTier.GREEN`. No `SecurityManager` rule was added or changed. Updated: `tools/builtin/schedule_verify_enabled_state_tool.py` and every test asserting the old string (`test_schedule_verify_enabled_state_tool.py`, `test_intelligence_planning.py`, `test_orchestrator_schedule_enable_workflow.py`).
+
+### 24.3 Defect 2 — orchestrator per-capability dispatch branching (corrected)
+
+`_translate_verified_workflow_result()` contained a genuine `if`/`if` chain, one condition per write capability, backed by two named, capability-fixed recognizer methods (`_is_update_focus_workflow_result`, `_is_schedule_enable_workflow_result`) that each hardcoded one `CapabilityId` constant - real runtime production dispatch code, not a test-only wrapper, and the method's own docstring admitted a third verified workflow would require "one more named check." Corrected: both named recognizers were removed and replaced with one fully generic `_matching_two_step_write_capability(result) -> CapabilityId | None`, which iterates `CAPABILITY_CATALOG` for `TWO_STEP_WORKFLOW` entries and returns the first matching capability id - registering a future `TWO_STEP_WORKFLOW` capability requires zero change to this method. `_translate_verified_workflow_result()` then looks up the matched capability id in a small, static, local `response_builders` dict to reach the correct bespoke response-formatting method - a data lookup, not a growing control-flow chain (`test_translate_verified_workflow_result_has_no_per_capability_if_chain` proves zero `if` statements test a `CapabilityId` member by name inside this method). Public response behavior for both `PROJECT_STATE_UPDATE_FOCUS` and `SCHEDULE_ENABLE` is unchanged - only how each is *reached* changed. Extensibility is proven directly by `test_a_third_registered_two_step_capability_would_be_recognised_with_zero_orchestrator_change`, which patches a test-local third catalog entry (never the real production catalog) and confirms recognition with no orchestrator code change.
+
+### 24.4 Cancellation and expiry evidence (added, one honest limitation documented)
+
+**Cancellation**: this repository has no distinct cancellation lifecycle for a pending approval or paused workflow, confirmed by direct inspection of `approval/approval_manager.py`, `approval/approval_models.py`, and `ui/approval_prompt.py`. `ui/approval_prompt.py`'s `_DECLINE_INPUTS = frozenset({"n", "no", "decline", "cancel"})` shows `"cancel"` is simply one accepted input that resolves to the identical `ApprovalManager.decline()` call - there is no `ApprovalStatus.CANCELLED`, no `ApprovalManager.cancel()` method, and no separate audit/history status. This is reported as an honest architectural limitation, not fabricated as a distinct mechanism: `test_cancellation_has_no_distinct_mechanism_and_is_the_decline_path` (new) proves the `_DECLINE_INPUTS` fact directly and confirms the resulting evidence is identical to plain decline.
+
+**Expiry** is real and distinct (`ApprovalManager._sweep_expired()`/`_expire()`, tied to `timeout_seconds`), and was missing explicit end-to-end `SCHEDULE_ENABLE` coverage. `test_expiry_performs_zero_execution_and_zero_verification` (new) mirrors `test_workflow_engine.py`'s own established `_FakeClock` + `timeout_seconds` pattern: after the approval window elapses without any decision, `has_pending`/`has_paused` both become `False`, the durable schedule state is unchanged, and `approve()`/`decline()` on the expired id both raise `ApprovalError` - proving an expired approval can never be resumed or reused.
+
+### 24.5 Files changed in this correction
+
+Production: `core/orchestrator.py` (dispatch mechanism), `tools/builtin/schedule_verify_enabled_state_tool.py` (action string). Tests: `tests/unit/test_trusted_workflow_foundation.py` (recognizer tests rewritten for the new method; new extensibility/anti-if-chain tests), `tests/unit/test_schedule_verify_enabled_state_tool.py`, `tests/unit/test_intelligence_planning.py`, `tests/unit/test_orchestrator_schedule_enable_workflow.py` (action-string references updated; two new tests for cancellation-clarification and expiry). Documentation: this file, `docs/phase_94_completion_report.md` (rewritten to reflect the corrected final state).
+
+### 24.6 Verification results (this correction pass)
+
+- Focused (`test_capability_catalog.py`, `test_trusted_workflow_foundation.py`, `test_verification.py`, `test_structured_output.py`, `test_grounding.py`, `test_intelligence_planning.py`, `test_orchestrator_update_focus_workflow.py`, `test_orchestrator_schedule_enable_workflow.py`, `test_schedule_verify_enabled_state_tool.py`, `test_help_tool.py`, `test_command_router.py`, `test_workflow_engine.py`, `test_approval_manager_timeout.py`, run together): **1113 passed**.
+- Full suite, normal environment: **4985 passed, 3 skipped, 0 failed**.
+- Full suite, `AI_REASONING_ENABLED=false`: **4985 passed, 3 skipped, 0 failed** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **4985 passed, 3 skipped, 0 failed** - identical.
+- Ruff, full Phase 94 Git-derived file set (`git diff --name-only cfd1fee -- '*.py'`, working tree against the planning-gate commit): exactly **18 files** (identical file list to §23.3 - this correction touched files already in the Phase 94 diff, added none). `ruff check` on all 18: **all checks passed, exit code 0, zero findings**.
+- `git diff --check` (same range): exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices.
+
+### 24.7 Scope confirmation (unchanged from §22.9/§23.1)
+
+No `SCHEDULE_DISABLE`/`SCHEDULE_CREATE`, no schedule update/delete/name-targeting/search, no new `SecurityManager` rule or tier, no generic/pluggable verifier registry, no arbitrary workflow steps, no retries/replanning/rollback, and no invented cancellation mechanism were added in this correction. `enable schedule` continues to classify YELLOW via its existing, unchanged rule.
+
+### 24.8 Formal closure
+
+Phase 94 - Safe Verified Write Expansion is closed as of this section and the rewritten `docs/phase_94_completion_report.md`. `SCHEDULE_ENABLE` remains a real, trusted, verified write capability; its verifier's action string is now honest and its GREEN classification is unchanged; its orchestrator dispatch is now genuinely catalog-driven with no per-capability branching in the recognition step; its cancellation/expiry lifecycle is now explicitly, honestly evidenced. `PROJECT_STATE_UPDATE_FOCUS` remains unchanged. Phase 95 has not been started.
 
 ### 23.4 Manual Anthropic API acceptance status
 

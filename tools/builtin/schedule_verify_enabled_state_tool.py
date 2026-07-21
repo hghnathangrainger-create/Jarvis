@@ -44,9 +44,8 @@ class ScheduleVerifyEnabledStateTool(BaseTool):
     for exact-value verification. Internal-only; never a user-facing
     command.
 
-    Read-only and safe; reuses the same GREEN action semantics
-    ScheduleListTool already established, needing no new
-    SecurityManager rule.
+    Read-only and safe; classifies GREEN through the existing, generic
+    "show" rule, needing no new SecurityManager rule.
     """
 
     def __init__(self, schedules: ScheduleStore) -> None:
@@ -81,21 +80,28 @@ class ScheduleVerifyEnabledStateTool(BaseTool):
         )
 
     def action_for(self, request: ToolRequest) -> str:
-        """Return the same fixed, read-only action string
-        ScheduleListTool already uses for security classification.
+        """Return a fixed, read-only action string describing this
+        tool's own real behavior for security classification.
 
-        Reused deliberately, not duplicated: this is semantically the
-        same read-only "report configured schedule state" action, so
-        it reuses the existing GREEN classification rule instead of
-        requiring a new one.
+        Phase 94, Batch 3: previously reused ScheduleListTool's own
+        "list schedules" action string verbatim - but this tool does
+        not list schedules; it reads exactly one schedule's enabled
+        state. "list schedules" was an inaccurate description, chosen
+        only to reuse an already-GREEN rule rather than to honestly
+        describe this tool's behavior. "show schedule enabled state"
+        is both an honest description of what this tool does and
+        classifies GREEN through the existing, generic "show" rule
+        (SecurityManager's `_Rule("show", SecurityTier.GREEN, ...)`) -
+        so still no new SecurityManager rule is required.
 
         Args:
             request: The request being handled.
 
         Returns:
-            The fixed string "list schedules", classified GREEN.
+            The fixed string "show schedule enabled state", classified
+            GREEN via the existing generic "show" rule.
         """
-        return "list schedules"
+        return "show schedule enabled state"
 
     def run(self, request: ToolRequest) -> ToolResult:
         """Return one schedule's current enabled state as structured

@@ -14,8 +14,13 @@ specific pieces with trusted, catalog-driven equivalents:
       trusted catalog field - instead of a literal CapabilityId
       hardcoded inside the function body.
     - core/orchestrator.py::JarvisOrchestrator._is_update_focus_workflow_result()
-      now derives its expected tool-name pair from CAPABILITY_CATALOG
-      instead of two literal string constants.
+      derived its expected tool-name pair from CAPABILITY_CATALOG
+      instead of two literal string constants (Batch 1). Batch 3 went
+      further and replaced that named, capability-fixed recognizer -
+      plus its Batch 2 sibling for SCHEDULE_ENABLE - with one fully
+      generic _matching_two_step_write_capability(), which iterates
+      every TWO_STEP_WORKFLOW entry in CAPABILITY_CATALOG rather than
+      checking one hardcoded CapabilityId at a time.
 
 No second production workflow capability is added by this batch.
 PROJECT_STATE_UPDATE_FOCUS remains the only registered, user-facing
@@ -36,6 +41,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import textwrap
 
 from config.constants import SecurityTier
 from intelligence.capability_catalog import (
@@ -495,21 +501,29 @@ def _real_code_string_literals_and_names(source: str) -> tuple[set[object], set[
     return string_literals, names
 
 
-def test_is_update_focus_workflow_result_no_longer_hardcodes_string_literals() -> None:
-    """Structural proof: the recognizer no longer contains the literal
-    tool-name strings itself - it delegates to the shared
-    _matches_two_step_workflow_shape() helper, which reads the exact
-    tool-name pair from CAPABILITY_CATALOG (Phase 94, Batch 2 further
-    factored the Batch 1 generalization into one shared helper, reused
-    by both real recognizers, rather than duplicating the catalog
-    lookup in each)."""
+def test_matching_two_step_write_capability_no_longer_hardcodes_string_literals() -> (
+    None
+):
+    """Structural proof: the unified recognizer contains no capability-
+    specific tool-name string literal and no per-capability `if`/`elif`
+    branch - it iterates CAPABILITY_CATALOG generically and delegates
+    to the shared _matches_two_step_workflow_shape() helper, which
+    itself reads the exact tool-name pair from CAPABILITY_CATALOG
+    (Phase 94, Batch 3 replaced the two named, capability-fixed
+    recognizers - _is_update_focus_workflow_result()/
+    _is_schedule_enable_workflow_result() - with this single, fully
+    catalog-driven method, since the named pair still amounted to one
+    hardcoded check per capability at the call site)."""
     from core.orchestrator import JarvisOrchestrator
 
     recognizer_literals, recognizer_names = _real_code_string_literals_and_names(
-        inspect.getsource(JarvisOrchestrator._is_update_focus_workflow_result)
+        inspect.getsource(JarvisOrchestrator._matching_two_step_write_capability)
     )
     assert "project_state_update" not in recognizer_literals
     assert "project_state_verify" not in recognizer_literals
+    assert "schedule_enable" not in recognizer_literals
+    assert "schedule_verify_enabled_state" not in recognizer_literals
+    assert "CAPABILITY_CATALOG" in recognizer_names
     assert "_matches_two_step_workflow_shape" in recognizer_names
 
     helper_literals, helper_names = _real_code_string_literals_and_names(
@@ -517,22 +531,33 @@ def test_is_update_focus_workflow_result_no_longer_hardcodes_string_literals() -
     )
     assert "project_state_update" not in helper_literals
     assert "project_state_verify" not in helper_literals
+    assert "schedule_enable" not in helper_literals
+    assert "schedule_verify_enabled_state" not in helper_literals
     assert "CAPABILITY_CATALOG" in helper_names
 
 
-def test_schedule_enable_recognizer_also_delegates_to_the_shared_helper() -> None:
-    """The second real recognizer reuses the identical shared helper -
-    proving the catalog-driven mechanism, not just its absence of
-    literals, is genuinely shared rather than duplicated."""
+def test_translate_verified_workflow_result_has_no_per_capability_if_chain() -> None:
+    """Structural proof: the shared dispatcher recognises which
+    capability a result belongs to via _matching_two_step_write_capability()
+    alone - never via a named, capability-fixed `if` check for any one
+    CapabilityId member (Phase 94, Batch 3)."""
     from core.orchestrator import JarvisOrchestrator
 
-    _literals, names = _real_code_string_literals_and_names(
-        inspect.getsource(JarvisOrchestrator._is_schedule_enable_workflow_result)
-    )
-    assert "_matches_two_step_workflow_shape" in names
+    source = inspect.getsource(JarvisOrchestrator._translate_verified_workflow_result)
+    tree = ast.parse(textwrap.dedent(source))
+    function_def = tree.body[0]
+    assert isinstance(function_def, ast.FunctionDef)
+
+    if_capability_checks = 0
+    for node in ast.walk(function_def):
+        if isinstance(node, ast.If):
+            test_source = ast.unparse(node.test)
+            if "CapabilityId." in test_source:
+                if_capability_checks += 1
+    assert if_capability_checks == 0
 
 
-def test_is_update_focus_workflow_result_still_recognises_the_real_shape() -> None:
+def test_matching_two_step_write_capability_recognises_update_focus_shape() -> None:
     from core.orchestrator import JarvisOrchestrator
 
     plan = Plan(
@@ -543,10 +568,30 @@ def test_is_update_focus_workflow_result_still_recognises_the_real_shape() -> No
         ),
     )
     result = WorkflowResult(plan=plan, workflow_id="wf-real-shape")
-    assert JarvisOrchestrator._is_update_focus_workflow_result(result) is True
+    assert (
+        JarvisOrchestrator._matching_two_step_write_capability(result)
+        is CapabilityId.PROJECT_STATE_UPDATE_FOCUS
+    )
 
 
-def test_is_update_focus_workflow_result_rejects_an_unrelated_shape() -> None:
+def test_matching_two_step_write_capability_recognises_schedule_enable_shape() -> None:
+    from core.orchestrator import JarvisOrchestrator
+
+    plan = Plan(
+        user_request="ask jarvis to: enable schedule 5",
+        steps=(
+            _fake_plan_step(1, "schedule_enable"),
+            _fake_plan_step(2, "schedule_verify_enabled_state"),
+        ),
+    )
+    result = WorkflowResult(plan=plan, workflow_id="wf-schedule-shape")
+    assert (
+        JarvisOrchestrator._matching_two_step_write_capability(result)
+        is CapabilityId.SCHEDULE_ENABLE
+    )
+
+
+def test_matching_two_step_write_capability_rejects_an_unrelated_shape() -> None:
     from core.orchestrator import JarvisOrchestrator
 
     plan = Plan(
@@ -557,10 +602,10 @@ def test_is_update_focus_workflow_result_rejects_an_unrelated_shape() -> None:
         ),
     )
     result = WorkflowResult(plan=plan, workflow_id="wf-unrelated-shape")
-    assert JarvisOrchestrator._is_update_focus_workflow_result(result) is False
+    assert JarvisOrchestrator._matching_two_step_write_capability(result) is None
 
 
-def test_is_update_focus_workflow_result_rejects_wrong_step_count() -> None:
+def test_matching_two_step_write_capability_rejects_wrong_step_count() -> None:
     from core.orchestrator import JarvisOrchestrator
 
     plan = Plan(
@@ -568,7 +613,56 @@ def test_is_update_focus_workflow_result_rejects_wrong_step_count() -> None:
         steps=(_fake_plan_step(1, "project_state_update"),),
     )
     result = WorkflowResult(plan=plan, workflow_id="wf-one-step")
-    assert JarvisOrchestrator._is_update_focus_workflow_result(result) is False
+    assert JarvisOrchestrator._matching_two_step_write_capability(result) is None
+
+
+def test_a_third_registered_two_step_capability_would_be_recognised_with_zero_orchestrator_change() -> (
+    None
+):
+    """Proves the recognition mechanism is genuinely extensible: a
+    test-local CAPABILITY_CATALOG patched with one additional
+    TWO_STEP_WORKFLOW entry is recognised by the real, unmodified
+    _matching_two_step_write_capability() with no orchestrator code
+    change - never registered in the real production catalog."""
+    from core.orchestrator import JarvisOrchestrator
+    from intelligence import capability_catalog as capability_catalog_module
+
+    third_write_id = CapabilityId.HEALTH_CHECK  # reused only as a label
+    third_verify_id = CapabilityId.PROJECT_STATE_SHOW  # reused only as a label
+    patched_catalog = dict(CAPABILITY_CATALOG)
+    patched_catalog[third_write_id] = dataclasses.replace(
+        CAPABILITY_CATALOG[third_write_id],
+        allowed_strategy=ExecutionStrategy.TWO_STEP_WORKFLOW,
+        tool_name="third_test_write_tool",
+        paired_verify_capability_id=third_verify_id,
+    )
+    patched_catalog[third_verify_id] = dataclasses.replace(
+        CAPABILITY_CATALOG[third_verify_id],
+        tool_name="third_test_verify_tool",
+    )
+
+    plan = Plan(
+        user_request="a hypothetical third verified workflow",
+        steps=(
+            _fake_plan_step(1, "third_test_write_tool"),
+            _fake_plan_step(2, "third_test_verify_tool"),
+        ),
+    )
+    result = WorkflowResult(plan=plan, workflow_id="wf-third-shape")
+
+    original_catalog = capability_catalog_module.CAPABILITY_CATALOG
+    try:
+        capability_catalog_module.CAPABILITY_CATALOG = patched_catalog
+        import core.orchestrator as orchestrator_module
+
+        orchestrator_module.CAPABILITY_CATALOG = patched_catalog
+        assert (
+            JarvisOrchestrator._matching_two_step_write_capability(result)
+            is third_write_id
+        )
+    finally:
+        capability_catalog_module.CAPABILITY_CATALOG = original_catalog
+        orchestrator_module.CAPABILITY_CATALOG = original_catalog
 
 
 def _fake_plan_step(number: int, tool_name: str):

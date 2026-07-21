@@ -43,7 +43,7 @@ try:
     from ai.providers.base import AIProvider, AIRequest, AIResponse
     from ai.response_validator import ResponseValidator
     from ai.router import AIRouter
-    from approval.approval_manager import ApprovalManager
+    from approval.approval_manager import ApprovalError, ApprovalManager
     from approval.pending_approval_store import PendingApprovalStore
     from config.settings import Settings
     from core.command_router import CommandRouter
@@ -143,7 +143,14 @@ def _schedule_enable_text(schedule_id: int) -> str:
     )
 
 
-def _build_stack(session_factory, router: AIRouter, *, durable: bool = False):
+def _build_stack(
+    session_factory,
+    router: AIRouter,
+    *,
+    durable: bool = False,
+    timeout_seconds: int | None = None,
+    clock=None,
+):
     memory = MemoryManager(EpisodicMemoryStore(session_factory))
     project_state_store = ProjectStateStore(session_factory)
     schedule_store = ScheduleStore(session_factory)
@@ -160,7 +167,9 @@ def _build_stack(session_factory, router: AIRouter, *, durable: bool = False):
         registry=registry, security_manager=security, logger=logger  # type: ignore[arg-type]
     )
     pending_store = PendingApprovalStore(session_factory) if durable else None
-    approvals = ApprovalManager(pending_store=pending_store)
+    approvals = ApprovalManager(
+        pending_store=pending_store, timeout_seconds=timeout_seconds, clock=clock
+    )
     paused_store = PausedWorkflowStore(session_factory) if durable else None
     workflow_engine = WorkflowEngine(
         executor=executor,
@@ -316,6 +325,115 @@ def test_decline_executes_zero_enables() -> None:
     )
 
 
+def test_cancellation_has_no_distinct_mechanism_and_is_the_decline_path() -> None:
+    """Phase 94, Batch 3 architecture note: this repository has no
+    separate "cancellation" lifecycle for a pending approval or a
+    paused workflow - ui/approval_prompt.py's own _DECLINE_INPUTS
+    frozenset accepts the literal word "cancel" as one of several
+    inputs that all resolve to the identical ApprovalManager.decline()
+    call (alongside "n"/"no"/"decline"). There is no
+    ApprovalStatus.CANCELLED, no ApprovalManager.cancel() method, and
+    no separate audit/history status distinct from "declined" anywhere
+    in the codebase (confirmed by direct inspection of
+    approval/approval_manager.py, approval/approval_models.py, and
+    ui/approval_prompt.py during this closure pass). This test proves
+    that fact directly, rather than merely asserting it in prose:
+    "cancel" is recognised as a decline input at the UI layer, and the
+    resulting zero-execution/zero-verification/unchanged-durable-state
+    evidence is therefore identical to test_decline_executes_zero_enables
+    above - never a separate code path to test."""
+    from ui.approval_prompt import _DECLINE_INPUTS
+
+    assert "cancel" in _DECLINE_INPUTS
+    assert "decline" in _DECLINE_INPUTS
+
+    session_factory = _in_memory_session_factory()
+    schedule_store = ScheduleStore(session_factory)
+    schedule_id = _seed_disabled_schedule(schedule_store)
+    router, _ = _router(_schedule_enable_text(schedule_id))
+    orchestrator, *_rest, approvals, _ = _build_stack(session_factory, router)
+
+    response = orchestrator.handle_request(_request_for(schedule_id))
+    # "cancel" is not a distinct ApprovalManager verb - the real
+    # decision it produces is always decline().
+    decision = approvals.decline(response.approval_request.request_id, decided_by="test")
+    final = orchestrator.execute_approved(response, decision)
+
+    assert final.success is False
+    assert schedule_store.get(schedule_id).enabled is False
+    assert final.intelligence_trace == (
+        "Step 1/2: enable did not execute; no verification attempted.",
+    )
+    # A cancelled/declined workflow cannot be resumed a second time.
+    second = orchestrator.execute_approved(response, decision)
+    assert second.tool_result is None
+    assert schedule_store.get(schedule_id).enabled is False
+
+
+class _FakeClock:
+    """A settable clock, matching test_workflow_engine.py's own
+    established convention, so elapsed approval-timeout windows can be
+    simulated exactly and deterministically."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_expiry_performs_zero_execution_and_zero_verification() -> None:
+    """Real ApprovalManager YELLOW-timeout expiry (Phase 27), exercised
+    end-to-end for the schedule-enable-and-verify workflow, mirroring
+    test_workflow_engine.py's test_expired_approval_is_reaped_and_
+    unblocks_a_new_run/test_has_paused_reports_false_once_approval_
+    expires patterns exactly: a fake, settable clock plus a real
+    positive timeout_seconds proves the approval window elapsing is a
+    genuinely distinct lifecycle event from a decline - never
+    reachable by pretending a decline occurred."""
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fake_clock = _FakeClock(start)
+    session_factory = _in_memory_session_factory()
+    schedule_store = ScheduleStore(session_factory)
+    schedule_id = _seed_disabled_schedule(schedule_store)
+    router, _ = _router(_schedule_enable_text(schedule_id))
+    orchestrator, schedule_store, _, _, approvals, workflow_engine = _build_stack(
+        session_factory, router, durable=True, timeout_seconds=60, clock=fake_clock
+    )
+
+    response = orchestrator.handle_request(_request_for(schedule_id))
+    request_id = response.approval_request.request_id
+    assert approvals.has_pending(request_id) is True
+
+    paused_store = PausedWorkflowStore(session_factory)
+    persisted_rows = paused_store.list_all()
+    assert len(persisted_rows) == 1
+    workflow_id = persisted_rows[0].workflow_id
+    assert workflow_engine.has_paused(workflow_id) is True
+
+    # Advance time past the 60-second YELLOW window without ever
+    # approving, declining, or resuming.
+    fake_clock.now = start + timedelta(seconds=61)
+
+    # Expiry is lazily swept on the next read - never a background
+    # thread, never automatic execution of anything.
+    assert approvals.has_pending(request_id) is False
+    assert workflow_engine.has_paused(workflow_id) is False
+    assert schedule_store.get(schedule_id).enabled is False
+
+    # An expired approval can never be approved or declined after the
+    # fact - it is genuinely gone, not silently still actionable.
+    with pytest.raises(ApprovalError):
+        approvals.approve(request_id, decided_by="test")
+    with pytest.raises(ApprovalError):
+        approvals.decline(request_id, decided_by="test")
+
+    # The durable schedule state never changed as a result of expiry.
+    assert schedule_store.get(schedule_id).enabled is False
+
+
 def test_no_fabricated_approval_is_ever_created_by_intelligence_code() -> None:
     import intelligence.planning as module
 
@@ -424,7 +542,7 @@ class _MismatchingScheduleVerifyTool:
     description = "test double reporting a fixed, mismatching enabled state"
 
     def action_for(self, request):
-        return "list schedules"
+        return "show schedule enabled state"
 
     def run(self, request):
         from tools.base_tool import ToolResult
@@ -446,7 +564,7 @@ class _MissingTargetScheduleVerifyTool:
     description = "test double reporting a missing verification target"
 
     def action_for(self, request):
-        return "list schedules"
+        return "show schedule enabled state"
 
     def run(self, request):
         from tools.base_tool import ToolResult
@@ -467,7 +585,7 @@ class _FailingScheduleVerifyTool:
     description = "test double that always fails at run() time"
 
     def action_for(self, request):
-        return "list schedules"
+        return "show schedule enabled state"
 
     def run(self, request):
         from tools.base_tool import ToolResult

@@ -32,7 +32,7 @@ a way around them.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Protocol
+from typing import Callable, Protocol
 
 from approval.approval_manager import ApprovalManager
 from approval.approval_models import ApprovalDecision
@@ -62,7 +62,11 @@ from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
-from intelligence.capability_catalog import CAPABILITY_CATALOG, CapabilityId
+from intelligence.capability_catalog import (
+    CAPABILITY_CATALOG,
+    CapabilityId,
+    ExecutionStrategy,
+)
 from intelligence.context import ContextAssembler, build_ai_context_block
 from intelligence.grounding import UngroundedReason
 from intelligence.planning import (
@@ -2041,12 +2045,25 @@ class JarvisOrchestrator:
         Shared by both the initial run() path (this method's own
         caller, _start_update_focus_workflow) and the resume() path
         (execute_approved()), so the dispatch itself is defined in
-        exactly one place (Phase 94, Batch 2 - generalizing Batch 3's
-        original single-workflow dispatch to a second trusted workflow
-        definition, per docs/phase_94_implementation_plan.md, Section
-        13). Adding a third verified workflow in some future phase
-        would extend this one method with one more named check - never
-        a generic, pluggable dispatch table.
+        exactly one place. Phase 94, Batch 3: which capability a result
+        belongs to is now derived purely from CAPABILITY_CATALOG, by
+        iterating every registered TWO_STEP_WORKFLOW entry
+        (_matching_two_step_write_capability) - there is no per-
+        capability `if`/`elif` recognition branch here or anywhere else
+        in this method, and none is added by registering a future
+        TWO_STEP_WORKFLOW capability. Only the final step - choosing
+        which bespoke response-formatting method to call for the one
+        matched capability - is a small, static, trusted lookup table
+        (_response_builders below), exactly like every other per-
+        capability trusted config table this codebase already uses
+        (CAPABILITY_CATALOG itself, _FIXED_ARGUMENTS_BY_CAPABILITY,
+        _NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY) - a data addition, never
+        a growing control-flow chain. The two response-formatting
+        methods themselves remain distinct because their grounded
+        response wording genuinely differs per capability (different
+        fields, different verification signatures) - the same reason
+        every real tool in this codebase has its own bespoke run()
+        rather than sharing one generic formatter.
 
         Args:
             result: A real WorkflowResult, from either run() or
@@ -2058,65 +2075,55 @@ class JarvisOrchestrator:
             the existing generic translation for any other workflow
             shape (the five pre-existing fixed Phase 15 workflows).
         """
-        if self._is_update_focus_workflow_result(result):
-            return self._update_focus_workflow_result_to_response(result)
-        if self._is_schedule_enable_workflow_result(result):
-            return self._schedule_enable_workflow_result_to_response(result)
+        write_capability_id = self._matching_two_step_write_capability(result)
+        response_builders: dict[
+            CapabilityId, Callable[[WorkflowResult], JarvisResponse]
+        ] = {
+            CapabilityId.PROJECT_STATE_UPDATE_FOCUS: (
+                self._update_focus_workflow_result_to_response
+            ),
+            CapabilityId.SCHEDULE_ENABLE: (
+                self._schedule_enable_workflow_result_to_response
+            ),
+        }
+        if write_capability_id is not None and write_capability_id in response_builders:
+            return response_builders[write_capability_id](result)
         return self._workflow_result_to_response(result)
 
     @staticmethod
-    def _is_update_focus_workflow_result(result: WorkflowResult) -> bool:
-        """Structurally recognise the Batch 3 update-focus-and-verify
-        workflow shape - never a new persisted marker (Section 24.C.12).
+    def _matching_two_step_write_capability(
+        result: WorkflowResult,
+    ) -> CapabilityId | None:
+        """Derive which, if any, registered TWO_STEP_WORKFLOW write
+        capability's real tool-name pair matches this result's plan
+        shape - purely from trusted, static CAPABILITY_CATALOG data,
+        never a hardcoded per-capability check (Phase 94, Batch 3).
 
-        Phase 94, Batch 1: the expected tool-name pair is derived from
-        CAPABILITY_CATALOG's own trusted, static
-        paired_verify_capability_id field, rather than two literal
-        string constants hardcoded inside this method - a small,
-        foundational generalization so a second TWO_STEP_WORKFLOW
-        capability's own catalog entry could be recognised the same
-        structural way. Phase 94, Batch 2 is that second capability
-        (see _is_schedule_enable_workflow_result immediately below) -
-        this method's own real tool-name pair is unchanged
-        ("project_state_update", "project_state_verify").
-
-        Args:
-            result: A real WorkflowResult, from either run() or resume().
-
-        Returns:
-            True only if result.plan has exactly two steps whose real
-            tool names match PROJECT_STATE_UPDATE_FOCUS's own catalog-
-            declared write tool and paired verify tool, exactly in
-            order. Every one of the five pre-existing fixed Phase 15
-            workflows, and the separate schedule-enable-and-verify
-            workflow, use different tool names and so can never match
-            this check.
-        """
-        return JarvisOrchestrator._matches_two_step_workflow_shape(
-            result, CapabilityId.PROJECT_STATE_UPDATE_FOCUS
-        )
-
-    @staticmethod
-    def _is_schedule_enable_workflow_result(result: WorkflowResult) -> bool:
-        """Structurally recognise the Phase 94, Batch 2 schedule-
-        enable-and-verify workflow shape - never a new persisted
-        marker, exactly mirroring _is_update_focus_workflow_result's
-        own technique for the pre-existing workflow.
+        Iterates every CAPABILITY_CATALOG entry whose
+        allowed_strategy is TWO_STEP_WORKFLOW (today exactly
+        PROJECT_STATE_UPDATE_FOCUS and SCHEDULE_ENABLE) and returns the
+        first whose write-tool/paired-verify-tool pair matches
+        result.plan's exact two steps, in order. A future
+        TWO_STEP_WORKFLOW capability added to the catalog is recognised
+        here automatically, with zero change to this method.
 
         Args:
             result: A real WorkflowResult, from either run() or resume().
 
         Returns:
-            True only if result.plan has exactly two steps whose real
-            tool names match SCHEDULE_ENABLE's own catalog-declared
-            write tool and paired verify tool, exactly in order. Every
-            one of the five pre-existing fixed Phase 15 workflows, and
-            the separate update-focus-and-verify workflow, use
-            different tool names and so can never match this check.
+            The matching CapabilityId, or None if result.plan does not
+            match any registered TWO_STEP_WORKFLOW capability's shape
+            (for example, one of the five pre-existing fixed Phase 15
+            workflows).
         """
-        return JarvisOrchestrator._matches_two_step_workflow_shape(
-            result, CapabilityId.SCHEDULE_ENABLE
-        )
+        for capability_id, adapter in CAPABILITY_CATALOG.items():
+            if adapter.allowed_strategy is not ExecutionStrategy.TWO_STEP_WORKFLOW:
+                continue
+            if JarvisOrchestrator._matches_two_step_workflow_shape(
+                result, capability_id
+            ):
+                return capability_id
+        return None
 
     @staticmethod
     def _matches_two_step_workflow_shape(
