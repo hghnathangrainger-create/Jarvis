@@ -14,8 +14,10 @@ updated Phase 90, Batch 1 to document the new "ask jarvis: <request>"
 Context Intelligence command; updated Phase 90, Batch 2 to document
 the new "ask jarvis to: <request>" tool-selection command; updated
 Phase 90, Batch 3 to describe the same command's new focus-update
-capability - the internal-only project_state_verify tool is
-deliberately never documented here, since it is not a user command).
+capability; updated Phase 93, Batch 1 to describe the same command's
+two new bounded audit-history capabilities (approval history, workflow
+history) - the internal-only project_state_verify tool is deliberately
+never documented here, since it is not a user command).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -164,9 +166,11 @@ _HELP_LINES: tuple[str, ...] = (
     "allowlisted capability; requires AI_REASONING_ENABLED. May show your "
     "manually-maintained project state, report basic Jarvis system health, "
     "list your configured schedules, list your most recently stored "
-    "memories, or search your stored memories for a query (all read-only, "
-    "no approval needed - the same data 'show jarvis project state'/'health "
-    "check'/'list schedules'/'show memories'/'search memories' already "
+    "memories, search your stored memories for a query, show your recent "
+    "approval history, or show your recent workflow history (all "
+    "read-only, no approval needed - the same data 'show jarvis project "
+    "state'/'health check'/'list schedules'/'show memories'/'search "
+    "memories'/'show approval history'/'show workflow history' already "
     "report), or may update only its focus field "
     "(requires your explicit approval, then a structured read-back checks "
     "the stored value matches - verification can fail or be unavailable and "

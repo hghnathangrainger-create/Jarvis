@@ -27,7 +27,7 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_seven_phase_91_batch_2_entries() -> None:
+def test_catalog_contains_exactly_the_nine_phase_93_batch_1_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -36,6 +36,8 @@ def test_catalog_contains_exactly_the_seven_phase_91_batch_2_entries() -> None:
         CapabilityId.SCHEDULE_LIST,
         CapabilityId.MEMORY_LIST_RECENT,
         CapabilityId.MEMORY_SEARCH,
+        CapabilityId.APPROVAL_HISTORY,
+        CapabilityId.WORKFLOW_HISTORY,
     }
 
 
@@ -48,6 +50,8 @@ def test_no_other_capability_id_exists() -> None:
         "schedule_list",
         "memory_list_recent",
         "memory_search",
+        "approval_history",
+        "workflow_history",
     }
 
 
@@ -75,7 +79,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_six_capabilities_are_model_selectable() -> None:
+def test_only_eight_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -88,6 +92,8 @@ def test_only_six_capabilities_are_model_selectable() -> None:
         CapabilityId.SCHEDULE_LIST,
         CapabilityId.MEMORY_LIST_RECENT,
         CapabilityId.MEMORY_SEARCH,
+        CapabilityId.APPROVAL_HISTORY,
+        CapabilityId.WORKFLOW_HISTORY,
     }
 
 
@@ -142,6 +148,28 @@ def test_memory_search_adapter_fields_are_exact() -> None:
     assert [spec.name for spec in adapter.arguments] == ["value"]
     assert adapter.arguments[0].type_name == "str"
     assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_approval_history_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY]
+    assert adapter.capability_id is CapabilityId.APPROVAL_HISTORY
+    assert adapter.tool_name == "approval_history"
+    assert adapter.arguments == ()
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+
+
+def test_workflow_history_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY]
+    assert adapter.capability_id is CapabilityId.WORKFLOW_HISTORY
+    assert adapter.tool_name == "workflow_history"
+    assert adapter.arguments == ()
     assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
     assert adapter.max_execution_tier is SecurityTier.GREEN
     assert adapter.verification_strategy_id is None
@@ -244,6 +272,32 @@ def test_build_tool_input_memory_search_never_leaves_a_stray_value_key() -> None
     result = build_tool_input(adapter, {"value": "x"})
     assert "value" not in result
     assert result["query"] == "x"
+
+
+def test_build_tool_input_adds_fixed_operation_for_approval_history() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY]
+    assert build_tool_input(adapter, {}) == {"operation": "history"}
+
+
+def test_build_tool_input_never_lets_model_choose_approval_history_operation() -> None:
+    """approval_history declares zero arguments, so a stray "operation"
+    key could only ever reach build_tool_input() via a bug elsewhere in
+    the pipeline - this proves even then it could never override the
+    fixed "history" value."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY]
+    result = build_tool_input(adapter, {"operation": "declined"})
+    assert result["operation"] == "history"
+
+
+def test_build_tool_input_adds_fixed_operation_for_workflow_history() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY]
+    assert build_tool_input(adapter, {}) == {"operation": "history"}
+
+
+def test_build_tool_input_never_lets_model_choose_workflow_history_operation() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY]
+    result = build_tool_input(adapter, {"operation": "get"})
+    assert result["operation"] == "history"
 
 
 def test_build_tool_input_rename_does_not_affect_other_capabilities() -> None:

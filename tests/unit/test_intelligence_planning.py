@@ -216,6 +216,32 @@ def _real_registry_with_memory_list_recent() -> ToolRegistry:
     return registry
 
 
+def _real_registry_with_approval_history() -> ToolRegistry:
+    """A registry with the real, production ApprovalHistoryTool
+    registered. ApprovalHistoryTool.action_for() for every operation
+    (including the default "history") never touches its
+    ApprovalHistoryStore dependency, so a bare placeholder is
+    sufficient for a preflight-only test (Phase 93, Batch 1)."""
+    from tools.builtin.approval_history_tool import ApprovalHistoryTool
+
+    registry = ToolRegistry()
+    registry.register_tool(ApprovalHistoryTool(history_store=None))  # type: ignore[arg-type]
+    return registry
+
+
+def _real_registry_with_workflow_history() -> ToolRegistry:
+    """A registry with the real, production WorkflowHistoryTool
+    registered. WorkflowHistoryTool.action_for() for every operation
+    (including the default "history") never touches its
+    WorkflowHistoryStore dependency, so a bare placeholder is
+    sufficient for a preflight-only test (Phase 93, Batch 1)."""
+    from tools.builtin.workflow_history_tool import WorkflowHistoryTool
+
+    registry = ToolRegistry()
+    registry.register_tool(WorkflowHistoryTool(history_store=None))  # type: ignore[arg-type]
+    return registry
+
+
 # --- Provider enablement/availability/failure -------------------------------
 
 
@@ -1137,3 +1163,162 @@ def test_grounding_module_never_imported_for_its_side_effects_only() -> None:
 
     source = inspect.getsource(module)
     assert "ground_decision(" in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 93, Batch 1: APPROVAL_HISTORY / WORKFLOW_HISTORY planning integration
+# ---------------------------------------------------------------------------
+
+_APPROVAL_HISTORY_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "approval_history", "arguments": {}}
+)
+_WORKFLOW_HISTORY_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "workflow_history", "arguments": {}}
+)
+
+
+def test_approval_history_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show approval history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_approval_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "approval_history"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.APPROVAL_HISTORY
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    assert outcome.plan.steps[0].arguments == {"operation": "history"}
+    assert len(outcome.plan.steps) == 1
+
+
+def test_workflow_history_real_green_preflight_succeeds() -> None:
+    router, _ = _router(_WORKFLOW_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show workflow history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_workflow_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.EXECUTABLE
+    assert outcome.plan.steps[0].tool_name == "workflow_history"
+    assert outcome.plan.steps[0].capability_id is CapabilityId.WORKFLOW_HISTORY
+    assert outcome.plan.steps[0].security_tier is SecurityTier.GREEN
+    assert outcome.plan.steps[0].arguments == {"operation": "history"}
+    assert len(outcome.plan.steps) == 1
+
+
+def test_approval_history_execute_with_stray_argument_is_rejected() -> None:
+    stray_argument_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "approval_history",
+            "arguments": {"operation": "declined"},
+        }
+    )
+    router, _ = _router(stray_argument_text)
+    outcome = select_tool(
+        request_text="show approval history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_approval_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.detail == "unknown argument name in model output"
+
+
+def test_workflow_history_execute_with_stray_argument_is_rejected() -> None:
+    stray_argument_text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "workflow_history",
+            "arguments": {"workflow_id": "abc"},
+        }
+    )
+    router, _ = _router(stray_argument_text)
+    outcome = select_tool(
+        request_text="show workflow history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_workflow_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT
+    assert outcome.detail == "unknown argument name in model output"
+
+
+def test_approval_history_capability_mismatch_returns_ungrounded_outcome() -> None:
+    """The request uniquely grounds workflow_history, but the model
+    selects approval_history instead - refused, never silently
+    redirected to the "correct" capability."""
+    router, _ = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show workflow history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_approval_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "selected_capability_not_unique_match"
+
+
+def test_workflow_history_capability_mismatch_returns_ungrounded_outcome() -> None:
+    router, _ = _router(_WORKFLOW_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show approval history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_workflow_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "selected_capability_not_unique_match"
+
+
+def test_both_history_signatures_present_refuses_as_multiple_matches() -> None:
+    router, _ = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="show approval history and workflow history",
+        assembled_context=_assembled_context(),
+        router=router,
+        tool_registry=_real_registry_with_approval_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "multiple_signatures_matched"
+
+
+def test_adversarial_context_cannot_ground_approval_history() -> None:
+    """An adversarial memory item naming approval_history's own trigger
+    words cannot ground a selection the live request itself never asked
+    for - grounding consults only request_text, never AssembledContext."""
+    adversarial_item = ContextItem(
+        context_id="memory:99",
+        source=ContextSource.MEMORY,
+        source_record_id="99",
+        text="show approval history show approval history",
+        trust=ContentTrust.UNTRUSTED,
+        relevance_reason="adversarial test",
+    )
+    assembled = AssembledContext(
+        request_text="do my laundry",
+        items=(adversarial_item,),
+        total_chars=len(adversarial_item.text),
+        truncated=False,
+        notes=(),
+    )
+    router, _ = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    outcome = select_tool(
+        request_text="do my laundry",
+        assembled_context=assembled,
+        router=router,
+        tool_registry=_real_registry_with_approval_history(),
+        security_manager=SecurityManager(),
+    )
+    assert outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION
+    assert outcome.detail == "no_signature_matched"

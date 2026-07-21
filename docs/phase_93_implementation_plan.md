@@ -284,3 +284,143 @@ Phase 93 may be closed only when:
 ## 19. Manual API Limitation
 
 Live Anthropic manual acceptance remains **postponed** because the configured API account lacks sufficient credits. This is an external account limitation, not a Jarvis code failure. No production behavior will be changed to bypass it. Phase 93, like Phases 90–92 before it, must remain fully verifiable through deterministic, fake-provider, and full-suite tests — never through a claimed live-model acceptance run.
+
+---
+
+## 20. Batch 1 Implementation Evidence
+
+**Status: Batch 1 complete and committed. Phase 93 remains open — Batch 2 (documentation reconciliation, final complete verification, completion report, closure) has not been started.**
+
+### 20.1 Files changed
+
+- `intelligence/capability_catalog.py` — two new `CapabilityId` members (`APPROVAL_HISTORY`, `WORKFLOW_HISTORY`), two new `CAPABILITY_CATALOG` entries (zero-argument, `SINGLE_TOOL`, GREEN, no verification strategy), two new `_FIXED_ARGUMENTS_BY_CAPABILITY` entries (`{"operation": "history"}` each).
+- `intelligence/grounding.py` — two new `_IntentSignature` entries, exactly per §12 of this plan; module docstring/comments updated from "six"/"seven" to "eight" capabilities where they described the catalogue.
+- `intelligence/planning.py` — `_TRUSTED_PLANNING_INSTRUCTION` extended from six to eight model-selectable capabilities (plus the renumbered ninth, internal-only entry), with two new example JSON response shapes. No control-flow change of any kind — both new capabilities reuse the pre-existing `SINGLE_TOOL` branch of `select_tool()`, completely unmodified.
+- `tools/builtin/help_tool.py` — the `ask jarvis to:` help line extended to truthfully mention the two new capabilities; module docstring updated.
+- `docs/user_guide.md` — the `ask jarvis to:` section updated from "seven outcomes" to "nine outcomes", with the two new capabilities described, two new example bullets added, and the section heading updated to include "Phase 93, Batch 1".
+- `tests/unit/test_capability_catalog.py` (28 → 34 tests) — catalogue-membership tests updated for the two new entries; two new adapter-field tests; four new `build_tool_input()` tests proving the fixed `operation="history"` value and that it cannot be overridden.
+- `tests/unit/test_structured_output.py` (82 def, 88 collected → 115 collected with parametrization) — a new, dedicated Phase 93 section proving valid selection, rejection of any extra argument (`operation`, `limit`, `status`, `request_id`, `workflow_id`, `id`, `filter`), rejection of every malformed arguments-container shape, and rejection of a plausible-but-uncatalogued capability name, for both new capabilities.
+- `tests/unit/test_grounding.py` (71 → 96 tests) — real-phrasing grounding, zero/multiple-match and forced-mismatch refusal, generic-word-alone insufficiency, qualifier-alone insufficiency, and non-collision against all six pre-existing signatures, for both new capabilities.
+- `tests/unit/test_intelligence_planning.py` (43 → 51 tests) — real GREEN preflight, stray-argument rejection, capability-mismatch refusal, multiple-signature refusal, and adversarial-`AssembledContext` non-grounding, at the `select_tool()` integration level, for both new capabilities.
+- `tests/unit/test_orchestrator_ask_jarvis_to.py` (54 → 65 tests) — a new `_build_real_orchestrator_with_history_tools()` helper (real `ApprovalHistoryStore`/`WorkflowHistoryStore`/`ApprovalHistoryTool`/`WorkflowHistoryTool`, alongside every Phase 90/91 tool, all backed by real in-memory SQLite) plus end-to-end tests: successful execution with real seeded records, honest no-record responses, the real 20-record bound proven with 25 seeded rows, extra-argument rejection, capability-mismatch/multiple-signature zero-execution proofs, zero-approval proof, and a sanity check that a pre-existing capability (`health_check`) is unaffected.
+
+`dashboard_test.txt` was not opened, read, staged, or otherwise touched at any point during this batch.
+
+### 20.2 Exact APPROVAL_HISTORY catalogue definition
+
+```python
+CapabilityId.APPROVAL_HISTORY: CapabilityAdapter(
+    capability_id=CapabilityId.APPROVAL_HISTORY,
+    tool_name="approval_history",
+    description=(
+        "Shows your recent approval history (up to 20 most recent "
+        "entries). Read-only and safe."
+    ),
+    arguments=(),
+    allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+    max_execution_tier=SecurityTier.GREEN,
+    verification_strategy_id=None,
+    internal_only=False,
+),
+```
+
+### 20.3 Exact WORKFLOW_HISTORY catalogue definition
+
+```python
+CapabilityId.WORKFLOW_HISTORY: CapabilityAdapter(
+    capability_id=CapabilityId.WORKFLOW_HISTORY,
+    tool_name="workflow_history",
+    description=(
+        "Shows your recent workflow history (up to 20 most recent "
+        "entries). Read-only and safe."
+    ),
+    arguments=(),
+    allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+    max_execution_tier=SecurityTier.GREEN,
+    verification_strategy_id=None,
+    internal_only=False,
+),
+```
+
+### 20.4 Trusted fixed internal tool inputs
+
+```python
+_FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]] = {
+    ...
+    CapabilityId.APPROVAL_HISTORY: {"operation": "history"},
+    CapabilityId.WORKFLOW_HISTORY: {"operation": "history"},
+}
+```
+
+`build_tool_input()` (unmodified) merges these fixed pairs in after copying the model's own (empty) validated arguments, so `build_tool_input(adapter, {})` returns exactly `{"operation": "history"}` for both — confirmed directly: `test_build_tool_input_adds_fixed_operation_for_approval_history`, `test_build_tool_input_adds_fixed_operation_for_workflow_history`. The model can never supply or override `operation`: both capabilities declare zero arguments, so `intelligence/structured_output.py`'s existing, unmodified `_validate_arguments()` rejects any `operation` key in the model's own output before `build_tool_input()` is ever reached (proven by `test_history_capability_rejects_any_extra_argument`, parametrized over both capabilities and eight stray-argument shapes including `{"operation": "history"}` and `{"operation": "recent"}`); and even if a stray `operation` key somehow reached `build_tool_input()` directly (a bug-only scenario, never a real path), `test_build_tool_input_never_lets_model_choose_approval_history_operation`/`..._workflow_history_operation` prove the fixed value still wins.
+
+### 20.5 Exact grounding signatures (as implemented, matches this plan's §12 exactly)
+
+```python
+CapabilityId.APPROVAL_HISTORY: _IntentSignature(
+    action_tokens=("show", "list"),
+    domain_tokens=("approval", "approvals"),
+    qualifier_tokens=("history",),
+),
+CapabilityId.WORKFLOW_HISTORY: _IntentSignature(
+    action_tokens=("show", "list"),
+    domain_tokens=("workflow", "workflows"),
+    qualifier_tokens=("history",),
+),
+```
+
+No unsupported synonym (`audit`, `log`, `records`, `past`, `previous`, `decisions`, `runs`, `activity`, `timeline`) was added to either signature — only the exact vocabulary this plan specified.
+
+### 20.6 Catalogue-wide collision results across all eight capabilities
+
+Directly proven in `test_grounding.py`:
+- `"show approval history"` grounds `APPROVAL_HISTORY` only; `"list approvals history"` grounds it too.
+- `"show workflow history"` grounds `WORKFLOW_HISTORY` only; `"list workflows history"` grounds it too.
+- `"show approval history and workflow history"` (both signatures genuinely present) refuses as `multiple_signatures_matched` — Jarvis never chooses between them.
+- `"history"` alone, `"show history"` alone, `"approval history"` (no accepted action word), `"workflow history"` (no accepted action word), `"show approvals"`/`"show workflows"` (no `"history"` qualifier) all refuse as `no_signature_matched` — action, domain, and qualifier each independently insufficient alone.
+- Each of the six pre-existing capabilities' own real phrasing (`project_state_show`, `project_state_update_focus`, `health_check`, `schedule_list`, `memory_list_recent`, `memory_search`) does not ground either new history capability when forced (refused as `selected_capability_not_unique_match`, since each request's own real signature still uniquely matches its own real capability — never `no_signature_matched`, since something always does match, just not the one being asked about).
+- `"show approval history"` does not ground `WORKFLOW_HISTORY`, and `"show workflow history"` does not ground `APPROVAL_HISTORY` (both refuse as `selected_capability_not_unique_match`).
+- `test_eight_capability_catalogue_still_produces_exactly_one_match_each` directly re-confirms all eight real, accepted phrasings each still ground only their own capability after both new signatures were added — no existing signature's own uniqueness was disturbed.
+
+### 20.7 Real SecurityManager actions and classifications
+
+Confirmed unchanged, exact real actions from the real tools' own `action_for()`:
+- `ApprovalHistoryTool.action_for()` (default operation) returns `"show approval history"` → classifies **GREEN** via the existing, unmodified generic `"show"` rule.
+- `WorkflowHistoryTool.action_for()` (default operation) returns `"show workflow history"` → classifies **GREEN** via the same rule.
+
+Both catalogue entries declare `max_execution_tier=SecurityTier.GREEN`, exactly matching the real, live classification `_preflight_capability()` observes — no mismatch was found, so no stop condition was triggered and no `SecurityManager` rule was added or changed.
+
+### 20.8 ToolExecutor evidence
+
+Both capabilities execute via the pre-existing, unmodified `PlanningOutcomeKind.EXECUTABLE` branch of `core/orchestrator.py`, calling `self._executor.execute(...)` — the identical real `ToolExecutor` every other capability uses. No direct `tool.run()` call was added anywhere in the Intelligence Core path; no parallel execution path was created; the Intelligence Core never invokes `ApprovalHistoryStore`/`WorkflowHistoryStore` directly. Proven end-to-end with real, SQLite-backed stores: `test_approval_history_executes_through_real_tool_executor_and_grounds_response` and `test_workflow_history_executes_through_real_tool_executor_and_grounds_response` each assert exactly one `tool_call` audit event.
+
+### 20.9 Exact 20-record bound evidence
+
+Neither `ApprovalHistoryTool` nor `WorkflowHistoryTool` was modified — both retain their own pre-existing `_DEFAULT_LIMIT = 20`, applied by their default `"history"` operation (`list_recent(limit=_DEFAULT_LIMIT)`). This was re-confirmed, not assumed: `test_approval_history_is_bounded_at_20_records_through_the_real_pipeline` and `test_workflow_history_is_bounded_at_20_records_through_the_real_pipeline` each seed 25 real rows into a real in-memory SQLite store and assert the AI-selected capability's grounded response contains exactly 20 distinct, bracket-wrapped record identifiers — the real tool's own bound, not a new or different one. The planning assumption in §8 of this plan held exactly; no stop condition was triggered.
+
+### 20.10 Grounded-response behavior with and without records
+
+With records: `test_approval_history_executes_through_real_tool_executor_and_grounds_response` and its workflow counterpart seed one real row each and assert the real, seeded identifier (`req-1`/`wf-1`) appears verbatim in the `[Jarvis tool result]`-labelled response — never a fabricated or AI-paraphrased value. Without records: `test_approval_history_real_no_records_grounds_the_response` and its workflow counterpart assert the real tool's own existing "none found" wording is returned honestly, with `response.tool_result.success is True` (an empty history is not a failure).
+
+### 20.11 Data-exposure review
+
+No field beyond what `ApprovalHistoryTool`/`WorkflowHistoryTool` already return was added or exposed. Both tools, their stores, and their formatting were used entirely unmodified. No memory content, arbitrary workflow/approval payload, environment variable, filesystem path, configuration secret, or hidden internal state is exposed by either new capability — confirmed by re-reading both tools' source during this batch (no change was made to either). `decision_reason`/`detail`, where already returned by the deterministic tools, pass through completely unchanged - no summarization, reinterpretation, or second AI generation step touches them anywhere in this path.
+
+### 20.12 Verification results
+
+- Focused (`test_capability_catalog.py`, `test_structured_output.py`, `test_grounding.py`, `test_intelligence_planning.py`, `test_orchestrator_ask_jarvis_to.py`, `test_orchestrator_update_focus_workflow.py`, `test_help_tool.py`, run together): **479 passed**.
+- Deterministic approval/workflow-history + executor regressions (`test_approval_history_store.py`, `test_approval_history_tool.py`, `test_workflow_history_store.py`, `test_workflow_history_tool.py`, `test_cli_workflow_history.py`, `test_main_quarantine_list_wiring.py`, `test_tool_executor_approval.py`, `test_tool_executor_logger_isolation.py`): **165 passed**.
+- Broader Phase 90/91/92 regression sweep (approval manager/history/audit/models/prompt, CLI/core approval, health-check tool + wiring, pending-approval wiring, project-state wiring/store/tools, memory tool, orchestrator context-query/workflow-commands, pending approval store, verification): **443 passed**.
+- Command-router regression (`test_command_router.py`): **465 passed**.
+- Full suite, normal environment: **4843 passed, 3 skipped** (83 more than Phase 92's closing baseline of 4760, matching the new tests added).
+- Full suite, `AI_REASONING_ENABLED=false`: **4843 passed, 3 skipped** — identical.
+- Ruff (`ruff check` on all 9 changed Python files: `intelligence/capability_catalog.py intelligence/grounding.py intelligence/planning.py tests/unit/test_capability_catalog.py tests/unit/test_grounding.py tests/unit/test_intelligence_planning.py tests/unit/test_orchestrator_ask_jarvis_to.py tests/unit/test_structured_output.py tools/builtin/help_tool.py`): one real finding was found and fixed during this batch (`F821 Undefined name` for two quoted forward-reference type hints in a new helper function's return-type annotation in `test_orchestrator_ask_jarvis_to.py`, resolved by adding a `TYPE_CHECKING`-guarded import) — after the fix, **all checks passed, exit code 0, zero remaining findings**.
+- `git diff --check`: exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 20.13 Existing-path regression confirmation
+
+All six pre-existing capabilities' own tests pass entirely unmodified: `PROJECT_STATE_SHOW`, `HEALTH_CHECK`, `SCHEDULE_LIST`, `MEMORY_LIST_RECENT`, `MEMORY_SEARCH` (vertical-slice tests in `test_orchestrator_ask_jarvis_to.py`) and `PROJECT_STATE_UPDATE_FOCUS` (real YELLOW approval, real resume, real durable write, real durable verification - all 31 tests in `test_orchestrator_update_focus_workflow.py` pass unchanged, since neither `core/orchestrator.py` nor any workflow-path logic was touched in this batch). The Phase 92 grounding mechanism itself (negation gate, punctuation policy, argument-span extraction, catalogue-wide uniqueness algorithm) was not modified - only two additive signatures were added to its existing table. `ask jarvis:` remains advisory-only (pre-existing, unmodified regression tests still pass); deterministic commands, including `show approval history`/`show workflow history` themselves, remain unchanged (`test_command_router.py`'s 465 tests pass unmodified).
+
+### 20.14 Confirmation of scope boundaries
+
+No quarantine listing, general info, approval-history/workflow-history filter, history-record lookup by ID, user-selectable limit, filesystem-facing capability, new write capability, new verification strategy, new `SecurityManager` rule, security-tier change, arbitrary `ToolRegistry` exposure, multi-tool plan, retry, replanning, autonomous behavior, or any other out-of-scope item from this plan's exclusion list was added. The Phase 92 grounding vocabulary was broadened only by the two exact new signatures specified in this plan - no synonym, alias, or additional marker was introduced. Phase 93 remains open; Batch 2 (documentation reconciliation, final complete verification, completion report, closure) has not been started, and `docs/phase_93_completion_report.md` was not created in this batch.

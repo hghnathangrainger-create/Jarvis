@@ -101,7 +101,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly six capabilities "
+    "You are Jarvis's tool-selection planner. Exactly eight capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -135,7 +135,17 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "search text in arguments.value (a non-empty string, at most 500 "
     "characters).\n"
     "\n"
-    'A seventh capability id, "project_state_verify_focus", exists only '
+    '7. capability id "approval_history" - shows your recent approval '
+    "history (up to 20 most recent entries). Use this only when the "
+    "request asks to show or list your approval history. Takes no "
+    "arguments.\n"
+    "\n"
+    '8. capability id "workflow_history" - shows your recent workflow '
+    "history (up to 20 most recent entries). Use this only when the "
+    "request asks to show or list your workflow history. Takes no "
+    "arguments.\n"
+    "\n"
+    'A ninth capability id, "project_state_verify_focus", exists only '
     "internally - it is never a valid selection, is never selectable "
     "through your output, and must never appear in your response under "
     "any circumstances.\n"
@@ -169,6 +179,14 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "Execute (search memories):\n"
     '{"decision": "execute", "capability_id": "memory_search", '
     '"arguments": {"value": "the search text"}}\n'
+    "\n"
+    "Execute (approval history):\n"
+    '{"decision": "execute", "capability_id": "approval_history", '
+    '"arguments": {}}\n'
+    "\n"
+    "Execute (workflow history):\n"
+    '{"decision": "execute", "capability_id": "workflow_history", '
+    '"arguments": {}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'

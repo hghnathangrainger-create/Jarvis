@@ -283,8 +283,10 @@ class _IntentSignature:
     qualifier_tokens: tuple[str, ...] = ()
 
 
-#: Exactly the six model-selectable capabilities (Section 20.2's final
-#: table). project_state_verify_focus is deliberately absent - it is
+#: Exactly the eight model-selectable capabilities (Section 20.2's
+#: final table for the original six; docs/phase_93_implementation_plan.md
+#: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1).
+#: project_state_verify_focus is deliberately absent - it is
 #: internal_only and can never be a parsed EXECUTE decision's
 #: capability_id (intelligence/structured_output.py already rejects it
 #: before ground_decision() could ever be called with it).
@@ -325,6 +327,22 @@ _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
         action_tokens=("search", "find"),
         domain_tokens=("memory", "memories"),
     ),
+    CapabilityId.APPROVAL_HISTORY: _IntentSignature(
+        action_tokens=("show", "list"),
+        domain_tokens=("approval", "approvals"),
+        # Phase 93, Batch 1: "history" is required, separate qualifier
+        # evidence - never action or domain evidence by itself, exactly
+        # mirroring memory_list_recent's own corrected "recent"/
+        # "recently" qualifier (Section 20.1). "approval"/"approvals"
+        # alone, or "history" alone, or a generic action word alone,
+        # must never be sufficient.
+        qualifier_tokens=("history",),
+    ),
+    CapabilityId.WORKFLOW_HISTORY: _IntentSignature(
+        action_tokens=("show", "list"),
+        domain_tokens=("workflow", "workflows"),
+        qualifier_tokens=("history",),
+    ),
 }
 
 
@@ -364,7 +382,7 @@ def _signature_matches(
 
 
 def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
-    """Evaluate the live request against every one of the six
+    """Evaluate the live request against every one of the eight
     catalogue signatures (Section 20.3's catalogue-wide rule) - never
     only the model-selected capability's own signature in isolation.
 

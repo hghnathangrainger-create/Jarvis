@@ -26,6 +26,15 @@ Responsibilities:
       SINGLE_TOOL execution strategy PROJECT_STATE_SHOW already uses.
       Phase 91, Batch 2 adds one further model-selectable, bounded,
       single-argument, GREEN, SINGLE_TOOL entry: MEMORY_SEARCH.
+      Phase 93, Batch 1 adds two further model-selectable, zero-
+      argument, GREEN, SINGLE_TOOL entries: APPROVAL_HISTORY and
+      WORKFLOW_HISTORY - each a thin wrapper around an already-
+      registered, already-tested tool's own existing default
+      ("history") operation, hard-bounded at 20 records by that real
+      tool itself. Neither exposes the tool's "recent"/"get" (and, for
+      approval_history, "approved"/"declined") operations - those
+      remain reachable only through the existing deterministic command
+      grammar, never through this AI-facing catalog.
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -75,6 +84,8 @@ class CapabilityId(Enum):
     SCHEDULE_LIST = "schedule_list"
     MEMORY_LIST_RECENT = "memory_list_recent"
     MEMORY_SEARCH = "memory_search"
+    APPROVAL_HISTORY = "approval_history"
+    WORKFLOW_HISTORY = "workflow_history"
 
 
 class ExecutionStrategy(Enum):
@@ -249,6 +260,32 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         verification_strategy_id=None,
         internal_only=False,
     ),
+    CapabilityId.APPROVAL_HISTORY: CapabilityAdapter(
+        capability_id=CapabilityId.APPROVAL_HISTORY,
+        tool_name="approval_history",
+        description=(
+            "Shows your recent approval history (up to 20 most recent "
+            "entries). Read-only and safe."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
+    CapabilityId.WORKFLOW_HISTORY: CapabilityAdapter(
+        capability_id=CapabilityId.WORKFLOW_HISTORY,
+        tool_name="workflow_history",
+        description=(
+            "Shows your recent workflow history (up to 20 most recent "
+            "entries). Read-only and safe."
+        ),
+        arguments=(),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
+    ),
 }
 
 
@@ -267,20 +304,26 @@ def get_adapter(capability_id: CapabilityId) -> CapabilityAdapter | None:
 
 #: Fixed, non-model-controlled tool-input keys some capabilities need
 #: in addition to (never instead of) their own declared, validated
-#: arguments. Two real tools are multi-purpose (ProjectStateUpdateTool
-#: keys its write on a "field" name; MemoryTool keys its behaviour on
-#: an "operation" name) but the model is only ever asked to supply the
-#: capability's own narrow, declared arguments - never the field/
-#: operation name itself. Each entry here is a fixed literal, chosen
-#: once by this catalog, never derived from or overridable by model
-#: output (see build_tool_input's own "never overrides a model-
-#: supplied key" contract below). Every other capability's real tool
-#: input already matches its own validated arguments one-to-one, so it
-#: simply has no entry here.
+#: arguments. Several real tools are multi-purpose (ProjectStateUpdateTool
+#: keys its write on a "field" name; MemoryTool, ApprovalHistoryTool, and
+#: WorkflowHistoryTool each key their behaviour on an "operation" name)
+#: but the model is only ever asked to supply the capability's own
+#: narrow, declared arguments - never the field/operation name itself.
+#: Each entry here is a fixed literal, chosen once by this catalog,
+#: never derived from or overridable by model output (see
+#: build_tool_input's own "never overrides a model-supplied key"
+#: contract below). APPROVAL_HISTORY and WORKFLOW_HISTORY (Phase 93,
+#: Batch 1) both fix "operation": "history" - the real tools' own
+#: default operation, made explicit here rather than relied upon
+#: implicitly, since both tools accept "history" as an explicit value.
+#: Every other capability's real tool input already matches its own
+#: validated arguments one-to-one, so it simply has no entry here.
 _FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: {"field": "focus"},
     CapabilityId.MEMORY_LIST_RECENT: {"operation": "list"},
     CapabilityId.MEMORY_SEARCH: {"operation": "search"},
+    CapabilityId.APPROVAL_HISTORY: {"operation": "history"},
+    CapabilityId.WORKFLOW_HISTORY: {"operation": "history"},
 }
 
 #: Fixed, non-model-controlled renames of a capability's own declared

@@ -28,8 +28,13 @@ import ast
 import inspect
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from approval.approval_history_store import ApprovalHistoryStore
+    from workflow.workflow_history_store import WorkflowHistoryStore
 
 try:
     from sqlalchemy import create_engine
@@ -311,6 +316,282 @@ def _build_real_orchestrator_with_phase_91_batch_1_tools(
         tool_selection_router=tool_selection_router,
     )
     return orchestrator, memory, schedule_store
+
+
+# --- Phase 93, Batch 1: bounded audit history capabilities -----------------
+
+
+def _build_real_orchestrator_with_history_tools(
+    tool_selection_router: AIRouter | None, logger: _RecordingLogger
+) -> tuple[JarvisOrchestrator, ApprovalHistoryStore, WorkflowHistoryStore]:
+    """Builds a real orchestrator wired with every Phase 90/91 capability
+    tool plus the real, production ApprovalHistoryTool and
+    WorkflowHistoryTool - each backed by a real, isolated in-memory
+    SQLite store (never a mock/fake store). A separate helper from
+    _build_real_orchestrator_with_phase_91_batch_1_tools() so that
+    helper's own 22 existing call sites and 3-tuple return shape never
+    need to change."""
+    from approval.approval_history_store import ApprovalHistoryStore
+    from inbox.inbox_store import InboxStore
+    from quarantine.quarantine_store import QuarantineStore
+    from tools.builtin.approval_history_tool import ApprovalHistoryTool
+    from tools.builtin.health_check_tool import HealthCheckTool
+    from tools.builtin.memory_tool import MemoryTool
+    from tools.builtin.schedule_list_tool import ScheduleListTool
+    from tools.builtin.workflow_history_tool import WorkflowHistoryTool
+    from workflow.workflow_history_store import WorkflowHistoryStore
+
+    session_factory = _in_memory_session_factory()
+    memory = MemoryManager(EpisodicMemoryStore(session_factory))
+    project_state_store = ProjectStateStore(session_factory)
+    schedule_store = ScheduleStore(session_factory)
+    inbox_store = InboxStore(session_factory)
+    quarantine_store = QuarantineStore(session_factory)
+    approval_history = ApprovalHistoryStore(session_factory)
+    workflow_history = WorkflowHistoryStore(session_factory)
+
+    context_assembler = ContextAssembler(
+        memory_manager=memory, project_state_store=project_state_store
+    )
+    security = SecurityManager()
+
+    registry = ToolRegistry()
+    registry.register_tool(ProjectStateShowTool(project_state_store))
+    registry.register_tool(ScheduleListTool(schedule_store))
+    registry.register_tool(MemoryTool(memory))
+    registry.register_tool(ApprovalHistoryTool(approval_history))
+    registry.register_tool(WorkflowHistoryTool(workflow_history))
+    registry.register_tool(
+        HealthCheckTool(
+            registry=registry,
+            settings=_settings(),
+            inbox_store=inbox_store,
+            schedule_store=schedule_store,
+            quarantine_store=quarantine_store,
+            security_manager=security,
+            memory_manager=memory,
+            approval_history_store=approval_history,
+            workflow_history_store=workflow_history,
+        )
+    )
+
+    executor = ToolExecutor(
+        registry=registry, security_manager=security, logger=logger  # type: ignore[arg-type]
+    )
+    orchestrator = JarvisOrchestrator(
+        planner=Planner(security),
+        executor=executor,
+        registry=registry,
+        command_router=CommandRouter(registry),
+        security_manager=security,
+        memory_manager=memory,
+        logger=logger,  # type: ignore[arg-type]
+        context_assembler=context_assembler,
+        tool_selection_router=tool_selection_router,
+    )
+    return orchestrator, approval_history, workflow_history
+
+
+_APPROVAL_HISTORY_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "approval_history", "arguments": {}}
+)
+_WORKFLOW_HISTORY_EXECUTE_TEXT = json.dumps(
+    {"decision": "execute", "capability_id": "workflow_history", "arguments": {}}
+)
+
+
+def test_approval_history_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    orchestrator, approval_history, _ = _build_real_orchestrator_with_history_tools(
+        router, logger
+    )
+    approval_history.record_request(
+        request_id="req-1",
+        action="update jarvis project state",
+        reason="Updating the project state's focus field requires confirmation.",
+        security_tier="yellow",
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: show approval history")
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "req-1" in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "approval_history"
+    assert response.tool_result.success is True
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_workflow_history_executes_through_real_tool_executor_and_grounds_response() -> None:
+    router, provider, logger = _router(_WORKFLOW_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, workflow_history = _build_real_orchestrator_with_history_tools(
+        router, logger
+    )
+    workflow_history.record_transition(
+        workflow_id="wf-1", status="workflow_started", detail="workflow_id=wf-1 steps=2"
+    )
+
+    response = orchestrator.handle_request("ask jarvis to: show workflow history")
+
+    assert response.success is True
+    assert response.message.startswith("[Jarvis tool result]")
+    assert "wf-1" in response.message
+    assert response.tool_result is not None
+    assert response.tool_result.tool_name == "workflow_history"
+    assert response.tool_result.success is True
+    assert len(provider.received_requests) == 1
+    assert len(_tool_call_events(logger)) == 1
+
+
+def test_approval_history_real_no_records_grounds_the_response() -> None:
+    router, provider, logger = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_history_tools(router, logger)
+
+    response = orchestrator.handle_request("ask jarvis to: show approval history")
+
+    assert response.success is True
+    assert response.tool_result is not None
+    assert response.tool_result.success is True
+    assert "none found" in response.message.lower()
+
+
+def test_workflow_history_real_no_records_grounds_the_response() -> None:
+    router, provider, logger = _router(_WORKFLOW_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_history_tools(router, logger)
+
+    response = orchestrator.handle_request("ask jarvis to: show workflow history")
+
+    assert response.success is True
+    assert response.tool_result is not None
+    assert response.tool_result.success is True
+    assert "none found" in response.message.lower()
+
+
+def test_approval_history_is_bounded_at_20_records_through_the_real_pipeline() -> None:
+    """Seeds 25 real approval-history rows through the real store and
+    proves the AI-selected capability still only ever returns the same
+    real, hard-bounded 20 the deterministic tool itself always
+    returns - no separate or larger limit is introduced for the
+    AI-facing path."""
+    router, _, logger = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    orchestrator, approval_history, _ = _build_real_orchestrator_with_history_tools(
+        router, logger
+    )
+    for i in range(25):
+        approval_history.record_request(
+            request_id=f"req-{i}",
+            action="show jarvis project state",
+            reason="test reason",
+            security_tier="green",
+        )
+
+    response = orchestrator.handle_request("ask jarvis to: show approval history")
+
+    assert response.success is True
+    # Bracket-wrapped to avoid "req-1" false-matching inside "req-10".."req-19".
+    shown_ids = [f"[req-{i}]" for i in range(25) if f"[req-{i}]" in response.message]
+    assert len(shown_ids) == 20
+
+
+def test_workflow_history_is_bounded_at_20_records_through_the_real_pipeline() -> None:
+    router, _, logger = _router(_WORKFLOW_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, workflow_history = _build_real_orchestrator_with_history_tools(
+        router, logger
+    )
+    for i in range(25):
+        workflow_history.record_transition(
+            workflow_id=f"wf-{i}", status="workflow_started"
+        )
+
+    response = orchestrator.handle_request("ask jarvis to: show workflow history")
+
+    assert response.success is True
+    # Bracket-wrapped to avoid "wf-1" false-matching inside "wf-10".."wf-19".
+    shown_ids = [f"[wf-{i}]" for i in range(25) if f"[wf-{i}]" in response.message]
+    assert len(shown_ids) == 20
+
+
+def test_history_capabilities_reject_extra_arguments() -> None:
+    for capability_id in ("approval_history", "workflow_history"):
+        stray_argument_text = json.dumps(
+            {
+                "decision": "execute",
+                "capability_id": capability_id,
+                "arguments": {"unexpected": "value"},
+            }
+        )
+        router, _, logger = _router(stray_argument_text)
+        orchestrator, _, _ = _build_real_orchestrator_with_history_tools(
+            router, logger
+        )
+
+        response = orchestrator.handle_request("ask jarvis to: do something")
+
+        assert response.success is False
+        assert "could not safely process" in response.message.lower()
+        assert len(_tool_call_events(logger)) == 0
+
+
+def test_history_capability_mismatch_executes_neither_history_tool() -> None:
+    """The request uniquely grounds workflow_history, but the model
+    selects approval_history - neither tool executes."""
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, provider, logger = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_history_tools(router, logger)
+
+    response = orchestrator.handle_request("ask jarvis to: show workflow history")
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    assert len(_tool_call_events(logger)) == 0
+    assert len(provider.received_requests) == 1
+
+
+def test_multiple_history_signatures_refuses_and_executes_neither_tool() -> None:
+    from core.orchestrator import _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+
+    router, _, logger = _router(_APPROVAL_HISTORY_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_history_tools(router, logger)
+
+    response = orchestrator.handle_request(
+        "ask jarvis to: show approval history and workflow history"
+    )
+
+    assert response.success is False
+    assert response.message == _ASK_JARVIS_TO_ACTION_SELECTION_REFUSAL_MESSAGE
+    assert len(_tool_call_events(logger)) == 0
+
+
+def test_history_capabilities_create_no_approval() -> None:
+    for capability_id, text in (
+        ("approval_history", _APPROVAL_HISTORY_EXECUTE_TEXT),
+        ("workflow_history", _WORKFLOW_HISTORY_EXECUTE_TEXT),
+    ):
+        router, _, logger = _router(text)
+        orchestrator, _, _ = _build_real_orchestrator_with_history_tools(
+            router, logger
+        )
+        request_text = f"ask jarvis to: show {capability_id.replace('_', ' ')}"
+
+        orchestrator.handle_request(request_text)
+
+        assert orchestrator.approvals.list_pending() == []
+
+
+def test_history_capabilities_do_not_disturb_existing_capability_behavior() -> None:
+    """Sanity check: a genuinely unrelated, pre-existing capability
+    (health_check) still executes normally on the same orchestrator
+    instance that now also carries the two new history tools."""
+    router, provider, logger = _router(_HEALTH_CHECK_EXECUTE_TEXT)
+    orchestrator, _, _ = _build_real_orchestrator_with_history_tools(router, logger)
+
+    response = orchestrator.handle_request("ask jarvis to: check jarvis's health")
+
+    assert response.success is True
+    assert len(_tool_call_events(logger)) == 1
 
 
 def test_health_check_executes_through_real_tool_executor_and_grounds_response() -> None:

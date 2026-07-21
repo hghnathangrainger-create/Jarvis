@@ -806,3 +806,239 @@ def test_zero_argument_capabilities_never_run_argument_logic() -> None:
         "show my project state", CapabilityId.PROJECT_STATE_SHOW, value="ignored"
     )
     assert result.grounded is True
+
+
+# ---------------------------------------------------------------------------
+# 12. Phase 93, Batch 1: APPROVAL_HISTORY / WORKFLOW_HISTORY signatures.
+# ---------------------------------------------------------------------------
+
+
+def test_approval_history_real_phrasing_is_grounded() -> None:
+    result = _ground("show approval history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is True
+
+
+def test_approval_history_list_phrasing_is_grounded() -> None:
+    result = _ground("list approvals history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is True
+
+
+def test_workflow_history_real_phrasing_is_grounded() -> None:
+    result = _ground("show workflow history", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is True
+
+
+def test_workflow_history_list_phrasing_is_grounded() -> None:
+    result = _ground("list workflows history", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is True
+
+
+def test_approval_and_workflow_history_together_refuses_as_multiple_matches() -> None:
+    """A request genuinely containing both signatures at once is
+    refused - Jarvis never chooses between them."""
+    request = "show approval history and workflow history"
+    result = _ground(request, CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.MULTIPLE_SIGNATURES_MATCHED
+
+
+def test_bare_history_grounds_neither_capability() -> None:
+    result = _ground("history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_show_history_grounds_neither_capability() -> None:
+    result = _ground("show history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_approval_history_domain_without_accepted_action_grounds_neither() -> None:
+    """"approval history" alone (no "show"/"list" action word) must not
+    ground the capability - the domain+qualifier words alone are
+    insufficient."""
+    result = _ground("approval history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_workflow_history_domain_without_accepted_action_grounds_neither() -> None:
+    result = _ground("workflow history", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_approval_action_and_domain_without_history_qualifier_is_insufficient() -> None:
+    """"show approvals" (action + domain, no "history" qualifier) must
+    not ground APPROVAL_HISTORY - mirroring MEMORY_LIST_RECENT's own
+    mandatory, separate qualifier requirement."""
+    result = _ground("show approvals", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_workflow_action_and_domain_without_history_qualifier_is_insufficient() -> None:
+    result = _ground("show workflows", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_generic_action_alone_does_not_ground_approval_history() -> None:
+    result = _ground("please show something", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_generic_domain_word_alone_does_not_ground_workflow_history() -> None:
+    result = _ground("what is my workflow", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_showing_approval_history_does_not_ground_workflow_history() -> None:
+    result = _ground("show approval history", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_showing_workflow_history_does_not_ground_approval_history() -> None:
+    result = _ground("show workflow history", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+# ---------------------------------------------------------------------------
+# 13. Phase 93, Batch 1: the two new signatures must not collide with any
+#     of the six pre-existing signatures (Section 7 of the Phase 93 plan).
+# ---------------------------------------------------------------------------
+
+
+def test_project_state_show_request_does_not_ground_approval_history() -> None:
+    result = _ground("show my project state", CapabilityId.APPROVAL_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_project_state_show_request_does_not_ground_workflow_history() -> None:
+    result = _ground("show my project state", CapabilityId.WORKFLOW_HISTORY)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_update_focus_request_does_not_ground_approval_history_or_workflow_history() -> (
+    None
+):
+    """The request uniquely matches PROJECT_STATE_UPDATE_FOCUS's own
+    signature - so grounding it against a history capability instead
+    correctly reports a selection mismatch, not "nothing matched"."""
+    request = "update my project focus to batch 3 verification"
+    for capability_id in (CapabilityId.APPROVAL_HISTORY, CapabilityId.WORKFLOW_HISTORY):
+        result = _ground(request, capability_id)
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_health_check_request_does_not_ground_either_history_capability() -> None:
+    for capability_id in (CapabilityId.APPROVAL_HISTORY, CapabilityId.WORKFLOW_HISTORY):
+        result = _ground("check jarvis's health", capability_id)
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_schedule_list_request_does_not_ground_either_history_capability() -> None:
+    for capability_id in (CapabilityId.APPROVAL_HISTORY, CapabilityId.WORKFLOW_HISTORY):
+        result = _ground("show my schedules", capability_id)
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_memory_list_recent_request_does_not_ground_either_history_capability() -> None:
+    request = "show me what I have asked you to remember recently"
+    for capability_id in (CapabilityId.APPROVAL_HISTORY, CapabilityId.WORKFLOW_HISTORY):
+        result = _ground(request, capability_id)
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_memory_search_request_does_not_ground_either_history_capability() -> None:
+    request = "search my memories for the deployment checklist"
+    for capability_id in (CapabilityId.APPROVAL_HISTORY, CapabilityId.WORKFLOW_HISTORY):
+        result = _ground(request, capability_id, value="the deployment checklist")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_approval_history_request_does_not_ground_any_of_the_six_existing_capabilities() -> (
+    None
+):
+    """The request uniquely matches APPROVAL_HISTORY's own signature -
+    so grounding it against any of the six pre-existing capabilities
+    instead correctly reports a selection mismatch, not "nothing
+    matched"."""
+    request = "show approval history"
+    existing = (
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
+    )
+    for capability_id in existing:
+        result = _ground(request, capability_id, value="irrelevant")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_workflow_history_request_does_not_ground_any_of_the_six_existing_capabilities() -> (
+    None
+):
+    request = "show workflow history"
+    existing = (
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
+    )
+    for capability_id in existing:
+        result = _ground(request, capability_id, value="irrelevant")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_eight_capability_catalogue_still_produces_exactly_one_match_each() -> None:
+    """Direct proof that adding the two new signatures did not disturb
+    any of the six existing ones' own uniqueness - each of the eight
+    real, accepted phrasings still grounds only its own capability."""
+    cases = (
+        ("show my project state", CapabilityId.PROJECT_STATE_SHOW, {}),
+        (
+            "update my project focus to batch 3 verification",
+            CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+            {"value": "batch 3 verification"},
+        ),
+        ("check jarvis's health", CapabilityId.HEALTH_CHECK, {}),
+        ("show my schedules", CapabilityId.SCHEDULE_LIST, {}),
+        (
+            "show me what I have asked you to remember recently",
+            CapabilityId.MEMORY_LIST_RECENT,
+            {},
+        ),
+        (
+            "search my memories for the deployment checklist",
+            CapabilityId.MEMORY_SEARCH,
+            {"value": "the deployment checklist"},
+        ),
+        ("show approval history", CapabilityId.APPROVAL_HISTORY, {}),
+        ("show workflow history", CapabilityId.WORKFLOW_HISTORY, {}),
+    )
+    for request_text, capability_id, arguments in cases:
+        result = ground_decision(
+            request_text=request_text,
+            capability_id=capability_id,
+            arguments=arguments,
+        )
+        assert result.grounded is True, (request_text, capability_id)

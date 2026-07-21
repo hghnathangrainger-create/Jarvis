@@ -803,3 +803,88 @@ def test_memory_search_rejected_value_is_never_echoed_in_the_error() -> None:
     text = _memory_search_text(marker + ("x" * 501))
     reason = _fails(text, catalog=CAPABILITY_CATALOG)
     assert marker not in reason
+
+
+# --- Phase 93, Batch 1: approval_history / workflow_history validation -----
+
+
+def _history_text(capability_id: str, arguments: object) -> str:
+    return json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": capability_id,
+            "arguments": arguments,
+        }
+    )
+
+
+@pytest.mark.parametrize("capability_id", ["approval_history", "workflow_history"])
+def test_history_capability_valid_selection(capability_id: str) -> None:
+    result = parse_tool_selection(
+        _history_text(capability_id, {}), CAPABILITY_CATALOG
+    )
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId(capability_id)
+    assert result.arguments == {}
+
+
+@pytest.mark.parametrize("capability_id", ["approval_history", "workflow_history"])
+@pytest.mark.parametrize(
+    "stray_arguments",
+    [
+        {"operation": "history"},
+        {"operation": "recent"},
+        {"limit": 20},
+        {"status": "approved"},
+        {"request_id": "abc"},
+        {"workflow_id": "abc"},
+        {"id": "abc"},
+        {"filter": "declined"},
+    ],
+)
+def test_history_capability_rejects_any_extra_argument(
+    capability_id: str, stray_arguments: dict[str, object]
+) -> None:
+    reason = _fails(
+        _history_text(capability_id, stray_arguments), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "unknown argument name in model output"
+
+
+@pytest.mark.parametrize("capability_id", ["approval_history", "workflow_history"])
+@pytest.mark.parametrize(
+    "malformed_arguments_json",
+    ['"not an object"', "[]", "null", "42", "true", "false"],
+)
+def test_history_capability_rejects_malformed_arguments_container(
+    capability_id: str, malformed_arguments_json: str
+) -> None:
+    text = (
+        '{"decision": "execute", "capability_id": "'
+        + capability_id
+        + '", "arguments": '
+        + malformed_arguments_json
+        + "}"
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "arguments must be a JSON object"
+
+
+def test_history_like_unsupported_capability_name_is_rejected() -> None:
+    """A plausible-sounding but non-catalogued capability name (never
+    invented as a real CapabilityId) is rejected exactly like any other
+    unknown capability id - proving no implicit or fuzzy name matching
+    exists for the new history capabilities."""
+    text = _history_text("history", {})
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "unknown capability id"
+
+
+def test_approval_history_and_workflow_history_declare_zero_arguments() -> None:
+    assert CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY].arguments == ()
+    assert CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY].arguments == ()
+
+
+def test_history_capabilities_are_not_internal_only() -> None:
+    assert CAPABILITY_CATALOG[CapabilityId.APPROVAL_HISTORY].internal_only is False
+    assert CAPABILITY_CATALOG[CapabilityId.WORKFLOW_HISTORY].internal_only is False
