@@ -722,3 +722,68 @@ replacing unordered set comparison with a genuinely ordered,
 connector-based clause split independently grounded per position. The
 design continues to trigger none of this task's stop conditions and
 remains small enough for one controlled implementation phase.
+
+## 26. Implementation and Closure Evidence
+
+Implemented exactly as designed above, with zero deviation requiring a
+stop condition:
+
+- **Production files**: exactly the two new files this plan named -
+  `intelligence/compound_structured_output.py`,
+  `intelligence/compound_grounding.py`. Zero existing production
+  Python file was modified (confirmed via `git status`/`git diff`
+  before commit).
+- **Reuse, not duplication**: `compound_structured_output.py` imports
+  `intelligence.structured_output`'s own private
+  `_reject_duplicate_keys`, `_strip_single_outer_fence`, and
+  `_validate_arguments` unchanged; `compound_grounding.py` imports
+  `intelligence.grounding`'s own private `_normalize`, `_padded`,
+  `_contains_negation_marker`, `_grounded_capability_ids`,
+  `_extract_argument_span`, `_strip_one_trailing_terminal_punctuation`,
+  `_normalize_for_argument_comparison`, and
+  `_ARGUMENT_MARKER_BY_CAPABILITY`. Both live modules remain completely
+  unmodified; the import direction is strictly one-way.
+- **Test files**: three new files -
+  `tests/unit/test_compound_structured_output.py` (31 tests),
+  `tests/unit/test_compound_grounding.py` (35 tests),
+  `tests/unit/test_compound_isolation.py` (32 tests) - 98 tests total,
+  all new, none modified from an existing file.
+- **Isolation proof**: AST-based tests parse the real source of every
+  live runtime module named in this plan (`intelligence/structured_output.py`,
+  `intelligence/grounding.py`, `intelligence/planning.py`,
+  `core/orchestrator.py`, `security/security_manager.py`,
+  `tools/executor.py`, `main.py`) and assert neither compound module
+  name is ever referenced by an import statement - not a text-search
+  assertion, a genuine `ast.parse` walk of each file's real import
+  nodes.
+- **No-side-effect proof**: AST-based identifier/call detection (not
+  raw substring search, which would have false-positived on this
+  module's own explanatory docstrings) proves neither new module
+  references `SecurityManager`, `ApprovalManager`, `WorkflowEngine`,
+  `Plan`/`PlanStep`, any persistence store, `ToolExecutor`, any
+  `.run()` call, `VerificationResult`/`verify_*`, or `JarvisResponse`.
+- **Regression evidence**: 1226 focused regression tests (capability
+  catalogue, structured output, grounding, planning, approval manager,
+  workflow engine, trusted workflow foundation, verification, schedule
+  enable/disable orchestrator workflows, phase-update orchestrator
+  workflow, ProjectState show/verify tools, command routing) - all
+  passed unmodified.
+- **Full suite**: 5301 passed, 3 skipped, 0 failed in all three
+  required environments (normal, `AI_REASONING_ENABLED=false`,
+  `PYTHON_DOTENV_DISABLED=1`) - exactly 98 more than the Phase 96
+  baseline of 5203, matching the 98 new tests added, with zero other
+  change.
+- **Ruff**: `ruff check` on the five new files - exit 0, "All checks
+  passed!", zero findings.
+- **`git diff --check`**: clean.
+- **Documentation**: this section added here; `docs/phase_97_completion_report.md`
+  created; `docs/user_guide.md` and `tools/builtin/help_tool.py` left
+  untouched (proven by the isolation test suite itself).
+- **Immediate future consumer reaffirmed**: a separately-approved,
+  future bounded compound execution phase for exactly
+  `PROJECT_STATE_UPDATE_PHASE` → `PROJECT_STATE_SHOW`. Neither new
+  module is generalized beyond the one worked template, and neither is
+  wired into any live path, in this phase.
+
+Phase 97 is formally closed on this basis. Phase 98 and the future
+compound execution consumer were not started.
