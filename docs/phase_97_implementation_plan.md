@@ -1,614 +1,724 @@
-# Phase 97 — Compound Request Grounding Foundation (Planning Gate)
+# Phase 97 — Compound Request Grounding Foundation (Planning Gate, Amended)
 
 Status: **planning gate only**. No production code changed. This
-document supersedes the earlier, less rigorous draft of
-`docs/phase_97_implementation_plan.md` produced before this expanded
-planning gate was requested; that draft's own candidate (a third,
-internal context step appended to `PROJECT_STATE_UPDATE_PHASE`) is
-retired in favor of the analysis below, which was requested to be
-performed against a much larger, more rigorous question set and a
-different candidate menu (Options A-E).
+amendment supersedes the version committed at `aa4792c`, which
+proposed adding a new `"execute_sequence"` literal directly to the
+existing, live decision schema and used unordered set equality to
+"prove" clause order - both defects are corrected below. The accepted
+title and general direction (a non-live-wired foundation proving one
+trusted, hand-authored two-capability template can be parsed,
+grounded, and safely rejected) are unchanged.
+
+## 0. Summary of what changed in this amendment
+
+1. **Isolation defect fixed.** The compound decision type, parser, and
+   grounding function now live in two wholly new, separate modules
+   that the live path never imports. The existing `ToolSelectionDecision`
+   enum does **not** gain an `"execute_sequence"` member; the existing
+   `parse_tool_selection()` continues to reject that string exactly as
+   it does today, with zero code change.
+2. **Ordering defect fixed.** The compound template allowlist is an
+   ordered tuple of ordered pairs, never a `frozenset`. Grounding no
+   longer compares an unordered matched-signature set against the
+   declared pair (a check that could not actually detect reversed
+   order, since it evaluated signatures against the *whole* request
+   text regardless of clause position). It now splits the request into
+   two ordered clauses by a single fixed connector and grounds each
+   clause independently against its own template position.
+3. Production scope shrank as a result: **zero existing production
+   file is modified at all** (not three, as the prior version
+   proposed) - both new pieces live in two brand-new files, imported by
+   nothing the live path touches.
 
 ## 1. Current repository checkpoint
 
 - Branch: `phase-4-ai-reasoning-and-write-actions`.
-- Starting HEAD: `d7d16ff` (Phase 96 closed).
-- Verified baseline (re-confirmed live during this planning gate, not
-  merely recalled): 756 focused tests across
-  `test_capability_catalog.py`, `test_structured_output.py`,
-  `test_grounding.py`, `test_intelligence_planning.py`,
-  `test_approval_manager.py`, `test_workflow_engine.py`,
-  `test_pending_approval_store.py`, `test_paused_workflow_store.py`,
-  `test_trusted_workflow_foundation.py`, `test_verification.py`,
-  `test_orchestrator_schedule_enable_workflow.py`,
-  `test_orchestrator_schedule_disable_workflow.py`, and
-  `test_orchestrator_update_phase_workflow.py` — all 756 passed.
-- `dashboard_test.txt` remains untouched, untracked, uncommitted
-  throughout this planning gate.
-
-## 2. Phase 90-96 architectural baseline
-
-- Phase 90 (Batches 2/3): introduced the one-capability-per-request
-  structured decision (`intelligence/structured_output.py`), the
-  trusted planning instruction and `select_tool()`
-  (`intelligence/planning.py`), and the original
-  `TWO_STEP_WORKFLOW` write-then-verify shape for
-  `PROJECT_STATE_UPDATE_FOCUS`.
-- Phase 91: added three zero-argument and one bounded-argument
-  `SINGLE_TOOL` read capabilities.
-- Phase 92 (Batch 1): added `intelligence/grounding.py` - a
-  deny-only, deterministic gate requiring the live request to
-  **uniquely** match exactly the model-selected capability's own
-  signature across the *whole* catalog (never merely the selected
-  capability's signature in isolation).
-- Phase 93 (Batch 1): added two more zero-argument read capabilities
-  (`APPROVAL_HISTORY`, `WORKFLOW_HISTORY`).
-- Phase 94: Batch 1 generalized the `TWO_STEP_WORKFLOW`
-  write/verify pairing into trusted catalog data
-  (`paired_verify_capability_id`/`paired_verify_input_keys`); Batch 2
-  added `SCHEDULE_ENABLE`, the first *second* `TWO_STEP_WORKFLOW`
-  capability, proving the generic pairing mechanism; Batch 3 replaced
-  the last per-capability `if`/`elif` recognizer in
-  `core/orchestrator.py` with a fully catalog-driven matcher
-  (`_matching_two_step_write_capability`/`_matches_two_step_workflow_shape`).
-- Phase 95: added `SCHEDULE_DISABLE`, reusing the same verifier
-  capability with a distinct `verifier_id`, proving verifier reuse is
-  safe because `CapabilityId` is never persisted.
-- Phase 96: added `PROJECT_STATE_UPDATE_PHASE`, reusing
-  `PROJECT_STATE_VERIFY_FOCUS` genericized to serve either field, and
-  extended the orchestrator's shape-matcher with a small,
-  catalog-driven fixed-argument disambiguation
-  (`fixed_arguments_for()`) for the first time two capabilities share
-  one identical write/verify tool-name pair.
-
-Every one of these four `TWO_STEP_WORKFLOW` capabilities pairs exactly
-**one real, user-facing capability** with **one internal-only,
-never-model-selectable verifier capability**. None of them combine two
-independently real, user-facing, model-selectable capabilities into
-one request. That is the exact gap this phase addresses.
-
-## 3. Exact intelligence gap
-
-Jarvis can select and safely execute exactly one model-selected,
-user-facing capability per request (optionally paired with its own
-fixed, internal verifier). It has no way to represent, ground, or
-execute a single user request that deliberately names **two**
-independent, real, user-facing capabilities as one bounded compound
-goal (e.g., "update my project phase to X and show me my project
-state"). Closing this gap is the next meaningful step toward "one
-bounded user goal represented by a small trusted sequence of catalogue
-capabilities."
-
-## 4. Mandatory inspection findings
-
-Every file listed in the task's "Mandatory inspection" section was
-read directly in this planning gate (not recalled from memory):
-`intelligence/capability_catalog.py`, `intelligence/structured_output.py`,
-`intelligence/grounding.py`, `intelligence/planning.py`,
-`intelligence/verification.py`, `core/orchestrator.py`,
-`workflow/engine.py`, `workflow/workflow_models.py`,
-`workflow/paused_workflow_store.py`, `approval/approval_manager.py`,
-`security/security_manager.py`, `tools/executor.py`,
-`planner/plan_models.py`, plus the Phase 94/95/96 plans and completion
-reports (already deeply audited across this session's own prior
-phases, re-confirmed here against the live code rather than assumed).
-
-Key, load-bearing findings, each directly answering the "Current
-architecture" questions (1-10):
-
-1. **The structured-decision schema cannot represent multiple
-   capabilities today.** `parse_tool_selection()` enforces an exact
-   `{"decision", "capability_id", "arguments"}` shape with
-   `capability_id` a single nullable string and `arguments` a single
-   dict — confirmed by direct reading, not assumption.
-2. **The planner assumes exactly one capability.** `select_tool()`
-   parses one decision, resolves one `CapabilityAdapter`, and (for a
-   `TWO_STEP_WORKFLOW` capability) builds exactly one write step plus
-   its own trusted, internal verifier step — never two independently
-   *selected* capabilities.
-3. **Grounding assumes exactly one user-facing signature per request,
-   and enforces it strictly.** `ground_decision()`'s
-   `_grounded_capability_ids()` computes the *entire* set of
-   catalog signatures the live request matches, and refuses outright
-   (`MULTIPLE_SIGNATURES_MATCHED`) the instant more than one matches -
-   this is precisely the rule that would reject any request naming two
-   real capabilities today, by design, not by oversight.
-4. **The workflow engine already persists an arbitrary number of
-   sequential steps.** `WorkflowEngine._validate_executable_plan()`
-   only requires steps numbered `1, 2, 3, ...` with no gaps; nothing
-   caps the count at two. `_persist_paused_state`/`_plan_step_to_dict`/
-   `_completed_outcome_to_dict` serialize the *whole* `plan.steps` and
-   `completed_outcomes` collections generically. This was true before
-   this phase and needs no change.
-5. **Persisted workflows track COMPLETED/WAITING/FAILED per step, but
-   have no distinct "verified" step status.** `WorkflowStepOutcome.status`
-   uses the existing `StepStatus` enum; verification
-   (VERIFIED/FAILED/UNAVAILABLE) is always a separate, orchestrator-level
-   semantic conclusion drawn *after* a COMPLETED verify step's
-   `ToolResult.metadata` - never itself a step status. This is an
-   existing, deliberate design choice (confirmed in
-   `intelligence/verification.py`'s own docstring), not a gap.
-6. **Resume never reruns an earlier step.** `WorkflowEngine.resume()`
-   pops the paused state, executes exactly the one waiting step, and on
-   success calls `_run_from(..., start_index=paused.waiting_step_index + 1, ...)`
-   - `_run_from` only ever advances forward from `start_index`.
-7. **Duplicate-resume protection operates at the whole-workflow level,
-   which is sufficient because Phase 15's model allows at most one
-   waiting step at a time.** `resume()` pops
-   `self._paused[workflow_id]` before executing anything; a second
-   `resume()` call for the same id always raises `WorkflowError`
-   ("no paused workflow"). There is no independent *per-step* duplicate
-   marker, but none is needed while exactly one step can ever be
-   waiting per workflow.
-8. **The generic catalogue-driven matcher recognizes today's fixed
-   2-step write+internal-verify shape, but has no concept of a
-   plan built from two independently-selected user-facing
-   capabilities** - `_matching_two_step_write_capability` iterates
-   only `TWO_STEP_WORKFLOW` catalog entries, each with exactly one
-   fixed `paired_verify_capability_id`. A compound plan of two
-   *independently selected* real capabilities is a different shape
-   this matcher was never designed to recognize, and this phase does
-   not ask it to (see Section 9's exact non-goals).
-9. **`ToolExecutor.execute()` is already the sole per-step execution
-   path for every step `WorkflowEngine` ever runs**, regardless of step
-   count - confirmed directly; no direct `tool.run()` call exists
-   anywhere outside `ToolExecutor._handle_run()`.
-10. **The response-building pattern already reports partial completion
-    honestly** for the existing 2-step shape (WAITING vs FAILED vs
-    COMPLETED, with the exact failing step identified) - this pattern
-    is proven and reusable, but not extended in this phase since no
-    new plan shape is built.
-
-Findings for "Grounding and intent" (11-17) and "Trusted data flow"
-(36-40) are folded into Sections 11 and 15 below, since they directly
-shaped the selected design rather than being freestanding facts.
-
-## 5. Candidate options considered
-
-### Option A — Selected: Compound Request Grounding Foundation
-
-Add a new, additive, non-live-wired decision shape and a new grounding
-function proving that a request naming exactly two capabilities from a
-small, explicit, hand-authored allowlist of ordered template pairs can
-be deterministically, uniquely attributed - without building any
-execution machinery and without changing the live "ask jarvis to:"
-trusted instruction or `select_tool()`'s real call path.
-
-### Option B — Considered, lower priority: Durable Sequential Workflow Foundation
-
-Rejected as the *first* move (though still valuable later): Section 4,
-finding 4 already shows `WorkflowEngine` and its persistence layer are
-**already** fully general past two steps - there is close to nothing
-left to build here. Writing tests that merely reconfirm already-true
-engine behavior is legitimate but low-value compared to Option A, which
-closes a *real*, currently-blocking gap (grounding's uniqueness rule).
-Deferred until Option A's foundation exists to give it something
-concrete to execute.
-
-### Option C — Considered, correctly deferred: First Bounded Two-Step User Workflow
-
-This is the eventual goal, but attempting it *in this phase* would
-require simultaneously changing `intelligence/structured_output.py`
-(new schema), `intelligence/grounding.py` (new uniqueness rule),
-`intelligence/planning.py` (new plan-construction path), and
-`core/orchestrator.py` (new shape recognition and response building) -
-four interacting, individually risky changes to the most heavily
-audited parts of the codebase, in one phase. Option C's own listed risk
-("may combine too many architectural changes in one phase") is exactly
-what direct inspection confirms. Deferred to a future phase, to be
-built *on top of* Option A once it is proven correct in isolation.
-
-### Option D — Considered, not selected now: Outcome/Task Context Foundation
-
-A durable, non-memory task-outcome record. Valuable for a later Respond/
-Remember-focused phase, but it does not address the actual blocking
-gap (Section 3) at all - it improves what Jarvis remembers about a
-result, not whether Jarvis can safely represent a compound goal in the
-first place. Not selected because it doesn't advance the stated
-priority (multi-step planning) at all this cycle.
-
-### Option E — No stronger prerequisite found
-
-Direct inspection did not surface a more fundamental blocker than the
-grounding uniqueness rule (Section 4, finding 3). Every other piece
-needed for eventual compound execution (durable persistence,
-per-step verification, approval, exactly-once resume) already exists
-and works, confirmed live in Section 4. No Option E candidate is
-proposed.
-
-## 6. Honest comparison
-
-| | Closes the real blocking gap | New live model-facing behavior | Touches execution/approval/persistence code | Risk of simultaneous multi-module change | Reusable by future compound templates |
-|---|---|---|---|---|---|
-| A (selected) | Yes - the grounding uniqueness rule itself | No (not wired to the live instruction or `select_tool()`) | No | Low - additive, isolated modules | Yes - foundation any future template reuses |
-| B | No - engine already supports N steps | No | Tests only, no real behavior change | Low, but low value | Marginal |
-| C | Yes, but all at once | Yes | Yes, extensively | High | N/A - is the end goal, not a foundation |
-| D | No | No | No | Low | Low - orthogonal concern |
-| E | N/A | N/A | N/A | N/A | N/A |
-
-Option A is the only candidate that closes a real, currently-blocking
-architectural gap while keeping blast radius small, live behavior
-completely unchanged, and produces a genuinely reusable foundation for
-Option C later.
-
-## 7. Selected Phase 97 objective
-
-**Build and thoroughly test a Compound Request Grounding Foundation:**
-a new, additive parsing shape for a two-capability compound decision,
-and a new grounding function that deterministically proves such a
-request's two declared capabilities are each independently evidenced
-in the live request text, and that no unaccounted-for third capability
-also matches - restricted to a small, explicit, hand-authored allowlist
-of trusted, ordered capability-pair templates (never an arbitrary
-pairing of any two of the eleven capabilities). **Not wired into the
-live trusted planning instruction or into `select_tool()`'s real call
-path this phase** - proven correct by its own dedicated test suite,
-with wiring and actual execution explicitly deferred (Section 33).
-
-## 8. Why it is the best next phase
-
-- It is the one piece every future compound-execution design (Option
-  C) needs regardless of its own eventual shape, since without it no
-  compound request can ever be safely attributed to a live request at
-  all (Section 4, finding 3).
-- It touches zero execution, approval, or persistence code - the
-  highest-risk parts of the codebase are completely undisturbed.
-- It changes zero live, user-facing behavior - Nathan's real "ask
-  jarvis to: ..." command behaves identically before and after this
-  phase, since the new shape is never offered to the model and
-  `select_tool()`'s real call path is unchanged.
-- It produces concrete, reusable evidence (a real, tested worked
-  example - Section 11) that the eventual Option C design is soundly
-  buildable, rather than a purely paper design.
-- It is small enough to implement, test, and regress in one controlled
-  phase, matching the selection standard's explicit "small enough for
-  one controlled implementation phase" requirement.
-
-## 9. Exact user-visible behavior, if any
-
-**None.** No change to `_TRUSTED_PLANNING_INSTRUCTION`, no change to
-`select_tool()`'s real call path, no new command, no new response
-shape a user could ever see. This is a pure, internal foundation.
-
-## 10. Exact structured-decision changes
-
-- New module-level function in `intelligence/structured_output.py`:
-  `parse_compound_tool_selection(raw_text, catalog, allowed_templates)`.
-  Never replaces or modifies `parse_tool_selection()` - a wholly
-  separate, additive function with its own dedicated tests.
-- New schema, validated with the same rigor as the existing one (2,000
-  char cap, single outer fence, duplicate-key rejection, exact
-  top-level key set): `{"decision": "execute_sequence",
-  "capability_ids": ["id1", "id2"], "arguments": [{...}, {...}]}`.
-  Exactly two entries in `capability_ids` and `arguments`, in the same
-  order; each `capability_ids[i]` must be a real, non-`internal_only`
-  catalog member, and `arguments[i]` is validated against that specific
-  capability's own declared `CapabilityArgumentSpec` tuple, reusing
-  `_validate_arguments()` unchanged (called once per declared step).
-- New, distinct top-level decision literal `"execute_sequence"` -
-  chosen to be unambiguous with the existing `"execute"`/`"unsupported"`
-  values; the existing schema/parser is entirely untouched.
-- `(capability_ids[0], capability_ids[1])`, as an ordered tuple, must
-  be a member of a new, small, explicit, hand-authored
-  `_ALLOWED_COMPOUND_TEMPLATES: frozenset[tuple[CapabilityId, CapabilityId]]`
-  constant in `intelligence/capability_catalog.py` - never an arbitrary
-  pairing. This phase populates it with exactly one worked example:
-  `(CapabilityId.PROJECT_STATE_UPDATE_PHASE, CapabilityId.PROJECT_STATE_SHOW)`.
-
-## 11. Exact grounding changes
-
-New function in `intelligence/grounding.py`:
-`ground_compound_decision(*, request_text, capability_ids, arguments)`.
-
-- Reuses the existing negation gate (`_contains_negation_marker`)
-  unchanged, applied once to the whole request.
-- Reuses `_grounded_capability_ids(request_text)` unchanged (it is
-  already fully generic over the whole catalog).
-- New rule (answers Q12/Q13 directly): the matched signature set must
-  equal **exactly** `frozenset(capability_ids)` - not merely `len == 1`.
-  This is a strict generalization, not a relaxation: it still refuses
-  the request if it matches zero signatures, a signature outside the
-  declared pair, or only one of the two declared signatures.
-- Each declared capability's own existing per-capability argument-span
-  extraction/attribution logic (`_ARGUMENT_MARKER_BY_CAPABILITY`/
-  `_NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY`) is reused verbatim, applied
-  independently to each of the two steps - answers Q15/Q38/Q39
-  directly: no new attribution philosophy, no cross-step data use.
-- **Step order is trusted from the fixed template, never independently
-  re-derived from the request text** (the honest answer to Q16): this
-  function does not attempt to prove *order* from natural language: it
-  only proves that the declared, already-template-validated pair's
-  signatures are each genuinely evidenced, with no third,
-  unaccounted-for match. Order-faithfulness is guaranteed structurally
-  instead, by requiring the declared pair to exactly match one static,
-  hand-authored, already-ordered template (Q17's answer) - the model
-  can therefore never invent a novel order or pairing, only confirm
-  one of the templates this catalog already allows.
-- One new `UngroundedReason` member,
-  `COMPOUND_TEMPLATE_NOT_ALLOWED` for a syntactically valid pair that
-  is not in `_ALLOWED_COMPOUND_TEMPLATES`; existing reasons
-  (`NO_SIGNATURE_MATCHED`, `MULTIPLE_SIGNATURES_MATCHED`,
-  `MISSING_ARGUMENT_SPAN`, `AMBIGUOUS_ARGUMENT_SPAN`,
-  `ARGUMENT_VALUE_MISMATCH`, `NEGATED_OR_CONFLICTING_REQUEST`) are
-  reused unchanged, applied per step where applicable.
-
-## 12. Exact planning changes
-
-**None in production.** `intelligence/planning.py`'s `select_tool()` is
-not modified in this phase - it never calls
-`parse_compound_tool_selection()`/`ground_compound_decision()`, and
-`_TRUSTED_PLANNING_INSTRUCTION` is not extended to mention the new
-shape. This is a deliberate scope boundary (Section 33): wiring live
-selection is Option C's job, once this foundation is proven.
-
-## 13. Exact workflow-model changes
-
-**None.** `workflow/engine.py`, `planner/plan_models.py`, and
-`workflow/workflow_models.py` are untouched - Section 4's findings
-already confirm they need no change to support more than two steps
-whenever a future phase builds a compound Plan.
-
-## 14. Exact persistence changes
-
-**None.** No new persisted field, table, or schema version. This phase
-produces no `Plan`, no `ApprovalRequest`, and no paused workflow of any
-kind, so nothing new is ever durably written.
-
-## 15. Exact approval design
-
-**Not exercised this phase** - no approval is ever created, since no
-execution path is wired. The architectural answers (Q18-26), based on
-Section 4's confirmed facts about the *already-existing*, unchanged
-`ToolExecutor`/`ApprovalManager`, are recorded here for the future
-execution phase's benefit:
-
-- GREEN→GREEN: both steps run back-to-back automatically, no approval
-  (already how step 2 of today's write+verify shape runs after step 1).
-- GREEN→YELLOW: step 1 runs automatically; step 2 pauses for its own
-  approval, exactly like today's single-YELLOW-step case, just at
-  position 2 instead of 1.
-- YELLOW→GREEN: step 1 pauses for approval; once approved, step 2 runs
-  automatically in the same `resume()` call - this is exactly today's
-  existing write+verify shape's own behavior, unchanged.
-- YELLOW→YELLOW: step 1 pauses; once approved and executed, step 2
-  would itself independently pause for its *own*, separate approval
-  (`ToolExecutor.execute()` classifies every step fresh, every time -
-  confirmed in Section 4 - so a second YELLOW step is never
-  auto-approved by the first's decision). One approval per YELLOW step,
-  never one approval authorizing two (Q22/Q24 - already true of the
-  unmodified `ToolExecutor`/`WorkflowEngine`, needs no new code).
-- Approved arguments are already immutable between approval and
-  execution today (`PendingToolState`/`_PausedWorkflow.resolved_tool_input`
-  are frozen dataclasses, confirmed in Section 4/2) - this holds
-  regardless of step count, unchanged.
-- Approval expiry on a partially completed plan already stops the
-  workflow honestly with no execution of the un-approved step
-  (`WorkflowEngine._reap_stale_paused`/`ApprovalManager._sweep_expired`,
-  confirmed unchanged in Section 4).
-
-## 16. Exact execution design
-
-**Not exercised this phase.** No `Plan` is ever constructed or run.
-
-## 17. Exact verification design
-
-**Not exercised this phase.** `intelligence/verification.py` is
-untouched.
-
-## 18. Exact restart/resume behavior
-
-**Not applicable this phase** - nothing is ever persisted, so there is
-nothing to restart or resume.
-
-## 19. Exact duplicate-prevention behavior
-
-**Not applicable this phase** for the same reason as Section 18.
-
-## 20. Exact partial-completion behavior
-
-**Not applicable this phase.** A future execution phase inherits
-Section 4's already-confirmed honest partial-completion behavior
-(WAITING/FAILED/COMPLETED per step, never fabricated).
-
-## 21. Exact failure-state behavior
-
-`parse_compound_tool_selection()`/`ground_compound_decision()` each
-raise/return their own bounded, non-sensitive failure reason exactly
-like today's single-capability path - no new failure taxonomy beyond
-the one new `UngroundedReason` member (Section 11). No execution
-failure mode exists this phase, since nothing executes.
-
-## 22. Exact final-response behavior
-
-**Not applicable this phase** - no `JarvisResponse` is ever produced
-from this new code path; it is exercised only by its own unit tests.
-
-## 23. Backward compatibility
-
-- `parse_tool_selection()`, `ground_decision()`, `select_tool()`, and
-  every existing `CapabilityId`/`CAPABILITY_CATALOG` entry are
-  byte-for-byte unchanged.
-- The trusted planning instruction is unchanged, so every existing,
-  live "ask jarvis to: ..." request behaves identically.
-- All 756 baseline tests re-run during this planning gate (Section 1)
-  continue to pass unmodified, confirming no regression risk from the
-  facts this plan relies on.
-
-## 24. Data migration analysis
-
-**None required.** No persisted schema, table, or field changes.
-
-## 25. Security analysis
-
-- No new `SecurityManager` rule is needed this phase - no action is
-  ever classified, since nothing executes.
-- The new grounding rule is strictly *more* restrictive than today's
-  single-capability rule in every dimension except the explicit,
-  narrow, hand-authored template allowance - it can never cause a
-  request to be accepted that would have been refused before, since
-  the new code path is never reached from any live decision.
-- The compound-template allowlist (`_ALLOWED_COMPOUND_TEMPLATES`) is
-  trusted, static, hand-authored data - never model-supplied, never
-  derived from parsed output, exactly matching every other trusted
-  catalog table in this codebase.
-
-## 26. Trusted-versus-model-controlled boundaries
-
-- Model-controlled: which two capability ids to declare (from the
-  fixed allowlist only), and each step's own declared argument values
-  (independently validated exactly as today).
-- Trusted, never model-controlled: capability existence/catalog
-  membership, `internal_only` exclusion, the compound-template
-  allowlist itself (and therefore step order), argument-span markers,
-  and the negation-marker list. This mirrors every existing trusted/
-  model-controlled boundary in `intelligence/capability_catalog.py`
-  and `intelligence/grounding.py` exactly - no new boundary philosophy
-  is introduced.
-
-## 27. Required production files
-
-- `intelligence/capability_catalog.py` - new
-  `_ALLOWED_COMPOUND_TEMPLATES` constant and a small accessor.
-- `intelligence/structured_output.py` - new
-  `parse_compound_tool_selection()` and its supporting dataclass(es)/
-  exception reuse.
-- `intelligence/grounding.py` - new `ground_compound_decision()` and
-  one new `UngroundedReason` member.
-
-No other production file changes - `intelligence/planning.py`,
+- Starting HEAD (before any Phase 97 planning): `d7d16ff`.
+- Prior Phase 97 planning commit being amended: `aa4792c`.
+- Verified baseline: 756 focused tests (capability catalog, structured
+  output, grounding, planning, approval manager, workflow engine,
+  pending-approval store, paused-workflow store, trusted workflow
+  foundation, verification, and the three orchestrator workflow test
+  files) all passed, re-confirmed during the prior planning gate and
+  unaffected by this amendment (no production file changes).
+- `dashboard_test.txt` remains untouched, untracked, uncommitted.
+
+## 2. Existing live parser isolation (Planning defect 1)
+
+### 2.1 Inspection
+
+Direct, live inspection (not assumption) of
+`intelligence/structured_output.py` confirms:
+
+- `ToolSelectionDecision` is a two-member `Enum`: `EXECUTE = "execute"`,
+  `UNSUPPORTED = "unsupported"`.
+- `parse_tool_selection()`'s decision handling is exactly:
+  ```python
+  decision_raw = parsed_json["decision"]
+  if decision_raw == "execute":
+      decision = ToolSelectionDecision.EXECUTE
+  elif decision_raw == "unsupported":
+      decision = ToolSelectionDecision.UNSUPPORTED
+  else:
+      raise ToolSelectionParseError("unknown decision value")
+  ```
+  Any string other than these two exact literals - including
+  `"execute_sequence"` - already falls through to the `else` branch and
+  raises today, with **no code change required** to keep rejecting it.
+- `intelligence/planning.py`'s `_TRUSTED_PLANNING_INSTRUCTION` only ever
+  echoes `"execute"`/`"unsupported"` as valid response shapes; it
+  contains no compound/sequence wording of any kind.
+- `core/orchestrator.py` only ever consumes `PlanningOutcome`/
+  `PlanningOutcomeKind` values `select_tool()` itself produces, all of
+  which stem from the single-capability schema.
+
+**Conclusion: adding `"execute_sequence"` as a literal accepted by the
+*existing*, shared `ToolSelectionDecision`/`parse_tool_selection()`
+would be a live-behavior change to the most heavily audited trust
+boundary in the codebase - even though, mechanically, the *rest* of
+`parse_tool_selection()`'s validation logic would still reject a
+two-capability payload today (since `capability_id` is validated as a
+single string). The correctness risk is that a live decision type must
+never be given a member the live parser does not fully, safely handle
+end-to-end; growing that enum for a decision shape the rest of the
+function does not understand is the kind of change this planning
+amendment exists to prevent.**
+
+### 2.2 Required final design
+
+Two wholly new, separate modules - never edited into the existing
+files:
+
+- `intelligence/compound_structured_output.py` (new file):
+  - `CompoundToolSelectionDecision` - its own `Enum` with exactly one
+    member, `EXECUTE_SEQUENCE = "execute_sequence"`. This is a
+    **distinct Python type** from `ToolSelectionDecision`; the two
+    share no class relationship, no common base beyond `Enum` itself,
+    and no instance of one is ever compared with or substitutable for
+    the other.
+  - `ParsedCompoundToolSelection` - its own frozen dataclass (mirrors
+    `ParsedToolSelection`'s shape, but is a distinct class).
+  - `CompoundToolSelectionParseError` - its own exception class (mirrors
+    `ToolSelectionParseError`'s bounded-reason contract, but is a
+    distinct class, so a caller can never confuse a compound parse
+    failure with a live single-capability one via `except` clauses).
+  - `parse_compound_tool_selection(raw_text, catalog, allowed_templates)` -
+    the only entry point; never aliased as, wrapped by, or exposed
+    through `parse_tool_selection()`.
+- `intelligence/compound_grounding.py` (new file):
+  - `CompoundTemplate`, `_ALLOWED_COMPOUND_TEMPLATES`,
+    `CompoundGroundingResult`, `CompoundUngroundedReason`,
+    `ground_compound_decision()` (full design in Section 3).
+
+**Reuse strategy (what may safely be imported, one direction only):**
+both new modules may import already-existing, pure, stateless helper
+functions - `intelligence.structured_output._validate_arguments()`
+(and its own small helpers) for argument-shape validation, and
+`intelligence.grounding._normalize()`, `_padded()`, `_tokenize()`,
+`_contains_negation_marker()`, `_grounded_capability_ids()`,
+`_extract_argument_span()`, `_extract_numeric_argument_span()`,
+`_ARGUMENT_MARKER_BY_CAPABILITY`, and
+`_NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY` for request-text evaluation.
+Every one of these is a pure function of already-real strings/data,
+with **zero coupling to which decision literals the live schema
+accepts** - reusing them avoids duplicating already-audited logic
+without importing anything that could let the live parser's own
+accepted literal set change. The import direction is strictly one-way:
+`compound_structured_output.py`/`compound_grounding.py` may import
+from `structured_output.py`/`grounding.py`; neither existing file, nor
+`intelligence/planning.py`, nor `core/orchestrator.py`, may ever import
+anything from either new file (proved structurally - Section 9).
+Whether the reused helpers are imported as-is (currently
+underscore-prefixed) or first promoted to non-underscore, explicitly
+shared utility names is an implementation-time decision, not a
+planning-gate one - either way changes no existing behavior.
+
+**What must remain byte-for-byte unchanged:** `ToolSelectionDecision`,
+`ParsedToolSelection`, `ToolSelectionParseError`,
+`parse_tool_selection()`, `_TRUSTED_PLANNING_INSTRUCTION`,
+`select_tool()`, every `PlanningOutcomeKind`, and every existing
+`core/orchestrator.py` code path. None of these files are edited by
+this phase at all.
+
+## 3. Ordered clause grounding (Planning defect 2)
+
+### 3.1 Why the prior design was wrong
+
+The version committed at `aa4792c` proposed: "the matched signature set
+must equal exactly `frozenset(capability_ids)`." This is defective for
+two independent reasons:
+
+1. A `frozenset` has no order - comparing two frozensets can never
+   distinguish `(A, B)` from `(B, A)`.
+2. More fundamentally, `_grounded_capability_ids(request_text)` was to
+   be evaluated against the **whole** request string. Swapping the
+   order of two clauses in the text (e.g. "show project state and then
+   update phase to 97" vs. "update phase to 97 and then show project
+   state") produces the *identical* whole-text matched-signature set
+   either way, since both capabilities' tokens are present somewhere in
+   the text regardless of which clause they sit in. The prior design
+   could not have detected reversed order at all, structurally, no
+   matter how its equality check was written.
+
+### 3.2 Corrected design
+
+`_ALLOWED_COMPOUND_TEMPLATES` becomes an **ordered tuple of ordered
+templates**, never a `frozenset`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CompoundTemplate:
+    template_id: str
+    steps: tuple[CapabilityId, CapabilityId]  # position matters
+    connector: str  # the one fixed, padded connector this template splits on
+
+_ALLOWED_COMPOUND_TEMPLATES: tuple[CompoundTemplate, ...] = (
+    CompoundTemplate(
+        template_id="project_state_update_phase_then_show",
+        steps=(
+            CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+            CapabilityId.PROJECT_STATE_SHOW,
+        ),
+        connector=" and then ",
+    ),
+)
+```
+
+`steps` is a 2-tuple - tuple equality is positional, so
+`(PHASE, SHOW) != (SHOW, PHASE)` structurally; no set is ever used
+anywhere in this design. "Expected argument-bearing step" and
+"expected zero-argument step" are **derived, never duplicated**, from
+each step capability's own already-trusted
+`CAPABILITY_CATALOG[capability_id].arguments` tuple (empty means
+zero-argument) - avoiding a second, independently-maintained copy of
+data the catalog already owns.
+
+`ground_compound_decision()`'s algorithm, run in this exact order:
+
+1. Reject on the existing negation gate
+   (`_contains_negation_marker(request_text)`), applied once to the
+   whole request, unchanged.
+2. Look up `(steps[0], steps[1])` (the declared, *structured* order) as
+   a member of `_ALLOWED_COMPOUND_TEMPLATES` by exact positional tuple
+   match. Not found (including the reversed pair) →
+   `TEMPLATE_NOT_ALLOWED`. This alone already rejects a *structurally*
+   reversed declaration, before any text is even examined.
+3. Split the live request into exactly two ordered clauses using the
+   matched template's own `connector` (Section 4). Failure here →
+   `CONNECTOR_MISSING` / `CONNECTOR_REPEATED` / `EMPTY_CLAUSE`.
+4. For **each** clause, independently, at its own fixed position `i`:
+   compute `_grounded_capability_ids(clause_text)` (the existing,
+   unchanged, whole-catalog signature evaluator - now applied to one
+   clause's text alone, not the whole request):
+   - empty → `CLAUSE_NO_SIGNATURE_MATCHED`;
+   - more than one → `CLAUSE_MULTIPLE_SIGNATURES_MATCHED` (this is also
+     how an embedded third action inside a clause is caught - Section
+     6);
+   - exactly one, but not equal to `template.steps[i]` →
+     `CLAUSE_CAPABILITY_MISMATCH` (this is also how a text-level
+     reversed order is caught: swapping the clauses swaps which
+     clause's own text evidences which capability, so the position
+     check now genuinely fails when the request is reversed, unlike
+     the prior whole-text design).
+5. For each clause whose expected capability declares an argument
+   marker (`_ARGUMENT_MARKER_BY_CAPABILITY`/
+   `_NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY`, keyed by
+   `template.steps[i]`), extract that clause's own candidate span and
+   require it to exactly equal the structured step's own already-
+   validated argument value, exactly reusing
+   `_extract_argument_span()`/`_normalize_for_argument_comparison()`.
+   Failure → `CLAUSE_ARGUMENT_MISMATCH`. **This is evaluated only
+   against that one clause's own text** - the other clause's text is
+   never consulted for this step's value (directly closing "text in
+   clause 2 must never supply, complete, alter, or ground the phase
+   value").
+6. All checks pass → `CompoundGroundingResult(grounded=True)`.
+
+This design makes "reject reversed order even when both capability
+names are otherwise present" true in **two independent, redundant**
+ways: a structurally-reversed declared pair fails step 2 before any
+text is read; a text-reversed request (with a correctly-declared pair)
+fails step 4's per-position check. Neither relies on set equality
+anywhere.
+
+## 4. Exact request template
+
+- Exact normalized template:
+  `"update phase to <value> and then show project state"`.
+- Exact fixed, padded connector: `" and then "` (one leading and one
+  trailing space, mirroring the existing padding convention already
+  used for negation markers and argument markers elsewhere in
+  `intelligence/grounding.py`).
+- Splitting algorithm (mirrors `_extract_argument_span()`'s own
+  established count/find/strip technique exactly): pad the whole
+  already-`_normalize()`d request with one leading and trailing space
+  (as `_padded()` already does for negation markers); `count()` the
+  connector in the padded text - zero occurrences →
+  `CONNECTOR_MISSING`; more than one → `CONNECTOR_REPEATED`; otherwise
+  split at the single occurrence into two substrings, `.strip()` each
+  - either side empty → `EMPTY_CLAUSE`.
+- Confirmed against current Phase 92/96 grounding rules: `"update"` and
+  `"phase"` are `PROJECT_STATE_UPDATE_PHASE`'s existing action/domain
+  tokens (Phase 96); `" to "` is its existing, unchanged value marker
+  (Phase 90/96); `"show"` and the adjacent phrase `"project state"` are
+  `PROJECT_STATE_SHOW`'s existing action token/domain phrase (Phase
+  90/92). No new token, phrase, or marker is introduced for either
+  capability - only the new, compound-only `" and then "` connector is
+  new, and it is scoped entirely to the new module. **No conflict with
+  existing signature or value-attribution behavior was found**; the
+  exact template is accepted as specified, with no broadening.
+- No alternative connector (plain `and`, `then` alone, a comma, a
+  semicolon, `after that`) is ever recognized - the splitting function
+  looks for the one exact literal `" and then "` and nothing else, so a
+  plain `" and "` naturally produces zero occurrences (`CONNECTOR_MISSING`)
+  without any extra rejection logic being needed.
+- No inference of order from word position outside this one exact
+  connector - order is established solely by which side of the single
+  `" and then "` occurrence a clause falls on, per Section 3.
+
+## 5. Ordered clause grounding - clause-specific detail
+
+### Clause 1 (must uniquely ground `PROJECT_STATE_UPDATE_PHASE`)
+
+- Contains the required `"update"` action token and `"phase"` domain
+  token (Section 4).
+- Contains exactly one `" to "` value marker (reusing
+  `_extract_argument_span()` unchanged, applied to clause 1's own text).
+- Produces one exact, non-empty phase value, using the existing
+  `_normalize_for_argument_comparison()` normalization and
+  single-trailing-terminal-punctuation policy, unchanged.
+- Rejects negation (whole-request gate, Section 3 step 1), an internal
+  `" or "` alternative within the value span (reusing
+  `_extract_argument_span()`'s own existing check unchanged), and any
+  ambiguity (more than one `" to "` occurrence, or an empty span).
+- Must match the structured step 1 `value` exactly
+  (`CLAUSE_ARGUMENT_MISMATCH` otherwise).
+- **The phase value is attributed only from clause 1's own text.**
+  Clause 2's text is never passed to the value-extraction step for
+  clause 1 under any circumstance - the two clauses are evaluated as
+  fully separate strings from the moment they are split (Section 4),
+  and clause 1's argument check only ever receives clause 1's own
+  substring.
+
+### Clause 2 (must uniquely ground `PROJECT_STATE_SHOW`)
+
+- Contains the accepted `"show"` action token and the adjacent phrase
+  `"project state"` (Section 4).
+- Exposes exactly zero arguments -
+  `PROJECT_STATE_SHOW` has no entry in
+  `_ARGUMENT_MARKER_BY_CAPABILITY`, so no value-extraction step ever
+  runs for this clause; its structured step's `arguments` must simply
+  be `{}` (enforced at the parser level, Section 7).
+- Must match structured step 2 exactly (capability id only - it has no
+  argument to compare).
+- Must not contain another attributable executable argument: since
+  `_grounded_capability_ids(clause_2_text)` must evaluate to exactly
+  `{PROJECT_STATE_SHOW}` (Section 3 step 4), any additional real action
+  embedded in clause 2's own text (e.g. "...and list schedules") is
+  independently caught as `CLAUSE_MULTIPLE_SIGNATURES_MATCHED` before
+  any argument question even arises.
+
+## 6. Extra-signature refusal
+
+Every clause is evaluated against the **complete** current user-facing
+signature catalogue via the unchanged, fully generic
+`_grounded_capability_ids()` - never only against its own expected
+capability's signature in isolation, exactly mirroring the existing
+single-capability rule's own "never merely check the selected
+capability's signature in isolation" philosophy.
+
+Worked refusals for the task's five required examples (all evaluated
+against the one worked template, `PROJECT_STATE_UPDATE_PHASE` →
+`PROJECT_STATE_SHOW`):
+
+1. `"update phase to 97 and then show project state and list
+   schedules"` → clause 2 text is `"show project state and list
+   schedules"`, which matches both `PROJECT_STATE_SHOW` and
+   `SCHEDULE_LIST` → `CLAUSE_MULTIPLE_SIGNATURES_MATCHED`.
+2. `"update phase to 97 and then show project state and show recent
+   memories"` → clause 2 matches both `PROJECT_STATE_SHOW` and
+   `MEMORY_LIST_RECENT` → `CLAUSE_MULTIPLE_SIGNATURES_MATCHED`.
+3. `"show project state and then update phase to 97"` → clause 1 text
+   is `"show project state"`, which uniquely matches `PROJECT_STATE_SHOW`,
+   not the expected position-1 capability
+   (`PROJECT_STATE_UPDATE_PHASE`) → `CLAUSE_CAPABILITY_MISMATCH`
+   (reversed order, caught at the text level).
+4. `"update focus to testing and then show project state"` → clause 1
+   text uniquely matches `PROJECT_STATE_UPDATE_FOCUS` (action
+   `"update"` + domain `"focus"`), not the expected
+   `PROJECT_STATE_UPDATE_PHASE` → `CLAUSE_CAPABILITY_MISMATCH`. (This
+   request would also never reach grounding in practice, since its own
+   correctly-declared structured pair would have to be
+   `(PROJECT_STATE_UPDATE_FOCUS, PROJECT_STATE_SHOW)`, which is not a
+   member of `_ALLOWED_COMPOUND_TEMPLATES` and is already rejected as
+   `TEMPLATE_NOT_ALLOWED` before clause splitting runs - both layers
+   independently refuse this request, by design, in depth.)
+5. `"update phase to 97 and then show schedules"` → clause 2 text
+   uniquely matches `SCHEDULE_LIST`, not the expected
+   `PROJECT_STATE_SHOW` → `CLAUSE_CAPABILITY_MISMATCH`.
+
+No extra supported action is ever silently ignored - every clause's
+full signature set is checked, every time.
+
+## 7. Exact compound structured schema
+
+```json
+{
+  "decision": "execute_sequence",
+  "steps": [
+    {"capability_id": "project_state_update_phase", "arguments": {"value": "..."}},
+    {"capability_id": "project_state_show", "arguments": {}}
+  ]
+}
+```
+
+- Top level: exactly the two keys `{"decision", "steps"}` - any extra
+  top-level key (e.g. a stray `"context"` or `"capability_id"` at the
+  top) is rejected.
+- `"decision"` must equal exactly `"execute_sequence"` (the
+  `CompoundToolSelectionDecision`'s own one member) - any other value
+  is rejected by this parser (it is not a fallback for the existing
+  `"execute"`/`"unsupported"` values, which this parser never accepts
+  either).
+- `"steps"` must be a JSON array of **exactly two** entries - fewer or
+  more are rejected.
+- Each entry must itself be a JSON object (a non-object entry, e.g. a
+  string or array, is rejected) with **exactly** the two keys
+  `{"capability_id", "arguments"}` - a missing key, or an extra key
+  (e.g. a stray `"tier"`, `"verifier_id"`, or `"approval_required"`),
+  is rejected.
+- `capability_id` must name a real `CAPABILITY_CATALOG` member that is
+  not `internal_only` - an unknown string or an internal-only
+  capability (e.g. `project_state_verify_focus`,
+  `schedule_verify_enabled_state`) is rejected.
+- The two steps' `capability_id`s must be distinct - a duplicate (the
+  same capability declared twice) is rejected before any allowlist or
+  grounding check runs.
+- `arguments` must be a JSON object, validated against that specific
+  step's own declared `CapabilityArgumentSpec` tuple by reusing
+  `intelligence.structured_output._validate_arguments()` unchanged -
+  every existing rule (unknown argument name, missing required
+  argument, wrong type, oversized/empty/control-character string) is
+  reused verbatim, per step.
+- This parser never checks `_ALLOWED_COMPOUND_TEMPLATES` membership
+  itself - that is `ground_compound_decision()`'s own first check
+  (Section 3), mirroring how the existing single-capability parser
+  never performs grounding either.
+
+## 8. Internal verifier exclusion
+
+- A compound declaration may name only user-facing capabilities -
+  `parse_compound_tool_selection()` rejects any `internal_only`
+  capability in either position (Section 7), exactly reusing the
+  existing `adapter.internal_only` check `parse_tool_selection()`
+  already applies to a single capability.
+- `PROJECT_STATE_UPDATE_PHASE`'s own existing, fixed internal verifier
+  (`PROJECT_STATE_VERIFY_FOCUS`, reused per Phase 96) is **not** a
+  third compound step and is never declared by the model in this
+  design. The compound pair here names exactly two **user-facing
+  goals** - update the phase, then show the record - both independently
+  real, selectable capabilities today.
+- `PROJECT_STATE_UPDATE_PHASE`'s own future trusted execution lifecycle
+  (its existing `TWO_STEP_WORKFLOW` write-then-verify shape) is
+  entirely unrelated to and untouched by this compound foundation.
+  Should a future phase ever wire this template into real execution,
+  that internal verifier would still run as part of
+  `PROJECT_STATE_UPDATE_PHASE`'s own existing write step - it is never
+  counted as, declared as, or confused with a third compound capability.
+- Phase 97 itself still executes, approves, persists, and verifies
+  nothing (Sections 12-16).
+
+## 9. Bounded failure taxonomy
+
+**Parser-level** (`CompoundToolSelectionParseError`, raised before
+grounding ever runs): malformed JSON/schema (reusing the existing
+2,000-char cap, single-fence-stripping, and duplicate-key rejection
+unchanged), wrong step count, non-object step container, missing
+`capability_id`, missing/malformed `arguments`, extra top-level or step
+fields, unsupported (unknown) capability id, internal-only capability
+declared, duplicate capability declared, and every existing argument
+validation failure reused from `_validate_arguments()`.
+
+**Grounding-level** (`CompoundGroundingResult`/`CompoundUngroundedReason`,
+a new, separate enum - never extending the existing `UngroundedReason`):
+
+- `NEGATED_OR_CONFLICTING_REQUEST` - whole-request negation gate.
+- `TEMPLATE_NOT_ALLOWED` - declared, ordered pair is not a member of
+  `_ALLOWED_COMPOUND_TEMPLATES` (also the first, structural line of
+  defense against a reversed pair).
+- `CONNECTOR_MISSING` - the fixed `" and then "` connector is absent.
+- `CONNECTOR_REPEATED` - the connector occurs more than once.
+- `EMPTY_CLAUSE` - either side of the single connector occurrence is
+  empty after trimming.
+- `CLAUSE_NO_SIGNATURE_MATCHED` - a clause's text matches zero
+  catalogue signatures.
+- `CLAUSE_MULTIPLE_SIGNATURES_MATCHED` - a clause's text matches more
+  than one catalogue signature (the extra-signature-present case,
+  Section 6).
+- `CLAUSE_CAPABILITY_MISMATCH` - a clause's text uniquely matches
+  exactly one signature, but not the one its template position
+  expects (the reversed-order-in-text case, Section 3.2/6).
+- `CLAUSE_ARGUMENT_MISMATCH` - a clause's own extracted value span does
+  not exactly equal its structured step's already-validated argument.
+
+No public wording is added in Phase 97 - none of this taxonomy is ever
+surfaced to a user; it exists only for this phase's own internal test
+assertions (mirroring how `UngroundedReason` itself is never shown
+verbatim to a user today).
+
+## 10. Live-behavior isolation
+
+Phase 97 has zero live behavior. This is required to be proven, not
+merely asserted:
+
+- `_TRUSTED_PLANNING_INSTRUCTION`'s exact text is unchanged (a
+  hash/string-equality regression test against its known-good content).
+- `select_tool()`'s own source contains no reference, by AST inspection,
+  to `compound_structured_output` or `compound_grounding` - no import
+  statement, no `ast.Name`/`ast.Attribute` naming either module or any
+  symbol from it.
+- `core/orchestrator.py`'s own source is checked the same way - no
+  import, no reference.
+- No approval is ever created, no workflow is ever persisted, no
+  `ToolExecutor.execute()` call ever occurs, and no verifier ever runs,
+  as a direct, structural consequence of the above: nothing in the live
+  call graph reaches the new modules at all.
+- `tools/builtin/help_tool.py` and `docs/user_guide.md` are not
+  modified - there is no compound command to document.
+- Every existing single-capability request behaves identically - proved
+  by re-running the full existing test suites for
+  `structured_output.py`/`grounding.py`/`planning.py`/`orchestrator.py`
+  unmodified (Section 17) and confirming the unchanged baseline.
+- No dead branch is added to any live runtime file - the two new
+  modules are never imported by any live file, so there is no branch
+  to add in the first place.
+
+## 11. Immediate concrete consumer
+
+This foundation is justified only because it has one explicit,
+near-term consumer: **a separately approved first bounded compound
+execution for exactly `PROJECT_STATE_UPDATE_PHASE` → `PROJECT_STATE_SHOW`**,
+to be planned and implemented in a future phase once this foundation's
+own test suite is in place and stable. That future phase is not
+planned in detail here (it remains Option C from the prior planning
+gate, deliberately deferred).
+
+**`intelligence/compound_structured_output.py` and
+`intelligence/compound_grounding.py` must not be generalized to a
+second template, a longer allowlist, or any live wiring before that
+consumer phase is separately proposed and approved.** If, at
+implementation time, no such near-term consumer is actually intended,
+the correct action is to **reject Phase 97 outright** rather than build
+unused production architecture - this plan's own justification for
+existing at all rests entirely on that one named, concrete future
+consumer.
+
+## 12-16. Execution, approval, persistence, verification, restart/resume
+
+Unchanged from the prior version of this plan: **none of these are
+exercised this phase.** No `Plan` is built, no `ApprovalRequest` is
+created, nothing is persisted, no `VerificationResult` is produced, and
+there is nothing to restart or resume, since nothing ever executes.
+
+## 17. Required production files
+
+**None.** Two brand-new files only:
+
+- `intelligence/compound_structured_output.py` (new).
+- `intelligence/compound_grounding.py` (new).
+
+Every existing production file - `intelligence/capability_catalog.py`,
+`intelligence/structured_output.py`, `intelligence/grounding.py`,
+`intelligence/planning.py`, `intelligence/verification.py`,
 `core/orchestrator.py`, `workflow/engine.py`,
 `workflow/paused_workflow_store.py`, `approval/approval_manager.py`,
-`security/security_manager.py`, and `tools/executor.py` are all
+`security/security_manager.py`, `tools/executor.py`, `main.py`,
+`docs/user_guide.md`, `tools/builtin/help_tool.py` - remains completely
 untouched.
 
-## 28. Required test files
+## 18. Required test files
 
-- `tests/unit/test_structured_output.py` - extended with a dedicated
-  section for `parse_compound_tool_selection()` (or a new, sibling
-  test file, e.g. `test_structured_output_compound.py`, if the
-  addition is large enough to warrant separation - decided during
-  implementation based on actual size).
-- `tests/unit/test_grounding.py` - extended (or a new sibling file)
-  for `ground_compound_decision()`.
-- `tests/unit/test_capability_catalog.py` - extended for
-  `_ALLOWED_COMPOUND_TEMPLATES`.
+Two brand-new test files, mirroring the two new production files (not
+extensions of existing test files, to keep the "no existing test file
+changes" story trivially provable):
 
-## 29. Focused test matrix
+- `tests/unit/test_compound_structured_output.py` (new).
+- `tests/unit/test_compound_grounding.py` (new).
 
-- Schema: exact key set, duplicate-key rejection, fence stripping,
-  2,000-char cap - all reused/re-verified for the new decision literal.
-- Exactly-two-entries enforcement for `capability_ids`/`arguments`
-  (zero, one, three entries all rejected).
-- Each declared capability independently validated against its own
-  `CapabilityArgumentSpec` (missing required argument, wrong type,
-  oversized string, unknown argument name - one test per rule, per
-  step position).
-- `internal_only` capability named in either position - rejected.
-- Unknown `capability_id` in either position - rejected.
-- Ordered pair present/absent from `_ALLOWED_COMPOUND_TEMPLATES` -
-  present passes structural parsing; absent is rejected with
-  `COMPOUND_TEMPLATE_NOT_ALLOWED` at the grounding layer (not the
-  parsing layer, matching the existing execution-order convention:
-  parse/validate arguments first, ground afterward).
-- Worked example end-to-end: "update jarvis project state phase to
-  <value> and show jarvis project state" grounds successfully for
-  `(PROJECT_STATE_UPDATE_PHASE, PROJECT_STATE_SHOW)`; a request that
-  additionally, coincidentally matches a third signature is refused
-  with `MULTIPLE_SIGNATURES_MATCHED`-equivalent handling generalized
-  to the compound case; a request naming the pair but only evidencing
-  one of the two capabilities in text is refused; a request with the
-  phase value not attributable to the live text is refused
-  (`ARGUMENT_VALUE_MISMATCH`); a negated request
-  ("do not update ... and show ...") is refused
-  (`NEGATED_OR_CONFLICTING_REQUEST`).
-- Structural/AST test proving `select_tool()`/`_TRUSTED_PLANNING_INSTRUCTION`
-  are byte-for-byte unchanged (a diff-based or hash-based regression
-  guard), and that neither calls the new functions - proving the
-  "not wired live" scope boundary holds, not merely asserting it in
-  prose.
+Plus one small, new, structural isolation test file (or a dedicated
+section inside one of the two above):
 
-## 30. Full regression requirements
+- `tests/unit/test_compound_isolation.py` (new) - houses the AST-based
+  import/reference checks (Section 10).
 
-- Full suite in all three required environments (normal,
-  `AI_REASONING_ENABLED=false`, `PYTHON_DOTENV_DISABLED=1`) must match
-  the existing 5203 passed / 3 skipped / 0 failed baseline exactly,
-  since this phase adds tests but changes no existing behavior.
-- Ruff clean on every changed file.
-- `git diff --check` clean.
+## 19. Required tests
 
-## 31. Documentation requirements
+### Existing parser isolation
+1. Full existing `test_structured_output.py` suite passes unmodified.
+2. A new test proves `parse_tool_selection()` raises
+   `ToolSelectionParseError("unknown decision value")` for
+   `{"decision": "execute_sequence", ...}` - and that this required
+   zero code change to achieve.
+3. A new test asserts `_TRUSTED_PLANNING_INSTRUCTION` contains neither
+   `"execute_sequence"` nor `"steps"` as a JSON-shape reference.
+4. An AST-based test asserts `intelligence/planning.py` contains no
+   import of, or reference to, `compound_structured_output` or
+   `compound_grounding`.
+5. An AST-based test asserts `core/orchestrator.py` contains no import
+   of, or reference to, either new module.
 
-- `docs/phase_97_completion_report.md` (created at implementation
-  time) documenting the foundation and its explicit non-goals.
-- No `docs/user_guide.md` or `tools/builtin/help_tool.py` change - no
-  user-visible behavior exists to document (Section 9).
+### Compound parser
+6. The exact allowed two-step schema (Section 7) parses successfully.
+7. One step, and three steps, both reject (wrong step count).
+8. Reversed structured order, `(PROJECT_STATE_SHOW,
+   PROJECT_STATE_UPDATE_PHASE)`, rejects during grounding
+   (`TEMPLATE_NOT_ALLOWED`).
+9. The same capability declared in both positions rejects (duplicate).
+10. An internal-only capability (either verifier) in either position
+    rejects.
+11. An extra top-level field and an extra step field both reject.
+12. A wrong argument type (e.g. an int for `value`) rejects, reusing
+    `_validate_arguments()`.
+13. Existing strict per-capability argument schemas (required/optional,
+    string hygiene, size cap) are proven reused, not reimplemented, via
+    a shared-function-identity or behavior-equivalence test.
 
-## 32. Non-goals
+### Ordered request template
+14. The exact `"update phase to <value> and then show project state"`
+    template grounds successfully for the one worked template.
+15. No connector present rejects (`CONNECTOR_MISSING`).
+16. The connector appearing twice rejects (`CONNECTOR_REPEATED`).
+17. An empty first clause (`"and then show project state"`) rejects.
+18. An empty second clause (`"update phase to 97 and then"`) rejects.
+19. Plain `" and "` (no `"then"`) rejects (`CONNECTOR_MISSING`, no
+    special-cased logic needed).
+20. `"show project state and then update phase to 97"` rejects
+    (`CLAUSE_CAPABILITY_MISMATCH`, text-level reversed order).
+21. Each of the five worked extra-signature examples (Section 6)
+    rejects with the documented reason.
 
-- No live wiring into `select_tool()` or the trusted planning
-  instruction.
-- No `Plan`/`WorkflowEngine` execution of any compound request.
-- No approval, no persistence, no verification of any compound request.
-- No arbitrary capability pairing - only the fixed, hand-authored
-  `_ALLOWED_COMPOUND_TEMPLATES` allowlist.
-- No change to any existing capability, tool, verifier, or the
-  existing single-capability decision path.
-- No schedule creation, memory save, browser/Word/computer/phone
-  control, shell/Python execution, dashboard change, or voice feature.
+### Clause grounding
+22. Clause 1 uniquely grounds `PROJECT_STATE_UPDATE_PHASE`.
+23. Clause 1's exact value matches structured step 1's `value`.
+24. Clause 2 uniquely grounds `PROJECT_STATE_SHOW`.
+25. Clause 2 accepts exactly zero arguments (a non-empty `arguments`
+    for step 2 rejects at the parser level, Section 7).
+26. A phase value present only in clause 2's own text (never clause 1's)
+    is never attributed to clause 1 - `CLAUSE_ARGUMENT_MISMATCH`.
+27. `ground_compound_decision()` never accepts an `AssembledContext`
+    parameter at all - proven by its own signature, mirroring
+    `ground_decision()`'s existing contract.
+28. A negated/conflicting compound request refuses
+    (`NEGATED_OR_CONFLICTING_REQUEST`).
+29. A wrong phase value (matching neither clause 1's text nor a
+    plausible variant) refuses (`CLAUSE_ARGUMENT_MISMATCH`).
+30. An "expanded" phase value (declared value is a superset of the text
+    span, or vice versa) refuses (`CLAUSE_ARGUMENT_MISMATCH`), exactly
+    reusing today's exact-equality rule.
+31. A structured pair naming `PROJECT_STATE_UPDATE_FOCUS` (or any other
+    ProjectState field) instead of `PROJECT_STATE_UPDATE_PHASE` rejects
+    at the parser/allowlist layer (`TEMPLATE_NOT_ALLOWED`) - only the
+    one worked template is ever supported.
+32. The full, existing `test_grounding.py` suite passes unmodified -
+    single-capability grounding behavior is untouched.
 
-## 33. Deferred work
+### No side effects
+33. No `SecurityManager.classify_action()` call occurs anywhere in
+    either new module (grep/AST-based).
+34. No `ApprovalManager` reference of any kind in either new module.
+35. No `PausedWorkflowStore`/`PendingApprovalStore` reference in either
+    new module.
+36. No `ToolExecutor` reference in either new module.
+37. No `intelligence.verification` reference in either new module.
+38. No `JarvisResponse` is ever constructed by either new module.
+39. `docs/user_guide.md` and `tools/builtin/help_tool.py` have zero
+    diff versus their current committed content.
 
-- Wiring `parse_compound_tool_selection()`/`ground_compound_decision()`
-  into `select_tool()` and the trusted planning instruction (this is
-  Option C's own future scope, only attempted once this foundation's
-  own test suite has been in place and stable).
-- Building the actual compound `Plan` construction, execution,
-  approval, and verification machinery (Option C).
-- Expanding `_ALLOWED_COMPOUND_TEMPLATES` beyond the one worked
-  example.
-- The post-execution data-propagation gap identified in Phase 96's own
-  planning gate (`SCHEDULE_CREATE`/`MEMORY_SAVE`) remains fully
-  deferred, unrelated to this phase's scope.
-- Option B (durable sequential workflow foundation) and Option D
-  (outcome/task context foundation) both remain available future
-  candidates, neither selected this cycle.
+## 20. Implementation scope reassessment
 
-## 34. Stop conditions
+A small, one-batch Phase 97 remains fully justified after these
+corrections - if anything, more so than before, since the corrected
+design touches **zero existing production files** (versus the prior
+version's three):
 
-None of the task's listed stop conditions apply to the selected
-design: it changes no persisted workflow, requires no persistence
-migration, adds no model-authored step, does not weaken unique
-grounding (it strictly generalizes it, gated by a trusted, static
-allowlist), infers no argument not attributable to the live request,
-lets no approval authorize more than its own step (approval is not
-exercised at all this phase), never reruns a completed step, calls no
-tool `run()` directly, mutates no store directly from the Intelligence
-Core, adds no orchestrator branch of any kind (orchestrator is
-untouched), verifies nothing unverified (nothing executes), retries or
-replans nothing, and is small enough for one controlled phase (three
-files, all additive, zero live behavior change).
+- New: `intelligence/compound_structured_output.py`,
+  `intelligence/compound_grounding.py`.
+- New tests: `test_compound_structured_output.py`,
+  `test_compound_grounding.py`, `test_compound_isolation.py`.
+- New docs: `docs/phase_97_completion_report.md`.
 
-## 35. Implementation batch structure
+No existing single-capability decision type, parser, `select_tool()`,
+planning control flow, orchestrator, `SecurityManager`,
+`ApprovalManager`, workflow persistence, `ToolExecutor`, verification,
+`main.py` wiring, user guide, or help output is modified. If
+implementation discovers this scope cannot actually be held (for
+example, if a genuinely new shared type turns out to be unavoidable),
+the correct action is to **stop and recommend combining this
+foundation with its first concrete execution consumer in a later,
+larger phase instead** - not to weaken the isolation guarantee to fit
+one phase.
 
-A single implementation batch is sufficient given the phase's small,
-additive, non-live-wired scope:
+## 21. Non-goals (unchanged, reaffirmed)
 
-- Batch 1 (only batch): `_ALLOWED_COMPOUND_TEMPLATES` +
-  `parse_compound_tool_selection()` + `ground_compound_decision()` +
-  full test coverage (Section 29) + regression + documentation +
-  completion report.
+No live wiring into `select_tool()` or the trusted planning
+instruction; no `Plan`/`WorkflowEngine` execution; no approval,
+persistence, or verification of any compound request; no arbitrary
+capability pairing beyond the one hand-authored template; no change to
+any existing capability, tool, verifier, or the existing
+single-capability decision path; no second template; no schedule
+creation, memory save, browser/Word/computer/phone control,
+shell/Python execution, dashboard change, or voice feature.
 
-## 36. Formal planning-gate conclusion
+## 22. Deferred work (unchanged, reaffirmed)
+
+Wiring the new modules into `select_tool()`/the trusted instruction;
+building the actual compound `Plan`/execution/approval/verification
+machinery; expanding `_ALLOWED_COMPOUND_TEMPLATES` beyond the one
+worked example; the post-execution data-propagation gap from Phase
+96's own planning gate (`SCHEDULE_CREATE`/`MEMORY_SAVE`); Option B
+(durable sequential workflow foundation, already shown largely
+unnecessary given the engine's existing generality) and Option D
+(outcome/task context foundation) both remain available, unselected,
+future candidates.
+
+## 23. Updated stop conditions
+
+Stop and report a conflict if implementation would require: any
+existing production file to change; the existing `ToolSelectionDecision`
+or `UngroundedReason` enums to gain a member; any live wiring of the
+new modules; a second compound template before the named consumer
+phase is approved; unordered-set-based order proof of any kind; a
+capability pairing outside the one hand-authored allowlist; an
+approval, persisted workflow, `ToolExecutor` call, or verifier call
+from either new module; or any user-visible command/help/documentation
+change. None of these conditions are triggered by the design in this
+amendment.
+
+## 24. Updated acceptance criteria
+
+Phase 97 implementation is acceptance-ready only when all of the
+following hold simultaneously: (1) both new modules exist, are mutually
+consistent with this plan's exact schema/algorithm; (2) zero diff to
+any existing production file; (3) all 39 tests in Section 19 pass; (4)
+the full existing suite (5203 passed / 3 skipped / 0 failed baseline)
+is reproduced exactly, in all three required environments; (5) Ruff
+and `git diff --check` are clean; (6) the AST-based isolation tests
+(items 4, 5, 33-38) pass, structurally proving zero live reachability;
+(7) the completion report documents the one named future consumer
+(Section 11) and explicitly states no further generalization occurs
+before it is separately approved.
+
+## 25. Formal planning-gate conclusion (reaffirmed)
 
 The live architecture does not yet safely support representing more
-than one model-selected capability per request; the single, real
-blocking cause is `intelligence/grounding.py`'s uniqueness rule, not
-the execution/persistence/approval layer, which already generalizes to
-an arbitrary step count (confirmed by direct inspection, Section 4).
-The safest, smallest, highest-reuse-value next phase is therefore a
-grounding-and-parsing-only foundation, built and fully tested in
-isolation, with zero live behavior change and zero execution risk,
-explicitly deferring actual compound execution (Option C) to a later,
-separately-planned phase once this foundation is proven. This
-conclusion is offered with the evidence, in Sections 4-6, to support
-it, and does not trigger any of the task's stop conditions.
+than one model-selected capability per request; the real blocking
+cause remains `intelligence/grounding.py`'s uniqueness rule, not the
+execution/persistence/approval layer, which already generalizes past
+two steps. This amendment corrects the two defects identified in the
+prior planning commit (`aa4792c`) - a live-schema isolation risk and an
+order-blind grounding check - by moving the entire foundation into two
+new, wholly separate modules the live path never imports, and by
+replacing unordered set comparison with a genuinely ordered,
+connector-based clause split independently grounded per position. The
+design continues to trigger none of this task's stop conditions and
+remains small enough for one controlled implementation phase.
