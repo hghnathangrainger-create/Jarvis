@@ -400,13 +400,14 @@ def test_capability_adapter_field_is_never_exposed_as_a_model_facing_argument() 
         assert "paired_verify_capability_id" not in declared_argument_names
 
 
-def test_exactly_two_two_step_workflow_capabilities_exist_in_the_real_catalog() -> (
+def test_exactly_three_two_step_workflow_capabilities_exist_in_the_real_catalog() -> (
     None
 ):
-    """Phase 94, Batch 2 adds exactly one second production workflow
-    consumer, SCHEDULE_ENABLE - proving the Batch 1 foundation
-    generalization genuinely supports a second TWO_STEP_WORKFLOW
-    capability, and confirming no third one exists."""
+    """Phase 94, Batch 2 added the second production workflow consumer,
+    SCHEDULE_ENABLE; Phase 95 adds the third, SCHEDULE_DISABLE -
+    proving the Batch 1 foundation generalization genuinely supports a
+    third TWO_STEP_WORKFLOW capability with zero orchestrator dispatch
+    change, and confirming no fourth one exists."""
     two_step_capabilities = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -415,19 +416,21 @@ def test_exactly_two_two_step_workflow_capabilities_exist_in_the_real_catalog() 
     assert two_step_capabilities == {
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
     }
 
 
-def test_schedule_enable_capability_exists_and_no_further_expansion_occurred() -> (
+def test_schedule_disable_capability_exists_and_no_further_expansion_occurred() -> (
     None
 ):
-    """Confirms Batch 2 added exactly the two capabilities its own
-    scope names - SCHEDULE_ENABLE and SCHEDULE_VERIFY_ENABLED_STATE -
-    and nothing else: no SCHEDULE_DISABLE, no SCHEDULE_CREATE, and the
-    real catalog contains exactly these eleven members."""
-    assert any(member is CapabilityId.SCHEDULE_ENABLE for member in CapabilityId)
-    assert not any("SCHEDULE_DISABLE" in member.name for member in CapabilityId)
+    """Confirms Phase 95 added exactly one new capability - SCHEDULE_DISABLE,
+    reusing the existing SCHEDULE_VERIFY_ENABLED_STATE verifier - and
+    nothing else: no SCHEDULE_CREATE, no schedule update/delete, and
+    the real catalog contains exactly these twelve members."""
+    assert any(member is CapabilityId.SCHEDULE_DISABLE for member in CapabilityId)
     assert not any("SCHEDULE_CREATE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_UPDATE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_DELETE" in member.name for member in CapabilityId)
     assert {member.value for member in CapabilityId} == {
         "project_state_show",
         "project_state_update_focus",
@@ -440,10 +443,11 @@ def test_schedule_enable_capability_exists_and_no_further_expansion_occurred() -
         "workflow_history",
         "schedule_enable",
         "schedule_verify_enabled_state",
+        "schedule_disable",
     }
 
 
-def test_schedule_verifier_strategy_id_is_the_only_new_one() -> None:
+def test_schedule_verifier_strategy_ids_are_the_only_new_ones() -> None:
     strategy_ids = {
         adapter.verification_strategy_id
         for adapter in CAPABILITY_CATALOG.values()
@@ -452,6 +456,7 @@ def test_schedule_verifier_strategy_id_is_the_only_new_one() -> None:
     assert strategy_ids == {
         "project_state_focus_exact_match",
         "schedule_enabled_exact_match",
+        "schedule_disabled_exact_match",
     }
 
 

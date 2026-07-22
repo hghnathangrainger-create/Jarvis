@@ -5,23 +5,27 @@ Exact, deterministic verification for Jarvis's verified write
 workflows: the original Batch 3 workflow, "ask jarvis to: update my
 project focus to X and confirm it" (Phase 90, Batch 3; contracts fixed
 by docs/phase_90_implementation_plan.md, Sections 24.C.15/C.16 and the
-Batch 3 planning prompt), and the Phase 94, Batch 2 schedule-enable
+Batch 3 planning prompt); the Phase 94, Batch 2 schedule-enable
 workflow, "ask jarvis to: enable schedule <id>" (contracts fixed by
-docs/phase_94_implementation_plan.md, Section 14).
+docs/phase_94_implementation_plan.md, Section 14); and the Phase 95
+schedule-disable workflow, "ask jarvis to: disable schedule <id>"
+(contracts fixed by docs/phase_95_implementation_plan.md), which
+reuses the schedule-enable verifier function unchanged, only with
+expected_enabled=False and its own distinct verifier_id.
 
 Responsibilities:
     - Define VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE/
       NOT_REQUIRED) and VerificationResult - the only verification
-      contracts either workflow actually consumes.
+      contracts any of the three workflows actually consumes.
     - Compare the write step's real, expected focus value against the
       verify step's real, structured ToolResult.metadata["focus"] -
       exact string equality only, never a substring, fuzzy match, or
       AI judgement call.
-    - Compare the fixed, trusted expected enabled state (always True)
-      against the verify step's real, structured
-      ToolResult.metadata["enabled"] - exact boolean identity only,
-      never a truthiness check or a comparison against anything
-      model-supplied.
+    - Compare a fixed, trusted expected enabled state (True for
+      enable, False for disable) against the verify step's real,
+      structured ToolResult.metadata["enabled"] - exact boolean
+      identity only, never a truthiness check or a comparison against
+      anything model-supplied.
 
 Does NOT:
     - Parse any tool's human-readable output text. Verification reads
@@ -30,16 +34,18 @@ Does NOT:
       tools/builtin/schedule_verify_enabled_state_tool.py already
       populate with real, structured fields.
     - Call ToolExecutor, WorkflowEngine, or any AI provider. This
-      module is a pure function of two already-real values to a
-      VerificationResult, for either workflow.
+      module is a pure function of already-real values to a
+      VerificationResult, for any of the three workflows.
     - Retry, replan, or re-run anything. A single call answers a
       single question once; the caller (core/orchestrator.py) decides
       what to do with the answer, and never calls this twice for the
       same workflow attempt.
-    - Accept a model-supplied expected value for the schedule-enable
-      verifier. The expected enabled state is always the fixed literal
-      True, supplied only by the trusted caller - never an argument a
-      model output could influence.
+    - Accept a model-supplied expected value for the schedule-enable/
+      disable verifier. The expected enabled state is always a fixed
+      literal (True or False), supplied only by the trusted caller -
+      never an argument a model output could influence. The same is
+      true of verifier_id - always the caller's own catalog-declared
+      verification_strategy_id, never inferred or model-supplied.
 """
 
 from __future__ import annotations
@@ -58,6 +64,14 @@ FOCUS_EXACT_MATCH_VERIFIER_ID = "project_state_focus_exact_match"
 #: CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE].verification_strategy_id
 #: exactly.
 SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID = "schedule_enabled_exact_match"
+
+#: The one verifier Phase 95 defines. Fixed, not derived from any model
+#: output or configuration - matches
+#: CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE].verification_strategy_id
+#: exactly. Reuses verify_schedule_enabled_state() unchanged in body -
+#: only this distinct label, and the trusted expected_enabled=False
+#: literal, differ from SCHEDULE_ENABLE's own call.
+SCHEDULE_DISABLED_EXACT_MATCH_VERIFIER_ID = "schedule_disabled_exact_match"
 
 #: Evidence strings are bounded to this many characters - real, never
 #: fabricated, and never a raw dictionary or secret value.
@@ -155,39 +169,55 @@ def verify_focus_update(
 
 
 def verify_schedule_enabled_state(
-    *, expected_enabled: bool, verify_tool_result: ToolResult | None
+    *,
+    expected_enabled: bool,
+    verify_tool_result: ToolResult | None,
+    verifier_id: str,
 ) -> VerificationResult:
-    """Compare the fixed, trusted expected enabled state (always True)
-    against the real, structured verify-step result (Phase 94, Batch
-    2 - docs/phase_94_implementation_plan.md, Section 14).
+    """Compare a fixed, trusted expected enabled state against the
+    real, structured verify-step result (Phase 94, Batch 2 -
+    docs/phase_94_implementation_plan.md, Section 14; genericized over
+    which boolean is expected in Phase 95 -
+    docs/phase_95_implementation_plan.md - with zero change to this
+    function's own comparison logic).
 
     Mirrors verify_focus_update()'s exact shape and outcome taxonomy,
     with the one deliberate difference the underlying field's own type
     requires: boolean identity comparison, never a string comparison.
+    Shared verbatim by both SCHEDULE_ENABLE (expected_enabled=True) and
+    SCHEDULE_DISABLE (expected_enabled=False) - never a second
+    near-duplicate function.
 
     Args:
-        expected_enabled: The fixed, trusted expected state - always
-            True for the enable workflow. Never model-supplied; the
-            caller (intelligence/planning.py's workflow-builder) always
-            passes the literal True, matching the write capability's
-            own intent, never a value read from parsed model output.
+        expected_enabled: The fixed, trusted expected state - True for
+            the enable workflow, False for the disable workflow. Never
+            model-supplied; each caller (core/orchestrator.py's own
+            capability-specific response-builder) always passes a
+            fixed literal matching its own write capability's intent,
+            never a value read from parsed model output.
         verify_tool_result: The verify step's real ToolResult, or None
             if the verify step never ran at all (e.g. the write step
             itself failed and the workflow stopped before step 2).
+        verifier_id: The fixed, trusted verifier id to attach to the
+            returned VerificationResult - always the caller's own
+            catalog-declared verification_strategy_id
+            (SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID or
+            SCHEDULE_DISABLED_EXACT_MATCH_VERIFIER_ID), never inferred
+            from expected_enabled or any other value.
 
     Returns:
         VERIFIED if the verify step ran successfully and its
         metadata["enabled"] is exactly expected_enabled. FAILED if the
         verify step ran successfully but the values genuinely differ
-        (the schedule exists but is not enabled). UNAVAILABLE if the
-        verify step did not run, its ToolResult was not a success
-        (including a genuine missing-schedule failure), or its
-        metadata carried no usable "enabled" key.
+        (the schedule exists but is not in the expected state).
+        UNAVAILABLE if the verify step did not run, its ToolResult was
+        not a success (including a genuine missing-schedule failure),
+        or its metadata carried no usable "enabled" key.
     """
     if verify_tool_result is None or not verify_tool_result.success:
         return VerificationResult(
             outcome=VerificationOutcome.UNAVAILABLE,
-            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            verifier_id=verifier_id,
             evidence="",
             detail="the verification step did not complete successfully",
         )
@@ -196,7 +226,7 @@ def verify_schedule_enabled_state(
     if not isinstance(actual, bool):
         return VerificationResult(
             outcome=VerificationOutcome.UNAVAILABLE,
-            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            verifier_id=verifier_id,
             evidence="",
             detail="the verification step returned no usable enabled state",
         )
@@ -205,14 +235,14 @@ def verify_schedule_enabled_state(
     if actual is expected_enabled:
         return VerificationResult(
             outcome=VerificationOutcome.VERIFIED,
-            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+            verifier_id=verifier_id,
             evidence=evidence,
             detail=None,
         )
 
     return VerificationResult(
         outcome=VerificationOutcome.FAILED,
-        verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
+        verifier_id=verifier_id,
         evidence=evidence,
         detail="the stored enabled state does not match the requested state",
     )

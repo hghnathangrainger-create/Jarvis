@@ -1042,3 +1042,137 @@ def test_schedule_verify_enabled_state_is_rejected_from_ai_output_even_though_ca
     )
     reason = _fails(text, catalog=CAPABILITY_CATALOG)
     assert reason == "capability is internal-only and cannot be selected"
+
+
+# --- Phase 95: schedule_disable validation -----------------------------------
+
+
+def _schedule_disable_text(arguments: object) -> str:
+    return json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "schedule_disable",
+            "arguments": arguments,
+        }
+    )
+
+
+def test_schedule_disable_valid_selection() -> None:
+    result = parse_tool_selection(
+        _schedule_disable_text({"schedule_id": 5}), CAPABILITY_CATALOG
+    )
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.SCHEDULE_DISABLE
+    assert result.arguments == {"schedule_id": 5}
+
+
+@pytest.mark.parametrize("schedule_id", [0, 1, 5, 999999999, -1])
+def test_schedule_disable_accepts_any_real_integer_with_no_invented_bounds(
+    schedule_id: int,
+) -> None:
+    """No maximum/minimum bound is declared or enforced at this schema
+    layer - identical rule to schedule_enable's own."""
+    result = parse_tool_selection(
+        _schedule_disable_text({"schedule_id": schedule_id}), CAPABILITY_CATALOG
+    )
+    assert result.arguments == {"schedule_id": schedule_id}
+
+
+def test_schedule_disable_missing_schedule_id_is_rejected() -> None:
+    reason = _fails(_schedule_disable_text({}), catalog=CAPABILITY_CATALOG)
+    assert reason == "missing required argument"
+
+
+def test_schedule_disable_null_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": None}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+@pytest.mark.parametrize("schedule_id", [True, False])
+def test_schedule_disable_bool_schedule_id_is_rejected(schedule_id: bool) -> None:
+    """Python bool is an int subclass - isinstance(True, int) is True -
+    so this must be explicitly, deliberately rejected, never silently
+    accepted as 1/0."""
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": schedule_id}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_disable_string_schedule_id_is_rejected_not_coerced() -> None:
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": "5"}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_disable_float_schedule_id_is_rejected_not_coerced() -> None:
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": 5.0}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_disable_array_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": [5]}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+def test_schedule_disable_object_schedule_id_is_rejected() -> None:
+    reason = _fails(
+        _schedule_disable_text({"schedule_id": {"id": 5}}), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "invalid argument type"
+
+
+@pytest.mark.parametrize(
+    "stray_arguments",
+    [
+        {"schedule_id": 5, "enabled": False},
+        {"schedule_id": 5, "expected_enabled": False},
+        {"schedule_id": 5, "expected_state": False},
+        {"schedule_id": 5, "verifier": "schedule_disabled_exact_match"},
+        {"schedule_id": 5, "verification_strategy_id": "schedule_disabled_exact_match"},
+        {"schedule_id": 5, "tool_name": "schedule_disable"},
+        {"schedule_id": 5, "operation": "disable"},
+        {"schedule_id": 5, "schedule_name": "daily digest"},
+        {"enabled": False},
+    ],
+)
+def test_schedule_disable_rejects_any_extra_argument(
+    stray_arguments: dict[str, object],
+) -> None:
+    reason = _fails(
+        _schedule_disable_text(stray_arguments), catalog=CAPABILITY_CATALOG
+    )
+    assert reason == "unknown argument name in model output"
+
+
+@pytest.mark.parametrize(
+    "malformed_arguments_json",
+    ['"not an object"', "[]", "null", "42", "true", "false"],
+)
+def test_schedule_disable_rejects_malformed_arguments_container(
+    malformed_arguments_json: str,
+) -> None:
+    text = (
+        '{"decision": "execute", "capability_id": "schedule_disable", '
+        '"arguments": ' + malformed_arguments_json + "}"
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "arguments must be a JSON object"
+
+
+def test_schedule_disable_declares_exactly_one_required_int_argument() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE]
+    assert [spec.name for spec in adapter.arguments] == ["schedule_id"]
+    assert adapter.arguments[0].type_name == "int"
+    assert adapter.arguments[0].required is True
+
+
+def test_schedule_disable_is_not_internal_only() -> None:
+    assert CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE].internal_only is False

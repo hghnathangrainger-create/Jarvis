@@ -299,11 +299,12 @@ class _IntentSignature:
     qualifier_tokens: tuple[str, ...] = ()
 
 
-#: Exactly the nine model-selectable capabilities (Section 20.2's
+#: Exactly the ten model-selectable capabilities (Section 20.2's
 #: final table for the original six; docs/phase_93_implementation_plan.md
 #: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1;
 #: docs/phase_94_implementation_plan.md, Section 6, for SCHEDULE_ENABLE,
-#: added Phase 94, Batch 2). project_state_verify_focus and
+#: added Phase 94, Batch 2; docs/phase_95_implementation_plan.md for
+#: SCHEDULE_DISABLE, added Phase 95). project_state_verify_focus and
 #: schedule_verify_enabled_state are both deliberately absent - both
 #: are internal_only and can never be a parsed EXECUTE decision's
 #: capability_id (intelligence/structured_output.py already rejects
@@ -369,6 +370,13 @@ _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
         # a third, disambiguating dimension the way memory_list_recent/
         # approval_history/workflow_history each need "recent"/"history".
     ),
+    CapabilityId.SCHEDULE_DISABLE: _IntentSignature(
+        action_tokens=("disable",),
+        domain_tokens=("schedule", "schedules"),
+        # Phase 95: no qualifier needed - "disable" is not an action
+        # token of any other signature (including SCHEDULE_ENABLE's own
+        # "enable"), so no collision requires a third dimension.
+    ),
 }
 
 
@@ -408,7 +416,7 @@ def _signature_matches(
 
 
 def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
-    """Evaluate the live request against every one of the nine
+    """Evaluate the live request against every one of the ten
     catalogue signatures (Section 20.3's catalogue-wide rule) - never
     only the model-selected capability's own signature in isolation.
 
@@ -451,6 +459,13 @@ _ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
 #: parsed and compared as an int, never as a string.
 _NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
     CapabilityId.SCHEDULE_ENABLE: " schedule ",
+    # Phase 95: shared verbatim with SCHEDULE_ENABLE - safe because
+    # ground_decision() resolves a unique matching *signature* first
+    # (disambiguated by action_tokens: "enable" vs "disable"), and only
+    # then extracts the argument using that one matched capability's
+    # own marker. "enable schedule 5" and "disable schedule 5" are
+    # never ambiguous with each other.
+    CapabilityId.SCHEDULE_DISABLE: " schedule ",
 }
 
 

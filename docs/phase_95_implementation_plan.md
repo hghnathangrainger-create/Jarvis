@@ -348,3 +348,31 @@ Implementation must stop and report, never improvise past, if any of the followi
 ## 21. Manual Anthropic Limitation
 
 Live Anthropic manual acceptance testing remains **postponed** because the configured API account lacks sufficient credits. This is an **external account limitation, not a Jarvis production-code failure** - no production behavior is proposed to bypass it, and Phase 95 (if implemented) will be verified the same way every prior phase has been: repository-level deterministic, fake-provider, grounding, security, `ToolExecutor`, real-SQLite, and full-suite tests.
+
+---
+
+## 22. Implementation and Closure Evidence
+
+**Status: complete. Phase 95 is formally closed by this section and the accompanying `docs/phase_95_completion_report.md`.**
+
+### 22.1 What was built, exactly as planned
+
+`SCHEDULE_DISABLE` was added to `intelligence/capability_catalog.py` exactly as specified in §13, reusing `SCHEDULE_VERIFY_ENABLED_STATE` verbatim as its `paired_verify_capability_id` (Option A, §7/§8). One new grounding signature and one reused numeric-marker entry were added to `intelligence/grounding.py` exactly as specified in §9. `_TRUSTED_PLANNING_INSTRUCTION` in `intelligence/planning.py` was extended to ten capabilities. One new orchestrator response-builder method, `_schedule_disable_workflow_result_to_response()`, was added to `core/orchestrator.py` and registered as a one-line entry in the existing `response_builders` dict inside `_translate_verified_workflow_result()` - no new recognition branch, confirmed by the same structural test used to verify Phase 94 Batch 3's correction (`test_translate_verified_workflow_result_has_no_per_capability_if_chain`, unmodified and still passing).
+
+### 22.2 One necessary correction beyond the plan's exact original wording
+
+`intelligence/verification.py::verify_schedule_enabled_state()` was found, during implementation, to hardcode `verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID` in all three of its `VerificationResult` constructions - meaning a naive reuse for `SCHEDULE_DISABLE` would have produced verification results dishonestly labelled with `SCHEDULE_ENABLE`'s own verifier id. Corrected by adding an explicit, required `verifier_id: str` parameter (no default, no inference) to the function, with each of the two real call sites in `core/orchestrator.py` passing its own catalog-declared constant. The function's comparison logic itself (`actual is expected_enabled`) was not changed. This is the smallest possible fix consistent with the plan's own Option A selection and did not require a new function, a new verifier tool, or a new capability.
+
+### 22.3 Verification results
+
+- Focused (14 files, run together): **1218 passed**.
+- New `tests/unit/test_orchestrator_schedule_disable_workflow.py`: **36 passed**.
+- Full suite, normal environment: **5090 passed, 3 skipped, 0 failed**.
+- Full suite, `AI_REASONING_ENABLED=false`: **5090 passed, 3 skipped, 0 failed** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **5090 passed, 3 skipped, 0 failed** - identical.
+- Ruff, Git-derived file set (`git diff --name-only 35af9df -- '*.py'` plus one new untracked file): exactly **12 files**. `ruff check` on all 12: **all checks passed, exit code 0, zero findings**.
+- `git diff --check`: exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 22.4 Scope confirmation
+
+No `SCHEDULE_CREATE`, schedule update/delete/name-targeting, second verifier tool or capability, model-selectable expected state, new `SecurityManager` rule, or tier change was added. `SCHEDULE_ENABLE` and `PROJECT_STATE_UPDATE_FOCUS` remain provably bit-for-bit unchanged (all their pre-existing tests pass unmodified). `docs/phase_95_completion_report.md` was created. Phase 95 is formally closed. Phase 96 has not been started.

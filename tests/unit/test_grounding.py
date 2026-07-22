@@ -1207,3 +1207,271 @@ def test_schedule_enable_signature_is_absent_of_unsupported_synonyms() -> None:
         result = _ground(synonym_phrase, CapabilityId.SCHEDULE_ENABLE, schedule_id=5)
         assert result.grounded is False
         assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+# ---------------------------------------------------------------------------
+# 15. Phase 95: SCHEDULE_DISABLE signature and numeric attribution.
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_disable_real_phrasing_is_grounded() -> None:
+    result = _ground(
+        "disable schedule 5", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is True
+
+
+def test_schedule_disable_exact_id_is_extracted() -> None:
+    result = _ground(
+        "disable schedule 12", CapabilityId.SCHEDULE_DISABLE, schedule_id=12
+    )
+    assert result.grounded is True
+
+
+def test_schedule_disable_wrong_id_refuses() -> None:
+    result = _ground(
+        "disable schedule 5", CapabilityId.SCHEDULE_DISABLE, schedule_id=6
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.ARGUMENT_VALUE_MISMATCH
+
+
+def test_schedule_disable_missing_marker_refuses() -> None:
+    result = _ground(
+        "please disable it", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_disable_multiple_markers_refuses() -> None:
+    result = _ground(
+        "disable schedule 5 and schedule 6",
+        CapabilityId.SCHEDULE_DISABLE,
+        schedule_id=5,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_schedule_disable_multiple_numeric_targets_after_one_marker_refuses() -> None:
+    result = _ground(
+        "disable schedule 5 6", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_schedule_disable_invalid_numeric_target_refuses() -> None:
+    """A negative-looking or otherwise non-digit-only span is never
+    guessed at - no sign guessing, no fuzzy extraction."""
+    result = _ground(
+        "disable schedule -5", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_schedule_disable_ambiguous_trailing_target_text_refuses() -> None:
+    result = _ground(
+        "disable schedule 5 please", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_schedule_disable_negated_request_refuses() -> None:
+    result = _ground(
+        "do not disable schedule 5", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NEGATED_OR_CONFLICTING_REQUEST
+
+
+def test_schedule_disable_action_without_domain_refuses() -> None:
+    result = _ground(
+        "please disable this", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_domain_without_disable_action_refuses() -> None:
+    result = _ground(
+        "show my schedule 5 please", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_schedule_disable_alone_grounds_nothing() -> None:
+    """The bare word "disable" alone, without any domain evidence,
+    matches no signature at all."""
+    result = _ground("disable please", CapabilityId.SCHEDULE_DISABLE, schedule_id=5)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_alone_grounds_nothing() -> None:
+    """The bare word "schedule" alone, without any action evidence,
+    matches no signature at all."""
+    result = _ground("schedule 5 please", CapabilityId.SCHEDULE_DISABLE, schedule_id=5)
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_disable_does_not_collide_with_schedule_list() -> None:
+    result = _ground(
+        "show my schedules", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_schedule_disable_and_enable_remain_separate_capabilities() -> None:
+    """A valid enable request grounds only SCHEDULE_ENABLE, and a valid
+    disable request grounds only SCHEDULE_DISABLE - neither signature
+    is satisfied by the other's real phrasing."""
+    enable_result = _ground(
+        "enable schedule 5", CapabilityId.SCHEDULE_ENABLE, schedule_id=5
+    )
+    assert enable_result.grounded is True
+
+    disable_result = _ground(
+        "disable schedule 5", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert disable_result.grounded is True
+
+    enable_selected_for_disable_request = _ground(
+        "disable schedule 5", CapabilityId.SCHEDULE_ENABLE, schedule_id=5
+    )
+    assert enable_selected_for_disable_request.grounded is False
+    assert (
+        enable_selected_for_disable_request.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+    disable_selected_for_enable_request = _ground(
+        "enable schedule 5", CapabilityId.SCHEDULE_DISABLE, schedule_id=5
+    )
+    assert disable_selected_for_enable_request.grounded is False
+    assert (
+        disable_selected_for_enable_request.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+
+def test_schedule_disable_and_list_remain_separate_capabilities() -> None:
+    list_selected_for_disable_request = _ground(
+        "disable schedule 5", CapabilityId.SCHEDULE_LIST, schedule_id=5
+    )
+    assert list_selected_for_disable_request.grounded is False
+    assert (
+        list_selected_for_disable_request.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+
+def test_request_combining_enable_and_disable_signatures_refuses_as_multiple_matches() -> (
+    None
+):
+    """A request naming both "enable" and "disable" evidence alongside
+    "schedule" satisfies more than one signature at once - refused
+    honestly, never resolved by guessing which action was meant. (The
+    negation gate does not apply here: neither "enable" nor "disable"
+    negates the other the way "do not" does.)"""
+    result = _ground(
+        "enable schedule 5 and disable schedule 6",
+        CapabilityId.SCHEDULE_ENABLE,
+        schedule_id=5,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.MULTIPLE_SIGNATURES_MATCHED
+
+
+def test_schedule_disable_does_not_collide_with_any_other_existing_capability() -> (
+    None
+):
+    request = "disable schedule 5"
+    other_capabilities = (
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
+        CapabilityId.APPROVAL_HISTORY,
+        CapabilityId.WORKFLOW_HISTORY,
+    )
+    for capability_id in other_capabilities:
+        result = _ground(request, capability_id, value="irrelevant")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_internal_schedule_verifier_remains_absent_from_grounding_after_phase_95() -> (
+    None
+):
+    """SCHEDULE_VERIFY_ENABLED_STATE stays absent from the grounding
+    signature table even after Phase 95 adds a second capability that
+    pairs with it - the verifier is never itself a signature, no
+    matter how many write capabilities reuse it."""
+    from intelligence.grounding import _SIGNATURES
+
+    assert CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE not in _SIGNATURES
+
+
+def test_schedule_disable_signature_is_absent_of_unsupported_synonyms() -> None:
+    """Only "disable" is ever accepted as action evidence - none of the
+    plausible but unsupported synonyms ground the capability."""
+    for synonym_phrase in (
+        "deactivate schedule 5",
+        "turn off schedule 5",
+        "stop schedule 5",
+        "suspend schedule 5",
+        "pause schedule 5",
+        "switch off schedule 5",
+        "block schedule 5",
+    ):
+        result = _ground(synonym_phrase, CapabilityId.SCHEDULE_DISABLE, schedule_id=5)
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_all_ten_user_facing_capabilities_retain_one_collision_free_accepted_phrasing() -> (
+    None
+):
+    """Every one of the ten model-selectable capabilities has at least
+    one real, accepted phrasing that grounds it and only it - proving
+    the catalogue-wide uniqueness rule holds across the complete,
+    Phase-95-expanded signature table."""
+    cases = (
+        ("show my project state", CapabilityId.PROJECT_STATE_SHOW, {}),
+        (
+            "update my project focus to shipping",
+            CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+            {"value": "shipping"},
+        ),
+        ("check jarvis's health", CapabilityId.HEALTH_CHECK, {}),
+        ("show my schedules", CapabilityId.SCHEDULE_LIST, {}),
+        (
+            "show me what I have asked you to remember recently",
+            CapabilityId.MEMORY_LIST_RECENT,
+            {},
+        ),
+        (
+            "search my memories for the deployment checklist",
+            CapabilityId.MEMORY_SEARCH,
+            {"value": "the deployment checklist"},
+        ),
+        ("show approval history", CapabilityId.APPROVAL_HISTORY, {}),
+        ("show workflow history", CapabilityId.WORKFLOW_HISTORY, {}),
+        ("enable schedule 5", CapabilityId.SCHEDULE_ENABLE, {"schedule_id": 5}),
+        ("disable schedule 5", CapabilityId.SCHEDULE_DISABLE, {"schedule_id": 5}),
+    )
+    for request_text, capability_id, arguments in cases:
+        result = ground_decision(
+            request_text=request_text,
+            capability_id=capability_id,
+            arguments=arguments,
+        )
+        assert result.grounded is True, (request_text, capability_id)

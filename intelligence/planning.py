@@ -108,7 +108,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly nine capabilities "
+    "You are Jarvis's tool-selection planner. Exactly ten capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -159,6 +159,13 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "integer). This action requires your explicit approval and will "
     "be verified with a structured read-back after it runs.\n"
     "\n"
+    '10. capability id "schedule_disable" - disables one of your '
+    "configured schedules by its exact id. Use this only when the "
+    "request explicitly asks to disable a specific schedule by id. "
+    "Include the exact schedule id in arguments.schedule_id (an "
+    "integer). This action requires your explicit approval and will "
+    "be verified with a structured read-back after it runs.\n"
+    "\n"
     'Two further capability ids, "project_state_verify_focus" and '
     '"schedule_verify_enabled_state", exist only internally - neither '
     "is ever a valid selection, is never selectable through your "
@@ -205,6 +212,10 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "\n"
     "Execute (enable schedule):\n"
     '{"decision": "execute", "capability_id": "schedule_enable", '
+    '"arguments": {"schedule_id": 5}}\n'
+    "\n"
+    "Execute (disable schedule):\n"
+    '{"decision": "execute", "capability_id": "schedule_disable", '
     '"arguments": {"schedule_id": 5}}\n'
     "\n"
     "Unsupported:\n"

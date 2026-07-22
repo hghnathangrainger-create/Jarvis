@@ -76,6 +76,8 @@ from intelligence.planning import (
     select_tool,
 )
 from intelligence.verification import (
+    SCHEDULE_DISABLED_EXACT_MATCH_VERIFIER_ID,
+    SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
     VerificationOutcome,
     verify_focus_update,
     verify_schedule_enabled_state,
@@ -2085,6 +2087,9 @@ class JarvisOrchestrator:
             CapabilityId.SCHEDULE_ENABLE: (
                 self._schedule_enable_workflow_result_to_response
             ),
+            CapabilityId.SCHEDULE_DISABLE: (
+                self._schedule_disable_workflow_result_to_response
+            ),
         }
         if write_capability_id is not None and write_capability_id in response_builders:
             return response_builders[write_capability_id](result)
@@ -2309,6 +2314,7 @@ class JarvisOrchestrator:
         schedule_id = write_outcome.step.tool_input.get("schedule_id")
         verification = verify_schedule_enabled_state(
             expected_enabled=True,
+            verifier_id=SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
             verify_tool_result=(
                 verify_outcome.tool_result if verify_outcome is not None else None
             ),
@@ -2334,6 +2340,103 @@ class JarvisOrchestrator:
         else:
             message = (
                 "Jarvis's enable tool reported success, but verification "
+                "could not be completed, so the update is not confirmed."
+            )
+            success = False
+
+        return JarvisResponse(
+            success=success,
+            message=message,
+            plan=result.plan,
+            tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+            intelligence_trace=trace,
+        )
+
+    def _schedule_disable_workflow_result_to_response(
+        self, result: WorkflowResult
+    ) -> JarvisResponse:
+        """Translate a real schedule-disable-and-verify WorkflowResult
+        into a grounded, verification-aware JarvisResponse (Phase 95 -
+        docs/phase_95_implementation_plan.md), mirroring
+        _schedule_enable_workflow_result_to_response's exact shape for
+        the third real verified workflow, with the one deliberate
+        difference the postcondition itself requires:
+        expected_enabled=False instead of True.
+
+        Never asks AI to judge success: verification is always the
+        real, exact-boolean-identity comparison
+        intelligence.verification.verify_schedule_enabled_state()
+        performs against the fixed, trusted expected state (always
+        False for this workflow) and the verify step's real
+        ToolResult.metadata["enabled"].
+
+        Args:
+            result: The real WorkflowResult from run() or resume().
+
+        Returns:
+            A JarvisResponse honestly reflecting exactly one of:
+            pending approval (WAITING); the write step itself never
+            executed (failed/blocked/declined - no verification
+            attempted); or, once the write step completed, a real
+            VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE) grounded
+            in real values only - never AI prose, never a claimed
+            success the real results do not support.
+        """
+        if result.overall_status is StepStatus.WAITING:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: awaiting your approval to disable the "
+                    "schedule.",
+                ),
+            )
+
+        write_outcome = result.step_outcomes[0]
+        if write_outcome.status is not StepStatus.COMPLETED:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: disable did not execute; no verification "
+                    "attempted.",
+                ),
+            )
+
+        verify_outcome = (
+            result.step_outcomes[1] if len(result.step_outcomes) > 1 else None
+        )
+        schedule_id = write_outcome.step.tool_input.get("schedule_id")
+        verification = verify_schedule_enabled_state(
+            expected_enabled=False,
+            verifier_id=SCHEDULE_DISABLED_EXACT_MATCH_VERIFIER_ID,
+            verify_tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+        )
+        trace = (
+            "Step 1/2: disable executed.",
+            f"Step 2/2: verification {verification.outcome.value}.",
+        )
+
+        if verification.outcome is VerificationOutcome.VERIFIED:
+            message = (
+                f"Jarvis disabled schedule {schedule_id}. Verification "
+                "succeeded - the stored state matches."
+            )
+            success = True
+        elif verification.outcome is VerificationOutcome.FAILED:
+            message = (
+                "Jarvis's disable tool reported success, but the structured "
+                "read-back found the schedule is still enabled - the update "
+                "is not confirmed."
+            )
+            success = False
+        else:
+            message = (
+                "Jarvis's disable tool reported success, but verification "
                 "could not be completed, so the update is not confirmed."
             )
             success = False

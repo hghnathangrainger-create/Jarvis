@@ -27,7 +27,7 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_eleven_phase_94_batch_2_entries() -> None:
+def test_catalog_contains_exactly_the_twelve_phase_95_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -40,6 +40,7 @@ def test_catalog_contains_exactly_the_eleven_phase_94_batch_2_entries() -> None:
         CapabilityId.WORKFLOW_HISTORY,
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
+        CapabilityId.SCHEDULE_DISABLE,
     }
 
 
@@ -56,6 +57,7 @@ def test_no_other_capability_id_exists() -> None:
         "workflow_history",
         "schedule_enable",
         "schedule_verify_enabled_state",
+        "schedule_disable",
     }
 
 
@@ -83,7 +85,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_nine_capabilities_are_model_selectable() -> None:
+def test_only_ten_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -99,6 +101,7 @@ def test_only_nine_capabilities_are_model_selectable() -> None:
         CapabilityId.APPROVAL_HISTORY,
         CapabilityId.WORKFLOW_HISTORY,
         CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
     }
 
 
@@ -348,31 +351,39 @@ def test_capability_adapter_has_exact_fields() -> None:
     }
 
 
-def test_paired_verify_input_keys_defaults_to_empty_except_for_schedule_enable() -> (
+def test_paired_verify_input_keys_defaults_to_empty_except_for_schedule_write_capabilities() -> (
     None
 ):
-    """Every capability except SCHEDULE_ENABLE needs no data threaded
-    from its write step into its verifier (PROJECT_STATE_UPDATE_FOCUS's
-    verifier reads a singleton row and needs nothing) - the field
-    defaults to an empty tuple for all of them."""
+    """Every capability except SCHEDULE_ENABLE/SCHEDULE_DISABLE needs no
+    data threaded from its write step into its verifier
+    (PROJECT_STATE_UPDATE_FOCUS's verifier reads a singleton row and
+    needs nothing) - the field defaults to an empty tuple for all of
+    them."""
+    schedule_write_capabilities = {
+        CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
+    }
     for capability_id, adapter in CAPABILITY_CATALOG.items():
-        if capability_id is CapabilityId.SCHEDULE_ENABLE:
+        if capability_id in schedule_write_capabilities:
             assert adapter.paired_verify_input_keys == ("schedule_id",)
         else:
             assert adapter.paired_verify_input_keys == ()
 
 
-def test_paired_verify_capability_id_defaults_to_none_except_for_the_two_write_workflows() -> (
+def test_paired_verify_capability_id_defaults_to_none_except_for_the_three_write_workflows() -> (
     None
 ):
     """Every capability that declares no paired verifier of its own
-    (everything except the two real TWO_STEP_WORKFLOW capabilities)
+    (everything except the three real TWO_STEP_WORKFLOW capabilities)
     still defaults to None - the field was added in Phase 94, Batch 1
     and needed no change for any of them; Phase 94, Batch 2 adds the
-    second real pairing, SCHEDULE_ENABLE -> SCHEDULE_VERIFY_ENABLED_STATE."""
+    second real pairing, SCHEDULE_ENABLE -> SCHEDULE_VERIFY_ENABLED_STATE;
+    Phase 95 adds the third, SCHEDULE_DISABLE -> the *same*
+    SCHEDULE_VERIFY_ENABLED_STATE (reused, never duplicated)."""
     capabilities_with_a_paired_verifier = {
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
     }
     for capability_id, adapter in CAPABILITY_CATALOG.items():
         if capability_id in capabilities_with_a_paired_verifier:
@@ -427,24 +438,89 @@ def test_schedule_verify_enabled_state_adapter_fields_are_exact() -> None:
     assert adapter.paired_verify_capability_id is None
 
 
-def test_schedule_enable_pairs_only_with_schedule_verify_enabled_state() -> None:
-    """No other capability - existing or new - names SCHEDULE_ENABLE's
-    verifier as its own paired verifier, and SCHEDULE_ENABLE names no
-    other capability."""
-    for capability_id, adapter in CAPABILITY_CATALOG.items():
-        if capability_id is CapabilityId.SCHEDULE_ENABLE:
-            continue
-        assert (
-            adapter.paired_verify_capability_id
-            is not CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
-        )
+# --- Phase 95: SCHEDULE_DISABLE -----------------------------------------
 
 
-def test_no_second_user_facing_write_capability_was_added() -> None:
-    """Exactly two capabilities are TWO_STEP_WORKFLOW (the only
-    execution strategy that implies a write): PROJECT_STATE_UPDATE_FOCUS
-    and SCHEDULE_ENABLE - no SCHEDULE_DISABLE, SCHEDULE_CREATE, or any
-    other write capability exists."""
+def test_schedule_disable_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE]
+    assert adapter.capability_id is CapabilityId.SCHEDULE_DISABLE
+    assert adapter.tool_name == "schedule_disable"
+    assert [spec.name for spec in adapter.arguments] == ["schedule_id"]
+    assert adapter.arguments[0].type_name == "int"
+    assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
+    assert adapter.max_execution_tier is SecurityTier.YELLOW
+    assert adapter.verification_strategy_id == "schedule_disabled_exact_match"
+    assert adapter.internal_only is False
+    assert (
+        adapter.paired_verify_capability_id
+        is CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+    )
+    assert adapter.paired_verify_input_keys == ("schedule_id",)
+
+
+def test_schedule_enable_still_expects_true_and_disable_expects_false_by_construction() -> (
+    None
+):
+    """The catalog itself carries no boolean expected-state field at
+    all - both SCHEDULE_ENABLE and SCHEDULE_DISABLE declare only a
+    verification_strategy_id label; the trusted True/False literal
+    lives only in core/orchestrator.py's own two distinct response-
+    builder methods, confirmed by direct source inspection."""
+    import inspect
+
+    import core.orchestrator as orchestrator_module
+
+    enable_source = inspect.getsource(
+        orchestrator_module.JarvisOrchestrator._schedule_enable_workflow_result_to_response
+    )
+    disable_source = inspect.getsource(
+        orchestrator_module.JarvisOrchestrator._schedule_disable_workflow_result_to_response
+    )
+    assert "expected_enabled=True" in enable_source
+    assert "expected_enabled=False" in disable_source
+
+
+def test_schedule_disable_does_not_duplicate_the_verifier_tool_name() -> None:
+    """SCHEDULE_DISABLE's paired verifier resolves to the identical
+    real tool_name SCHEDULE_ENABLE already uses - never a second,
+    differently-named verifier tool."""
+    enable_adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_ENABLE]
+    disable_adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE]
+    assert (
+        enable_adapter.paired_verify_capability_id
+        == disable_adapter.paired_verify_capability_id
+    )
+    verifier_adapter = CAPABILITY_CATALOG[
+        CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+    ]
+    assert verifier_adapter.tool_name == "schedule_verify_enabled_state"
+
+
+def test_schedule_enable_and_disable_are_the_only_two_capabilities_pairing_with_the_schedule_verifier() -> (
+    None
+):
+    """Exactly SCHEDULE_ENABLE and SCHEDULE_DISABLE name
+    SCHEDULE_VERIFY_ENABLED_STATE as their own paired verifier
+    (Phase 95 reuses the existing internal verifier rather than
+    duplicating it) - no other capability does."""
+    pairing_capabilities = {
+        capability_id
+        for capability_id, adapter in CAPABILITY_CATALOG.items()
+        if adapter.paired_verify_capability_id
+        is CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
+    }
+    assert pairing_capabilities == {
+        CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
+    }
+
+
+def test_no_fourth_user_facing_write_capability_was_added() -> None:
+    """Exactly three capabilities are TWO_STEP_WORKFLOW (the only
+    execution strategy that implies a write): PROJECT_STATE_UPDATE_FOCUS,
+    SCHEDULE_ENABLE, and SCHEDULE_DISABLE - no SCHEDULE_CREATE, schedule
+    update/delete, or any other write capability exists."""
     two_step_capabilities = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -453,12 +529,15 @@ def test_no_second_user_facing_write_capability_was_added() -> None:
     assert two_step_capabilities == {
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
     }
 
 
-def test_no_schedule_disable_or_create_capability_exists() -> None:
-    assert not any("SCHEDULE_DISABLE" in member.name for member in CapabilityId)
+def test_no_schedule_create_update_or_delete_capability_exists() -> None:
     assert not any("SCHEDULE_CREATE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_UPDATE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_DELETE" in member.name for member in CapabilityId)
+    assert not any("SCHEDULE_VERIFY_DISABLED_STATE" in member.name for member in CapabilityId)
 
 
 def test_build_tool_input_adds_no_fixed_arguments_for_schedule_enable() -> None:
@@ -476,3 +555,11 @@ def test_build_tool_input_adds_no_fixed_arguments_for_schedule_verify_enabled_st
 ):
     adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE]
     assert build_tool_input(adapter, {}) == {}
+
+
+def test_build_tool_input_adds_no_fixed_arguments_for_schedule_disable() -> None:
+    """schedule_disable's own real tool input key ("schedule_id")
+    already matches its one declared argument's name one-to-one,
+    identical to schedule_enable's own shape."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE]
+    assert build_tool_input(adapter, {"schedule_id": 5}) == {"schedule_id": 5}

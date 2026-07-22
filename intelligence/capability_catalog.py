@@ -51,7 +51,18 @@ Responsibilities:
       uses, now proven genuinely reusable) and
       SCHEDULE_VERIFY_ENABLED_STATE (internal-only, the second
       TWO_STEP_WORKFLOW pairing this catalog now carries, structurally
-      identical to PROJECT_STATE_VERIFY_FOCUS).
+      identical to PROJECT_STATE_VERIFY_FOCUS). Phase 95 adds
+      SCHEDULE_DISABLE (model-selectable, YELLOW, the same single
+      required integer argument "schedule_id", the same
+      TWO_STEP_WORKFLOW shape) - paired with the *same*,
+      already-existing SCHEDULE_VERIFY_ENABLED_STATE entry, never a
+      third verifier capability: the real verifier tool and the real
+      verification function are already fully generic over which
+      boolean state is expected, so only a new, distinct
+      verification_strategy_id ("schedule_disabled_exact_match") and a
+      trusted, static orchestrator-level expected value (False) are
+      needed - confirmed live during the Phase 95 planning gate
+      (docs/phase_95_implementation_plan.md).
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -105,6 +116,7 @@ class CapabilityId(Enum):
     WORKFLOW_HISTORY = "workflow_history"
     SCHEDULE_ENABLE = "schedule_enable"
     SCHEDULE_VERIFY_ENABLED_STATE = "schedule_verify_enabled_state"
+    SCHEDULE_DISABLE = "schedule_disable"
 
 
 class ExecutionStrategy(Enum):
@@ -355,14 +367,32 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         tool_name="schedule_verify_enabled_state",
         description=(
             "Internal-only: reads back one schedule's current enabled "
-            "state to verify a prior enable. Never selectable by AI, "
-            "never a user command."
+            "state to verify a prior enable or disable. Never selectable "
+            "by AI, never a user command."
         ),
         arguments=(),
         allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
         max_execution_tier=SecurityTier.GREEN,
         verification_strategy_id=None,
         internal_only=True,
+    ),
+    CapabilityId.SCHEDULE_DISABLE: CapabilityAdapter(
+        capability_id=CapabilityId.SCHEDULE_DISABLE,
+        tool_name="schedule_disable",
+        description=(
+            "Disables one of your configured schedules by its exact id. "
+            "Requires your explicit approval, and the stored enabled "
+            "state is checked with a structured read-back after it runs."
+        ),
+        arguments=(
+            CapabilityArgumentSpec(name="schedule_id", type_name="int", required=True),
+        ),
+        allowed_strategy=ExecutionStrategy.TWO_STEP_WORKFLOW,
+        max_execution_tier=SecurityTier.YELLOW,
+        verification_strategy_id="schedule_disabled_exact_match",
+        internal_only=False,
+        paired_verify_capability_id=CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
+        paired_verify_input_keys=("schedule_id",),
     ),
 }
 
