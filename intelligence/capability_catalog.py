@@ -62,7 +62,24 @@ Responsibilities:
       verification_strategy_id ("schedule_disabled_exact_match") and a
       trusted, static orchestrator-level expected value (False) are
       needed - confirmed live during the Phase 95 planning gate
-      (docs/phase_95_implementation_plan.md).
+      (docs/phase_95_implementation_plan.md). Phase 96 adds
+      PROJECT_STATE_UPDATE_PHASE (model-selectable, YELLOW, the same
+      single required string argument "value", the same
+      TWO_STEP_WORKFLOW shape as PROJECT_STATE_UPDATE_FOCUS) - paired
+      with the *same*, already-existing PROJECT_STATE_VERIFY_FOCUS
+      entry (its own tool_name/enum member intentionally left
+      unrenamed for backward compatibility; its description and its
+      real tool's behavior were narrowly genericized instead - see
+      docs/phase_96_implementation_plan.md). Because
+      PROJECT_STATE_UPDATE_FOCUS and PROJECT_STATE_UPDATE_PHASE share
+      one *identical* write/verify tool-name pair (both call
+      project_state_update/project_state_verify - unlike
+      SCHEDULE_ENABLE/SCHEDULE_DISABLE, whose write tool names differ),
+      core/orchestrator.py's generic shape-matcher also needed a small,
+      still fully catalog-driven disambiguation: comparing the write
+      step's own already-built tool_input against
+      fixed_arguments_for(capability_id) (new, public accessor added
+      this phase) - never a hardcoded per-capability check.
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -107,6 +124,7 @@ class CapabilityId(Enum):
 
     PROJECT_STATE_SHOW = "project_state_show"
     PROJECT_STATE_UPDATE_FOCUS = "project_state_update_focus"
+    PROJECT_STATE_UPDATE_PHASE = "project_state_update_phase"
     PROJECT_STATE_VERIFY_FOCUS = "project_state_verify_focus"
     HEALTH_CHECK = "health_check"
     SCHEDULE_LIST = "schedule_list"
@@ -257,14 +275,34 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
         tool_name="project_state_verify",
         description=(
-            "Internal-only: reads back the current focus value to verify "
-            "a prior update. Never selectable by AI, never a user command."
+            "Internal-only: reads back the current focus or phase value "
+            "(whichever field a prior update targeted) to verify it. "
+            "Never selectable by AI, never a user command. (Phase 96: "
+            "genericized to also serve PROJECT_STATE_UPDATE_PHASE - the "
+            "member name and tool_name are unchanged for backward "
+            "compatibility, and its own description is kept truthful "
+            "about both real uses; see docs/phase_96_implementation_plan.md.)"
         ),
         arguments=(),
         allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
         max_execution_tier=SecurityTier.GREEN,
         verification_strategy_id=None,
         internal_only=True,
+    ),
+    CapabilityId.PROJECT_STATE_UPDATE_PHASE: CapabilityAdapter(
+        capability_id=CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        tool_name="project_state_update",
+        description=(
+            "Updates the manually-maintained Jarvis project state's phase "
+            "field. Requires your explicit approval, and the stored value "
+            "is checked with a structured read-back after it runs."
+        ),
+        arguments=(CapabilityArgumentSpec(name="value", type_name="str", required=True),),
+        allowed_strategy=ExecutionStrategy.TWO_STEP_WORKFLOW,
+        max_execution_tier=SecurityTier.YELLOW,
+        verification_strategy_id="project_state_phase_exact_match",
+        internal_only=False,
+        paired_verify_capability_id=CapabilityId.PROJECT_STATE_VERIFY_FOCUS,
     ),
     CapabilityId.HEALTH_CHECK: CapabilityAdapter(
         capability_id=CapabilityId.HEALTH_CHECK,
@@ -428,11 +466,36 @@ def get_adapter(capability_id: CapabilityId) -> CapabilityAdapter | None:
 #: validated arguments one-to-one, so it simply has no entry here.
 _FIXED_ARGUMENTS_BY_CAPABILITY: dict[CapabilityId, dict[str, object]] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: {"field": "focus"},
+    CapabilityId.PROJECT_STATE_UPDATE_PHASE: {"field": "phase"},
     CapabilityId.MEMORY_LIST_RECENT: {"operation": "list"},
     CapabilityId.MEMORY_SEARCH: {"operation": "search"},
     CapabilityId.APPROVAL_HISTORY: {"operation": "history"},
     CapabilityId.WORKFLOW_HISTORY: {"operation": "history"},
 }
+
+
+def fixed_arguments_for(capability_id: CapabilityId) -> dict[str, object]:
+    """Return a capability's own trusted, static fixed-argument
+    literals, or an empty dict if it declares none (Phase 96).
+
+    A small, public, read-only accessor for _FIXED_ARGUMENTS_BY_CAPABILITY
+    - added so core/orchestrator.py's generic two-step-workflow shape
+    matcher can disambiguate two capabilities that legitimately share
+    one identical write/verify tool-name pair (PROJECT_STATE_UPDATE_FOCUS
+    and PROJECT_STATE_UPDATE_PHASE both call project_state_update/
+    project_state_verify) by also comparing the write step's own
+    already-built tool_input against this trusted data, never by adding
+    a hardcoded per-capability check.
+
+    Args:
+        capability_id: The capability to look up.
+
+    Returns:
+        A shallow copy of that capability's fixed-argument dict, or {}
+        if it declares none. Never mutated by any caller - callers only
+        ever read from it.
+    """
+    return dict(_FIXED_ARGUMENTS_BY_CAPABILITY.get(capability_id, {}))
 
 #: Fixed, non-model-controlled renames of a capability's own declared
 #: argument name into the real tool's own input key, applied before any

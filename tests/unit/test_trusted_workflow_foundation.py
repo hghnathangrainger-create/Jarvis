@@ -400,14 +400,15 @@ def test_capability_adapter_field_is_never_exposed_as_a_model_facing_argument() 
         assert "paired_verify_capability_id" not in declared_argument_names
 
 
-def test_exactly_three_two_step_workflow_capabilities_exist_in_the_real_catalog() -> (
+def test_exactly_four_two_step_workflow_capabilities_exist_in_the_real_catalog() -> (
     None
 ):
     """Phase 94, Batch 2 added the second production workflow consumer,
-    SCHEDULE_ENABLE; Phase 95 adds the third, SCHEDULE_DISABLE -
-    proving the Batch 1 foundation generalization genuinely supports a
-    third TWO_STEP_WORKFLOW capability with zero orchestrator dispatch
-    change, and confirming no fourth one exists."""
+    SCHEDULE_ENABLE; Phase 95 adds the third, SCHEDULE_DISABLE; Phase 96
+    adds the fourth, PROJECT_STATE_UPDATE_PHASE - proving the Batch 1
+    foundation generalization genuinely supports a fourth
+    TWO_STEP_WORKFLOW capability with zero orchestrator dispatch
+    change, and confirming no fifth one exists."""
     two_step_capabilities = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -417,17 +418,25 @@ def test_exactly_three_two_step_workflow_capabilities_exist_in_the_real_catalog(
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
     }
 
 
-def test_schedule_disable_capability_exists_and_no_further_expansion_occurred() -> (
+def test_project_state_update_phase_capability_exists_and_no_further_expansion_occurred() -> (
     None
 ):
-    """Confirms Phase 95 added exactly one new capability - SCHEDULE_DISABLE,
-    reusing the existing SCHEDULE_VERIFY_ENABLED_STATE verifier - and
-    nothing else: no SCHEDULE_CREATE, no schedule update/delete, and
-    the real catalog contains exactly these twelve members."""
-    assert any(member is CapabilityId.SCHEDULE_DISABLE for member in CapabilityId)
+    """Confirms Phase 96 added exactly one new capability -
+    PROJECT_STATE_UPDATE_PHASE, reusing the existing
+    PROJECT_STATE_VERIFY_FOCUS verifier - and nothing else: no
+    PROJECT_STATE_UPDATE_BRANCH/COMMIT/SUITE, no SCHEDULE_CREATE, no
+    schedule update/delete, and the real catalog contains exactly
+    these thirteen members."""
+    assert any(
+        member is CapabilityId.PROJECT_STATE_UPDATE_PHASE for member in CapabilityId
+    )
+    assert not any("PROJECT_STATE_UPDATE_BRANCH" in member.name for member in CapabilityId)
+    assert not any("PROJECT_STATE_UPDATE_COMMIT" in member.name for member in CapabilityId)
+    assert not any("PROJECT_STATE_UPDATE_SUITE" in member.name for member in CapabilityId)
     assert not any("SCHEDULE_CREATE" in member.name for member in CapabilityId)
     assert not any("SCHEDULE_UPDATE" in member.name for member in CapabilityId)
     assert not any("SCHEDULE_DELETE" in member.name for member in CapabilityId)
@@ -444,10 +453,11 @@ def test_schedule_disable_capability_exists_and_no_further_expansion_occurred() 
         "schedule_enable",
         "schedule_verify_enabled_state",
         "schedule_disable",
+        "project_state_update_phase",
     }
 
 
-def test_schedule_verifier_strategy_ids_are_the_only_new_ones() -> None:
+def test_verifier_strategy_ids_are_the_only_ones() -> None:
     strategy_ids = {
         adapter.verification_strategy_id
         for adapter in CAPABILITY_CATALOG.values()
@@ -457,21 +467,26 @@ def test_schedule_verifier_strategy_ids_are_the_only_new_ones() -> None:
         "project_state_focus_exact_match",
         "schedule_enabled_exact_match",
         "schedule_disabled_exact_match",
+        "project_state_phase_exact_match",
     }
 
 
 def test_exactly_two_verification_functions_exist_in_verification_module() -> None:
-    """intelligence/verification.py now defines exactly two verifier
-    functions - the pre-existing focus verifier, unmodified, plus the
-    one new schedule-enabled-state verifier Batch 2 adds. No generic
-    verifier registry or third function exists."""
+    """intelligence/verification.py defines exactly two verifier
+    functions - the genericized ProjectState field verifier (shared by
+    focus and phase) and the schedule-enabled-state verifier (shared
+    by enable and disable). No generic verifier registry or third
+    function exists."""
     import intelligence.verification as module
 
     tree = ast.parse(inspect.getsource(module))
     function_names = {
         node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     }
-    assert function_names == {"verify_focus_update", "verify_schedule_enabled_state"}
+    assert function_names == {
+        "verify_project_state_field",
+        "verify_schedule_enabled_state",
+    }
 
 
 # --- 4. The orchestrator's structural recognizer is now catalog-driven -----
@@ -568,7 +583,9 @@ def test_matching_two_step_write_capability_recognises_update_focus_shape() -> N
     plan = Plan(
         user_request="ask jarvis to: update my project focus to x",
         steps=(
-            _fake_plan_step(1, "project_state_update"),
+            _fake_plan_step(
+                1, "project_state_update", {"field": "focus", "value": "x"}
+            ),
             _fake_plan_step(2, "project_state_verify"),
         ),
     )
@@ -577,6 +594,82 @@ def test_matching_two_step_write_capability_recognises_update_focus_shape() -> N
         JarvisOrchestrator._matching_two_step_write_capability(result)
         is CapabilityId.PROJECT_STATE_UPDATE_FOCUS
     )
+
+
+def test_matching_two_step_write_capability_recognises_update_phase_shape() -> None:
+    from core.orchestrator import JarvisOrchestrator
+
+    plan = Plan(
+        user_request="ask jarvis to: update my project phase to Phase 96",
+        steps=(
+            _fake_plan_step(
+                1, "project_state_update", {"field": "phase", "value": "Phase 96"}
+            ),
+            _fake_plan_step(2, "project_state_verify"),
+        ),
+    )
+    result = WorkflowResult(plan=plan, workflow_id="wf-phase-shape")
+    assert (
+        JarvisOrchestrator._matching_two_step_write_capability(result)
+        is CapabilityId.PROJECT_STATE_UPDATE_PHASE
+    )
+
+
+def test_matching_two_step_write_capability_disambiguates_focus_from_phase() -> None:
+    """The identical write/verify tool-name pair (project_state_update
+    / project_state_verify) is shared by two capabilities - the
+    matcher must not simply return whichever one appears first in the
+    catalog; it must genuinely consult the write step's own tool_input
+    against each candidate's trusted fixed arguments."""
+    from core.orchestrator import JarvisOrchestrator
+
+    focus_plan = Plan(
+        user_request="ask jarvis to: update my project focus to x",
+        steps=(
+            _fake_plan_step(
+                1, "project_state_update", {"field": "focus", "value": "x"}
+            ),
+            _fake_plan_step(2, "project_state_verify"),
+        ),
+    )
+    phase_plan = Plan(
+        user_request="ask jarvis to: update my project phase to y",
+        steps=(
+            _fake_plan_step(
+                1, "project_state_update", {"field": "phase", "value": "y"}
+            ),
+            _fake_plan_step(2, "project_state_verify"),
+        ),
+    )
+    focus_result = WorkflowResult(plan=focus_plan, workflow_id="wf-disambig-focus")
+    phase_result = WorkflowResult(plan=phase_plan, workflow_id="wf-disambig-phase")
+
+    assert (
+        JarvisOrchestrator._matching_two_step_write_capability(focus_result)
+        is CapabilityId.PROJECT_STATE_UPDATE_FOCUS
+    )
+    assert (
+        JarvisOrchestrator._matching_two_step_write_capability(phase_result)
+        is CapabilityId.PROJECT_STATE_UPDATE_PHASE
+    )
+
+
+def test_matching_two_step_write_capability_rejects_missing_fixed_argument() -> None:
+    """A write step whose tool_input carries no "field" key at all
+    (e.g. malformed or legacy data) matches neither
+    PROJECT_STATE_UPDATE_FOCUS nor PROJECT_STATE_UPDATE_PHASE - never
+    silently defaults to one of them."""
+    from core.orchestrator import JarvisOrchestrator
+
+    plan = Plan(
+        user_request="ask jarvis to: update my project state",
+        steps=(
+            _fake_plan_step(1, "project_state_update", {"value": "x"}),
+            _fake_plan_step(2, "project_state_verify"),
+        ),
+    )
+    result = WorkflowResult(plan=plan, workflow_id="wf-no-field")
+    assert JarvisOrchestrator._matching_two_step_write_capability(result) is None
 
 
 def test_matching_two_step_write_capability_recognises_schedule_enable_shape() -> None:
@@ -670,7 +763,7 @@ def test_a_third_registered_two_step_capability_would_be_recognised_with_zero_or
         orchestrator_module.CAPABILITY_CATALOG = original_catalog
 
 
-def _fake_plan_step(number: int, tool_name: str):
+def _fake_plan_step(number: int, tool_name: str, tool_input: dict | None = None):
     from planner.plan_models import PlanStep
 
     return PlanStep(
@@ -680,5 +773,5 @@ def _fake_plan_step(number: int, tool_name: str):
         tier=SecurityTier.GREEN,
         reason="test reason",
         tool_name=tool_name,
-        tool_input={},
+        tool_input=tool_input if tool_input is not None else {},
     )

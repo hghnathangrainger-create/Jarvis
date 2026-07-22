@@ -299,13 +299,14 @@ class _IntentSignature:
     qualifier_tokens: tuple[str, ...] = ()
 
 
-#: Exactly the ten model-selectable capabilities (Section 20.2's
+#: Exactly the eleven model-selectable capabilities (Section 20.2's
 #: final table for the original six; docs/phase_93_implementation_plan.md
 #: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1;
 #: docs/phase_94_implementation_plan.md, Section 6, for SCHEDULE_ENABLE,
 #: added Phase 94, Batch 2; docs/phase_95_implementation_plan.md for
-#: SCHEDULE_DISABLE, added Phase 95). project_state_verify_focus and
-#: schedule_verify_enabled_state are both deliberately absent - both
+#: SCHEDULE_DISABLE, added Phase 95; docs/phase_96_implementation_plan.md
+#: for PROJECT_STATE_UPDATE_PHASE, added Phase 96). project_state_verify_focus
+#: and schedule_verify_enabled_state are both deliberately absent - both
 #: are internal_only and can never be a parsed EXECUTE decision's
 #: capability_id (intelligence/structured_output.py already rejects
 #: either before ground_decision() could ever be called with it).
@@ -317,6 +318,13 @@ _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: _IntentSignature(
         action_tokens=("update",),
         domain_tokens=("focus",),
+    ),
+    CapabilityId.PROJECT_STATE_UPDATE_PHASE: _IntentSignature(
+        action_tokens=("update",),
+        domain_tokens=("phase",),
+        # Phase 96: no qualifier needed - "phase" is not a domain token
+        # of any other signature (including PROJECT_STATE_UPDATE_FOCUS's
+        # own "focus"), so no collision requires a third dimension.
     ),
     CapabilityId.HEALTH_CHECK: _IntentSignature(
         action_tokens=("check",),
@@ -416,7 +424,7 @@ def _signature_matches(
 
 
 def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
-    """Evaluate the live request against every one of the ten
+    """Evaluate the live request against every one of the eleven
     catalogue signatures (Section 20.3's catalogue-wide rule) - never
     only the model-selected capability's own signature in isolation.
 
@@ -448,6 +456,13 @@ def _grounded_capability_ids(request_text: str) -> frozenset[CapabilityId]:
 #: capability.
 _ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
     CapabilityId.PROJECT_STATE_UPDATE_FOCUS: " to ",
+    # Phase 96: shared verbatim with PROJECT_STATE_UPDATE_FOCUS - safe
+    # because ground_decision() resolves a unique matching *signature*
+    # first (disambiguated by domain_tokens: "focus" vs "phase"), and
+    # only then extracts the value using that one matched capability's
+    # own marker, exactly mirroring how SCHEDULE_ENABLE/SCHEDULE_DISABLE
+    # already safely share " schedule ".
+    CapabilityId.PROJECT_STATE_UPDATE_PHASE: " to ",
     CapabilityId.MEMORY_SEARCH: " for ",
 }
 

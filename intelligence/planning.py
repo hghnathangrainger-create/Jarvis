@@ -108,7 +108,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly ten capabilities "
+    "You are Jarvis's tool-selection planner. Exactly eleven capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -166,6 +166,14 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "integer). This action requires your explicit approval and will "
     "be verified with a structured read-back after it runs.\n"
     "\n"
+    '11. capability id "project_state_update_phase" - updates only the '
+    "manually-maintained project state's phase field. Use this only "
+    "when the request explicitly asks to update the project state's "
+    "phase. Include the requested new phase text in "
+    'arguments.value (a non-empty string). This action requires your '
+    "explicit approval and will be verified with a structured read-back "
+    "after it runs.\n"
+    "\n"
     'Two further capability ids, "project_state_verify_focus" and '
     '"schedule_verify_enabled_state", exist only internally - neither '
     "is ever a valid selection, is never selectable through your "
@@ -217,6 +225,11 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "Execute (disable schedule):\n"
     '{"decision": "execute", "capability_id": "schedule_disable", '
     '"arguments": {"schedule_id": 5}}\n'
+    "\n"
+    "Execute (update phase):\n"
+    '{"decision": "execute", "capability_id": '
+    '"project_state_update_phase", "arguments": {"value": "the '
+    'requested new phase"}}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'

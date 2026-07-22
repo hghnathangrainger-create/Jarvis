@@ -210,12 +210,28 @@ def test_output_documents_ask_jarvis_to_focus_update_capability() -> None:
     """Phase 90, Batch 3: the new focus-update capability is documented
     in the same batch it shipped, honestly disclosing the approval and
     verification requirements - never claiming no approval is ever
-    needed, since that is no longer true."""
+    needed, since that is no longer true. Phase 96 extended the same
+    line to also cover phase."""
     result = _run(HelpTool())
-    assert "update only its focus field" in result.output
+    assert "update only its focus or phase field" in result.output
     assert "requires your explicit approval" in result.output
     assert "structured read-back" in result.output
     assert "Zero retries, zero replans" in result.output
+
+
+def test_output_documents_ask_jarvis_to_phase_update_capability_honestly() -> None:
+    """Phase 96: the new phase-update capability is documented honestly
+    - schedule ids/focus/phase values are never guessed, ProjectState
+    is never claimed to be auto-detected, and branch/commit/suite are
+    explicitly disclosed as not AI-selectable."""
+    result = _run(HelpTool())
+    assert "manually recorded" in result.output.lower() or (
+        "auto-detected" in result.output
+    )
+    assert (
+        "no AI-selectable way to update branch, commit, or suite result"
+        in result.output
+    )
 
 
 def test_output_documents_phase_91_batch_1_read_only_capabilities() -> None:

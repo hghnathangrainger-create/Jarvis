@@ -27,7 +27,7 @@ from intelligence.capability_catalog import (
 )
 
 
-def test_catalog_contains_exactly_the_twelve_phase_95_entries() -> None:
+def test_catalog_contains_exactly_the_thirteen_phase_96_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -41,6 +41,7 @@ def test_catalog_contains_exactly_the_twelve_phase_95_entries() -> None:
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
         CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
     }
 
 
@@ -58,6 +59,7 @@ def test_no_other_capability_id_exists() -> None:
         "schedule_enable",
         "schedule_verify_enabled_state",
         "schedule_disable",
+        "project_state_update_phase",
     }
 
 
@@ -85,7 +87,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_ten_capabilities_are_model_selectable() -> None:
+def test_only_eleven_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -102,6 +104,7 @@ def test_only_ten_capabilities_are_model_selectable() -> None:
         CapabilityId.WORKFLOW_HISTORY,
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
     }
 
 
@@ -370,20 +373,24 @@ def test_paired_verify_input_keys_defaults_to_empty_except_for_schedule_write_ca
             assert adapter.paired_verify_input_keys == ()
 
 
-def test_paired_verify_capability_id_defaults_to_none_except_for_the_three_write_workflows() -> (
+def test_paired_verify_capability_id_defaults_to_none_except_for_the_four_write_workflows() -> (
     None
 ):
     """Every capability that declares no paired verifier of its own
-    (everything except the three real TWO_STEP_WORKFLOW capabilities)
+    (everything except the four real TWO_STEP_WORKFLOW capabilities)
     still defaults to None - the field was added in Phase 94, Batch 1
     and needed no change for any of them; Phase 94, Batch 2 adds the
     second real pairing, SCHEDULE_ENABLE -> SCHEDULE_VERIFY_ENABLED_STATE;
     Phase 95 adds the third, SCHEDULE_DISABLE -> the *same*
-    SCHEDULE_VERIFY_ENABLED_STATE (reused, never duplicated)."""
+    SCHEDULE_VERIFY_ENABLED_STATE (reused, never duplicated); Phase 96
+    adds the fourth, PROJECT_STATE_UPDATE_PHASE -> the *same*
+    PROJECT_STATE_VERIFY_FOCUS PROJECT_STATE_UPDATE_FOCUS already uses
+    (reused, never duplicated)."""
     capabilities_with_a_paired_verifier = {
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
     }
     for capability_id, adapter in CAPABILITY_CATALOG.items():
         if capability_id in capabilities_with_a_paired_verifier:
@@ -516,11 +523,32 @@ def test_schedule_enable_and_disable_are_the_only_two_capabilities_pairing_with_
     }
 
 
-def test_no_fourth_user_facing_write_capability_was_added() -> None:
-    """Exactly three capabilities are TWO_STEP_WORKFLOW (the only
+def test_project_state_update_focus_and_phase_are_the_only_two_capabilities_pairing_with_the_project_state_verifier() -> (
+    None
+):
+    """Exactly PROJECT_STATE_UPDATE_FOCUS and PROJECT_STATE_UPDATE_PHASE
+    name PROJECT_STATE_VERIFY_FOCUS as their own paired verifier (Phase
+    96 reuses the existing internal verifier rather than duplicating
+    it) - no other capability does."""
+    pairing_capabilities = {
+        capability_id
+        for capability_id, adapter in CAPABILITY_CATALOG.items()
+        if adapter.paired_verify_capability_id
+        is CapabilityId.PROJECT_STATE_VERIFY_FOCUS
+    }
+    assert pairing_capabilities == {
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+    }
+
+
+def test_no_fifth_user_facing_write_capability_was_added() -> None:
+    """Exactly four capabilities are TWO_STEP_WORKFLOW (the only
     execution strategy that implies a write): PROJECT_STATE_UPDATE_FOCUS,
-    SCHEDULE_ENABLE, and SCHEDULE_DISABLE - no SCHEDULE_CREATE, schedule
-    update/delete, or any other write capability exists."""
+    SCHEDULE_ENABLE, SCHEDULE_DISABLE, and PROJECT_STATE_UPDATE_PHASE -
+    no SCHEDULE_CREATE, schedule update/delete,
+    PROJECT_STATE_UPDATE_BRANCH/COMMIT/SUITE, or any other write
+    capability exists."""
     two_step_capabilities = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -530,7 +558,14 @@ def test_no_fourth_user_facing_write_capability_was_added() -> None:
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
     }
+
+
+def test_no_other_project_state_field_capability_exists() -> None:
+    assert not any("PROJECT_STATE_UPDATE_BRANCH" in member.name for member in CapabilityId)
+    assert not any("PROJECT_STATE_UPDATE_COMMIT" in member.name for member in CapabilityId)
+    assert not any("PROJECT_STATE_UPDATE_SUITE" in member.name for member in CapabilityId)
 
 
 def test_no_schedule_create_update_or_delete_capability_exists() -> None:
@@ -563,3 +598,95 @@ def test_build_tool_input_adds_no_fixed_arguments_for_schedule_disable() -> None
     identical to schedule_enable's own shape."""
     adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE]
     assert build_tool_input(adapter, {"schedule_id": 5}) == {"schedule_id": 5}
+
+
+# --- Phase 96: PROJECT_STATE_UPDATE_PHASE ------------------------------------
+
+
+def test_project_state_update_phase_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE]
+    assert adapter.capability_id is CapabilityId.PROJECT_STATE_UPDATE_PHASE
+    assert adapter.tool_name == "project_state_update"
+    assert [spec.name for spec in adapter.arguments] == ["value"]
+    assert adapter.arguments[0].type_name == "str"
+    assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.TWO_STEP_WORKFLOW
+    assert adapter.max_execution_tier is SecurityTier.YELLOW
+    assert adapter.verification_strategy_id == "project_state_phase_exact_match"
+    assert adapter.internal_only is False
+    assert (
+        adapter.paired_verify_capability_id
+        is CapabilityId.PROJECT_STATE_VERIFY_FOCUS
+    )
+    assert adapter.paired_verify_input_keys == ()
+
+
+def test_project_state_update_phase_does_not_duplicate_the_verifier_capability() -> (
+    None
+):
+    """PROJECT_STATE_UPDATE_PHASE's paired verifier resolves to the
+    identical real CapabilityId/tool_name PROJECT_STATE_UPDATE_FOCUS
+    already uses - never a second, differently-named verifier
+    capability."""
+    focus_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    phase_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE]
+    assert (
+        focus_adapter.paired_verify_capability_id
+        == phase_adapter.paired_verify_capability_id
+    )
+    verifier_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_VERIFY_FOCUS]
+    assert verifier_adapter.tool_name == "project_state_verify"
+
+
+def test_build_tool_input_fixes_field_to_phase_and_model_cannot_override_it() -> None:
+    """The model's own arguments dict can never smuggle in a different
+    "field" value - build_tool_input's fixed-argument merge always
+    wins, mirroring project_state_update_focus's own established
+    contract exactly."""
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE]
+    assert build_tool_input(adapter, {"value": "Phase 96"}) == {
+        "field": "phase",
+        "value": "Phase 96",
+    }
+    # Even a stray "field" key in the model's own arguments (which
+    # intelligence/structured_output.py would already reject before
+    # this function is ever reached) could never override the fixed
+    # literal, since fixed arguments are merged in last.
+    assert build_tool_input(adapter, {"value": "Phase 96", "field": "focus"}) == {
+        "field": "phase",
+        "value": "Phase 96",
+    }
+
+
+def test_project_state_update_focus_and_phase_use_different_fixed_fields() -> None:
+    focus_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_FOCUS]
+    phase_adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE]
+    assert build_tool_input(focus_adapter, {"value": "x"}) == {
+        "field": "focus",
+        "value": "x",
+    }
+    assert build_tool_input(phase_adapter, {"value": "x"}) == {
+        "field": "phase",
+        "value": "x",
+    }
+
+
+def test_fixed_arguments_for_returns_a_copy_never_the_live_dict() -> None:
+    """fixed_arguments_for() is a public accessor - mutating its return
+    value must never affect the real, private
+    _FIXED_ARGUMENTS_BY_CAPABILITY table."""
+    from intelligence.capability_catalog import fixed_arguments_for
+
+    first_call = fixed_arguments_for(CapabilityId.PROJECT_STATE_UPDATE_PHASE)
+    first_call["field"] = "tampered"
+    second_call = fixed_arguments_for(CapabilityId.PROJECT_STATE_UPDATE_PHASE)
+    assert second_call == {"field": "phase"}
+
+
+def test_fixed_arguments_for_returns_empty_dict_for_capability_with_none_declared() -> (
+    None
+):
+    from intelligence.capability_catalog import fixed_arguments_for
+
+    assert fixed_arguments_for(CapabilityId.PROJECT_STATE_SHOW) == {}
+    assert fixed_arguments_for(CapabilityId.SCHEDULE_ENABLE) == {}

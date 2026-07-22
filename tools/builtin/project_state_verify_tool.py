@@ -3,15 +3,27 @@ project_state_verify_tool.py
 
 An internal-only, read-only tool that reports Jarvis's manually-
 maintained project-state record in a structured (not human-parsed)
-form (Phase 90, Batch 3 - Section 24.C.15/26).
+form (Phase 90, Batch 3 - Section 24.C.15/26; genericized in Phase 96
+- docs/phase_96_implementation_plan.md - to also report "phase",
+alongside the original "focus").
 
 ProjectStateVerifyTool exists solely so the "ask jarvis to: update my
-project focus to X and confirm it" workflow can read back the current
-focus value as real ToolResult.metadata, for exact-string-equality
-verification - never by parsing ProjectStateShowTool's own human-
-readable output text. It is a GREEN tool: it only ever reads
-ProjectStateStore.get(), never writes anything, never calls git, a
-subprocess, or any AI provider.
+project focus to X and confirm it" workflow (and, since Phase 96, the
+equivalent "...update my project phase to X..." workflow) can read
+back the current focus/phase value as real ToolResult.metadata, for
+exact-string-equality verification - never by parsing
+ProjectStateShowTool's own human-readable output text. It is a GREEN
+tool: it only ever reads ProjectStateStore.get(), never writes
+anything, never calls git, a subprocess, or any AI provider.
+
+Reporting both fields unconditionally (rather than accepting a
+"which field" input) is a deliberate, minimal choice: this tool takes
+no input at all (arguments=() in the catalog), always reads the one
+existing singleton row, and ProjectStateShowTool - an equally-
+privileged, already-model-selectable capability - already discloses
+the entire record (branch, phase, commit, suite_result, focus) today,
+so reporting one additional named field here exposes nothing that
+capability doesn't already show.
 
 This tool is internal-only by convention, enforced in two independent
 places:
@@ -43,9 +55,9 @@ _NOT_RECORDED = "not recorded yet"
 
 
 class ProjectStateVerifyTool(BaseTool):
-    """Reads back the project-state record's focus field as structured
-    metadata, for exact-value verification. Internal-only; never a
-    user-facing command.
+    """Reads back the project-state record's focus and phase fields as
+    structured metadata, for exact-value verification. Internal-only;
+    never a user-facing command.
 
     Read-only and safe; reuses the same GREEN action semantics
     ProjectStateShowTool already established, needing no new
@@ -80,8 +92,8 @@ class ProjectStateVerifyTool(BaseTool):
         """
         return (
             "Internal-only: reads back the current manually-maintained "
-            "focus value as structured data, for verifying a prior update. "
-            "Never selectable by AI, never a user command."
+            "focus and phase values as structured data, for verifying a "
+            "prior update. Never selectable by AI, never a user command."
         )
 
     def action_for(self, request: ToolRequest) -> str:
@@ -103,13 +115,17 @@ class ProjectStateVerifyTool(BaseTool):
         return "show jarvis project state"
 
     def run(self, request: ToolRequest) -> ToolResult:
-        """Return the current focus value and last-updated timestamp as
-        structured metadata, plus a short, honest human-readable line.
+        """Return the current focus and phase values and last-updated
+        timestamp as structured metadata, plus a short, honest
+        human-readable line.
 
-        For data minimization, only the two fields the update-focus
-        verification workflow actually needs are returned - never
-        branch, phase, commit, or suite_result, since no concrete
-        consumer requires them here.
+        For data minimization, only the fields a real verification
+        workflow actually needs are returned - never branch, commit, or
+        suite_result, since no concrete consumer requires them here
+        (Phase 96 added "phase" alongside the original "focus" once a
+        second real consumer, PROJECT_STATE_UPDATE_PHASE, existed - see
+        this module's own docstring for why reporting both
+        unconditionally introduces no new data exposure).
 
         Args:
             request: The request. No input is required.
@@ -117,22 +133,29 @@ class ProjectStateVerifyTool(BaseTool):
         Returns:
             A successful ToolResult. metadata["focus"] is the real
             stored focus value, or "" if never recorded.
-            metadata["last_updated"] is the real formatted timestamp,
-            or "not recorded yet". Never fails outright.
+            metadata["phase"] is the real stored phase value, or "" if
+            never recorded. metadata["last_updated"] is the real
+            formatted timestamp, or "not recorded yet". Never fails
+            outright.
         """
         record = self._project_state_store.get()
         focus = record.focus if record and record.focus else ""
+        phase = record.phase if record and record.phase else ""
         last_updated = self._format_last_updated(
             record.last_updated if record else None
         )
 
-        output = f"Current focus: {focus or _NOT_RECORDED} (last updated: {last_updated})"
+        output = (
+            f"Current focus: {focus or _NOT_RECORDED}; "
+            f"current phase: {phase or _NOT_RECORDED} "
+            f"(last updated: {last_updated})"
+        )
 
         return ToolResult(
             tool_name=self.name,
             success=True,
             output=output,
-            metadata={"focus": focus, "last_updated": last_updated},
+            metadata={"focus": focus, "phase": phase, "last_updated": last_updated},
         )
 
     @staticmethod

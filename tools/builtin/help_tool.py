@@ -19,8 +19,11 @@ two new bounded audit-history capabilities (approval history, workflow
 history); updated Phase 94, Batch 2 to describe the same command's new
 verified schedule-enable capability; updated Phase 95 to describe the
 same command's new verified schedule-disable capability, which reuses
-the identical internal verifier the enable capability already uses -
-the internal-only project_state_verify/schedule_verify_enabled_state
+the identical internal verifier the enable capability already uses;
+updated Phase 96 to describe the same command's new verified
+project-state phase-update capability, which reuses the identical
+internal verifier the focus-update capability already uses - the
+internal-only project_state_verify/schedule_verify_enabled_state
 tools are deliberately never documented here, since neither is a user
 command).
 
@@ -176,15 +179,20 @@ _HELP_LINES: tuple[str, ...] = (
     "read-only, no approval needed - the same data 'show jarvis project "
     "state'/'health check'/'list schedules'/'show memories'/'search "
     "memories'/'show approval history'/'show workflow history' already "
-    "report), or may update only its focus field, or enable or disable one "
-    "of your existing schedules by its exact id (schedule ids come from "
-    "'list schedules'/'show schedules' output) - every write action "
-    "requires your explicit approval, then a structured read-back checks "
-    "the real stored value matches what you approved - verification can "
-    "fail or be unavailable and is always reported honestly, never "
-    "assumed; an ambiguous or mismatched schedule id is refused, never "
-    "guessed, and no automatic retry ever follows a mismatch or a "
-    "verifier failure. May honestly report that no supported capability can "
+    "report), or may update only its focus or phase field, or enable or "
+    "disable one of your existing schedules by its exact id (schedule ids "
+    "come from 'list schedules'/'show schedules' output) - every write "
+    "action requires your explicit approval, then a structured read-back "
+    "checks the real stored value matches what you approved - "
+    "verification can fail or be unavailable and is always reported "
+    "honestly, never assumed; an ambiguous or mismatched schedule id, "
+    "focus value, or phase value is refused, never guessed, and no "
+    "automatic retry ever follows a mismatch or a verifier failure. "
+    "ProjectState fields are always manually recorded - never "
+    "auto-detected from git, a document, a commit, a test result, or the "
+    "filesystem. There is no AI-selectable way to update branch, commit, "
+    "or suite result - only focus and phase, each by their own capability. "
+    "May honestly report that no supported capability can "
     "satisfy your request, or ask you to restate an ambiguous, "
     "conflicting, or unconfirmable request more directly. Zero retries, "
     "zero replans, no arbitrary tool access, no autonomous behavior - a "

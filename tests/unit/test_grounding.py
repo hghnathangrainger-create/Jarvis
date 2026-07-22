@@ -1437,13 +1437,227 @@ def test_schedule_disable_signature_is_absent_of_unsupported_synonyms() -> None:
         assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
 
 
-def test_all_ten_user_facing_capabilities_retain_one_collision_free_accepted_phrasing() -> (
+# ---------------------------------------------------------------------------
+# 16. Phase 96: PROJECT_STATE_UPDATE_PHASE signature and value attribution.
+# ---------------------------------------------------------------------------
+
+
+def test_update_phase_real_phrasing_is_grounded() -> None:
+    result = _ground(
+        "update my project phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 96",
+    )
+    assert result.grounded is True
+
+
+def test_update_phase_exact_span_is_accepted() -> None:
+    result = _ground(
+        "update my project phase to Phase 96 verification",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 96 verification",
+    )
+    assert result.grounded is True
+
+
+def test_update_phase_missing_marker_refuses() -> None:
+    result = _ground(
+        "update my project phase",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="x",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.MISSING_ARGUMENT_SPAN
+
+
+def test_update_phase_multiple_markers_refuses() -> None:
+    result = _ground(
+        "update my phase to talk to the team",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="talk to the team",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_update_phase_nothing_after_marker_refuses() -> None:
+    result = _ground(
+        "update my phase to", CapabilityId.PROJECT_STATE_UPDATE_PHASE, value="x"
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.MISSING_ARGUMENT_SPAN
+
+
+def test_update_phase_old_value_refuses() -> None:
+    """The old/current value, even if it appears elsewhere, is never
+    accepted in place of the actual requested new-phase span."""
+    result = _ground(
+        "update my phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 95",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.ARGUMENT_VALUE_MISMATCH
+
+
+def test_update_phase_expanded_value_refuses() -> None:
+    result = _ground(
+        "update my phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 96 and also rewrite history",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.ARGUMENT_VALUE_MISMATCH
+
+
+def test_update_phase_negated_request_refuses() -> None:
+    result = _ground(
+        "do not update my phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 96",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NEGATED_OR_CONFLICTING_REQUEST
+
+
+def test_update_phase_action_without_domain_refuses() -> None:
+    result = _ground(
+        "please update this", CapabilityId.PROJECT_STATE_UPDATE_PHASE, value="x"
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_phase_domain_without_update_action_refuses() -> None:
+    """Unlike "show my schedule" (which genuinely matches SCHEDULE_LIST
+    via its own "show"/"list" action tokens), no other capability's
+    domain includes "phase", so "show" + "phase" alone matches zero
+    signatures at all - never guessed at as PROJECT_STATE_UPDATE_PHASE."""
+    result = _ground(
+        "show my phase please", CapabilityId.PROJECT_STATE_UPDATE_PHASE, value="x"
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_update_alone_grounds_nothing_for_phase() -> None:
+    result = _ground(
+        "update please", CapabilityId.PROJECT_STATE_UPDATE_PHASE, value="x"
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_phase_alone_grounds_nothing() -> None:
+    result = _ground(
+        "phase 96 please", CapabilityId.PROJECT_STATE_UPDATE_PHASE, value="x"
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_update_phase_request_does_not_ground_project_state_show() -> None:
+    result = _ground(
+        "update my project phase to Phase 96",
+        CapabilityId.PROJECT_STATE_SHOW,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_update_focus_and_phase_remain_separate_capabilities() -> None:
+    """A valid focus-update request grounds only PROJECT_STATE_UPDATE_FOCUS,
+    and a valid phase-update request grounds only
+    PROJECT_STATE_UPDATE_PHASE - neither signature is satisfied by the
+    other's real phrasing, even though both capabilities share the
+    identical write/verify tool-name pair internally."""
+    focus_result = _ground(
+        "update my project focus to shipping",
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        value="shipping",
+    )
+    assert focus_result.grounded is True
+
+    phase_result = _ground(
+        "update my project phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="Phase 96",
+    )
+    assert phase_result.grounded is True
+
+    focus_selected_for_phase_request = _ground(
+        "update my project phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        value="Phase 96",
+    )
+    assert focus_selected_for_phase_request.grounded is False
+    assert (
+        focus_selected_for_phase_request.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+    phase_selected_for_focus_request = _ground(
+        "update my project focus to shipping",
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        value="shipping",
+    )
+    assert phase_selected_for_focus_request.grounded is False
+    assert (
+        phase_selected_for_focus_request.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+
+def test_request_combining_focus_and_phase_signatures_refuses_as_multiple_matches() -> (
     None
 ):
-    """Every one of the ten model-selectable capabilities has at least
-    one real, accepted phrasing that grounds it and only it - proving
-    the catalogue-wide uniqueness rule holds across the complete,
-    Phase-95-expanded signature table."""
+    result = _ground(
+        "update my project focus to shipping and update my project phase to Phase 96",
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        value="shipping",
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.MULTIPLE_SIGNATURES_MATCHED
+
+
+def test_update_phase_does_not_collide_with_any_other_existing_capability() -> None:
+    request = "update my project phase to Phase 96"
+    other_capabilities = (
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
+        CapabilityId.APPROVAL_HISTORY,
+        CapabilityId.WORKFLOW_HISTORY,
+        CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
+    )
+    for capability_id in other_capabilities:
+        result = _ground(request, capability_id, value="irrelevant")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_internal_project_state_verifier_remains_absent_from_grounding_after_phase_96() -> (
+    None
+):
+    """PROJECT_STATE_VERIFY_FOCUS stays absent from the grounding
+    signature table even after Phase 96 adds a second capability that
+    pairs with it - the verifier is never itself a signature, no
+    matter how many write capabilities reuse it."""
+    from intelligence.grounding import _SIGNATURES
+
+    assert CapabilityId.PROJECT_STATE_VERIFY_FOCUS not in _SIGNATURES
+
+
+def test_all_eleven_user_facing_capabilities_retain_one_collision_free_accepted_phrasing() -> (
+    None
+):
+    """Every one of the eleven model-selectable capabilities has at
+    least one real, accepted phrasing that grounds it and only it -
+    proving the catalogue-wide uniqueness rule holds across the
+    complete, Phase-96-expanded signature table."""
     cases = (
         ("show my project state", CapabilityId.PROJECT_STATE_SHOW, {}),
         (
@@ -1467,6 +1681,11 @@ def test_all_ten_user_facing_capabilities_retain_one_collision_free_accepted_phr
         ("show workflow history", CapabilityId.WORKFLOW_HISTORY, {}),
         ("enable schedule 5", CapabilityId.SCHEDULE_ENABLE, {"schedule_id": 5}),
         ("disable schedule 5", CapabilityId.SCHEDULE_DISABLE, {"schedule_id": 5}),
+        (
+            "update my project phase to Phase 96",
+            CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+            {"value": "Phase 96"},
+        ),
     )
     for request_text, capability_id, arguments in cases:
         result = ground_decision(

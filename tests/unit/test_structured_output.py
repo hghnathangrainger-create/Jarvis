@@ -1176,3 +1176,214 @@ def test_schedule_disable_declares_exactly_one_required_int_argument() -> None:
 
 def test_schedule_disable_is_not_internal_only() -> None:
     assert CAPABILITY_CATALOG[CapabilityId.SCHEDULE_DISABLE].internal_only is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 96: project_state_update_phase - one required string argument,
+# identical string-hygiene rules to project_state_update_focus
+# ---------------------------------------------------------------------------
+
+_UPDATE_PHASE_EXECUTE_TEXT = json.dumps(
+    {
+        "decision": "execute",
+        "capability_id": "project_state_update_phase",
+        "arguments": {"value": "Phase 96"},
+    }
+)
+
+
+def test_update_phase_valid_selection() -> None:
+    result = parse_tool_selection(_UPDATE_PHASE_EXECUTE_TEXT, CAPABILITY_CATALOG)
+    assert result.decision is ToolSelectionDecision.EXECUTE
+    assert result.capability_id is CapabilityId.PROJECT_STATE_UPDATE_PHASE
+    assert result.arguments == {"value": "Phase 96"}
+
+
+def test_update_phase_missing_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+@pytest.mark.parametrize(
+    "stray_arguments",
+    [
+        {"value": "Phase 96", "field": "phase"},
+        {"value": "Phase 96", "field": "focus"},
+        {"value": "Phase 96", "operation": "update"},
+        {"value": "Phase 96", "verifier": "project_state_phase_exact_match"},
+        {
+            "value": "Phase 96",
+            "verification_strategy_id": "project_state_phase_exact_match",
+        },
+        {"value": "Phase 96", "tool_name": "project_state_update"},
+        {"value": "Phase 96", "expected_value": "Phase 96"},
+        {"field": "phase"},
+    ],
+)
+def test_update_phase_rejects_any_extra_argument(
+    stray_arguments: dict[str, object],
+) -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": stray_arguments,
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "unknown argument name in model output"
+
+
+@pytest.mark.parametrize("bad_value", [None, True, False, 5, 5.0, [], {}])
+def test_update_phase_wrong_type_value_is_rejected(bad_value: object) -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": bad_value},
+        }
+    )
+    _fails(text, catalog=CAPABILITY_CATALOG)
+
+
+def test_update_phase_empty_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": ""},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_update_phase_whitespace_only_value_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "   \t  "},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "empty or whitespace-only string argument"
+
+
+def test_update_phase_over_500_chars_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "x" * 501},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "oversized string argument"
+
+
+def test_update_phase_exactly_500_chars_is_accepted() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "x" * 500},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert len(result.arguments["value"]) == 500
+
+
+def test_update_phase_nul_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "hello\x00world"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument contains a NUL character"
+
+
+def test_update_phase_leading_control_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "\x01leading control char"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_update_phase_trailing_control_character_is_rejected() -> None:
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "trailing control char\x1f"},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert reason == "string argument has a leading or trailing control character"
+
+
+def test_update_phase_leading_or_trailing_plain_space_is_not_a_control_character() -> (
+    None
+):
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": " padded with spaces "},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == " padded with spaces "
+
+
+def test_update_phase_value_is_never_normalized_or_rewritten() -> None:
+    """The validated value is preserved verbatim - no trimming, no
+    case-folding, no collapsing of internal whitespace - identical
+    contract to project_state_update_focus's own."""
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": "Phase   96   (mid-cycle)"},
+        }
+    )
+    result = parse_tool_selection(text, CAPABILITY_CATALOG)
+    assert result.arguments["value"] == "Phase   96   (mid-cycle)"
+
+
+def test_update_phase_rejected_value_is_never_echoed_in_the_error() -> None:
+    marker = "UNIQUE_SECRET_TO_NEVER_LEAK_PHASE96"
+    text = json.dumps(
+        {
+            "decision": "execute",
+            "capability_id": "project_state_update_phase",
+            "arguments": {"value": marker + ("x" * 501)},
+        }
+    )
+    reason = _fails(text, catalog=CAPABILITY_CATALOG)
+    assert marker not in reason
+
+
+def test_update_phase_declares_exactly_one_required_string_argument() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE]
+    assert [spec.name for spec in adapter.arguments] == ["value"]
+    assert adapter.arguments[0].type_name == "str"
+    assert adapter.arguments[0].required is True
+
+
+def test_update_phase_is_not_internal_only() -> None:
+    assert CAPABILITY_CATALOG[CapabilityId.PROJECT_STATE_UPDATE_PHASE].internal_only is False

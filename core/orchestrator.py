@@ -66,6 +66,7 @@ from intelligence.capability_catalog import (
     CAPABILITY_CATALOG,
     CapabilityId,
     ExecutionStrategy,
+    fixed_arguments_for,
 )
 from intelligence.context import ContextAssembler, build_ai_context_block
 from intelligence.grounding import UngroundedReason
@@ -76,10 +77,12 @@ from intelligence.planning import (
     select_tool,
 )
 from intelligence.verification import (
+    FOCUS_EXACT_MATCH_VERIFIER_ID,
+    PROJECT_STATE_PHASE_EXACT_MATCH_VERIFIER_ID,
     SCHEDULE_DISABLED_EXACT_MATCH_VERIFIER_ID,
     SCHEDULE_ENABLED_EXACT_MATCH_VERIFIER_ID,
     VerificationOutcome,
-    verify_focus_update,
+    verify_project_state_field,
     verify_schedule_enabled_state,
 )
 from memory.memory_manager import MemoryManager
@@ -2090,6 +2093,9 @@ class JarvisOrchestrator:
             CapabilityId.SCHEDULE_DISABLE: (
                 self._schedule_disable_workflow_result_to_response
             ),
+            CapabilityId.PROJECT_STATE_UPDATE_PHASE: (
+                self._project_state_update_phase_workflow_result_to_response
+            ),
         }
         if write_capability_id is not None and write_capability_id in response_builders:
             return response_builders[write_capability_id](result)
@@ -2105,12 +2111,14 @@ class JarvisOrchestrator:
         never a hardcoded per-capability check (Phase 94, Batch 3).
 
         Iterates every CAPABILITY_CATALOG entry whose
-        allowed_strategy is TWO_STEP_WORKFLOW (today exactly
-        PROJECT_STATE_UPDATE_FOCUS and SCHEDULE_ENABLE) and returns the
-        first whose write-tool/paired-verify-tool pair matches
-        result.plan's exact two steps, in order. A future
-        TWO_STEP_WORKFLOW capability added to the catalog is recognised
-        here automatically, with zero change to this method.
+        allowed_strategy is TWO_STEP_WORKFLOW (today
+        PROJECT_STATE_UPDATE_FOCUS, SCHEDULE_ENABLE, SCHEDULE_DISABLE,
+        and PROJECT_STATE_UPDATE_PHASE) and returns the first whose
+        write-tool/paired-verify-tool pair (and any trusted fixed
+        arguments - see _matches_two_step_workflow_shape's own
+        docstring) matches result.plan's exact two steps, in order. A
+        future TWO_STEP_WORKFLOW capability added to the catalog is
+        recognised here automatically, with zero change to this method.
 
         Args:
             result: A real WorkflowResult, from either run() or resume().
@@ -2137,7 +2145,22 @@ class JarvisOrchestrator:
         """Shared structural-shape check both workflow recognizers use:
         does result.plan's exact two-step tool-name pair match
         write_capability_id's own catalog-declared write tool and
-        paired verify tool, in that order.
+        paired verify tool, in that order - and, where that capability
+        declares any trusted fixed-argument literals, does the write
+        step's own already-built tool_input agree with them too
+        (Phase 96).
+
+        The fixed-argument check exists because two real capabilities
+        can legitimately share one *identical* write/verify tool-name
+        pair: PROJECT_STATE_UPDATE_FOCUS and PROJECT_STATE_UPDATE_PHASE
+        both call project_state_update/project_state_verify (unlike
+        SCHEDULE_ENABLE/SCHEDULE_DISABLE, whose write tool names
+        differ), so the tool-name pair alone is not always unique.
+        fixed_arguments_for() is itself trusted, static
+        CAPABILITY_CATALOG data - never a hardcoded per-capability
+        literal inside this method, and never something model output
+        could influence - so this remains a fully generic, catalog-
+        driven check, not a new per-capability branch.
 
         A private, non-public helper - never exposed as a way to check
         an arbitrary capability_id against an arbitrary result; the two
@@ -2150,7 +2173,10 @@ class JarvisOrchestrator:
                 whose shape to check against.
 
         Returns:
-            True only if the exact tool-name pair matches, in order.
+            True only if the exact tool-name pair matches, in order,
+            and any trusted fixed arguments the write capability
+            declares are all present with matching values in the write
+            step's own tool_input.
         """
         steps = result.plan.steps
         if len(steps) != 2:
@@ -2164,10 +2190,17 @@ class JarvisOrchestrator:
         if verify_adapter is None:
             return False
 
-        return (
-            steps[0].tool_name == write_adapter.tool_name
-            and steps[1].tool_name == verify_adapter.tool_name
-        )
+        if steps[0].tool_name != write_adapter.tool_name:
+            return False
+        if steps[1].tool_name != verify_adapter.tool_name:
+            return False
+
+        fixed_arguments = fixed_arguments_for(write_capability_id)
+        for key, value in fixed_arguments.items():
+            if steps[0].tool_input.get(key) != value:
+                return False
+
+        return True
 
     def _update_focus_workflow_result_to_response(
         self, result: WorkflowResult
@@ -2177,7 +2210,7 @@ class JarvisOrchestrator:
 
         Never asks AI to judge success: verification is always the
         real, exact-string-equality comparison
-        intelligence.verification.verify_focus_update() performs
+        intelligence.verification.verify_project_state_field() performs
         against the real, already-durable PlanStep.tool_input["value"]
         and the verify step's real ToolResult.metadata["focus"].
 
@@ -2218,8 +2251,10 @@ class JarvisOrchestrator:
             result.step_outcomes[1] if len(result.step_outcomes) > 1 else None
         )
         expected_value = str(write_outcome.step.tool_input.get("value", ""))
-        verification = verify_focus_update(
+        verification = verify_project_state_field(
+            field_name="focus",
             expected_value=expected_value,
+            verifier_id=FOCUS_EXACT_MATCH_VERIFIER_ID,
             verify_tool_result=(
                 verify_outcome.tool_result if verify_outcome is not None else None
             ),
@@ -2233,6 +2268,108 @@ class JarvisOrchestrator:
             message = (
                 f"Jarvis updated the project focus to: {expected_value}. "
                 "Verification succeeded - the stored value matches."
+            )
+            success = True
+        elif verification.outcome is VerificationOutcome.FAILED:
+            message = (
+                "Jarvis's update tool reported success, but the structured "
+                "read-back found a different value than requested - the "
+                "update is not confirmed."
+            )
+            success = False
+        else:
+            message = (
+                "Jarvis's update tool reported success, but verification "
+                "could not be completed, so the update is not confirmed."
+            )
+            success = False
+
+        return JarvisResponse(
+            success=success,
+            message=message,
+            plan=result.plan,
+            tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+            intelligence_trace=trace,
+        )
+
+    def _project_state_update_phase_workflow_result_to_response(
+        self, result: WorkflowResult
+    ) -> JarvisResponse:
+        """Translate a real update-phase-and-verify WorkflowResult into
+        a grounded, verification-aware JarvisResponse (Phase 96 -
+        docs/phase_96_implementation_plan.md), mirroring
+        _update_focus_workflow_result_to_response's exact shape for
+        the fourth real verified workflow, with the one deliberate
+        difference the postcondition itself requires: field_name and
+        wording targeting "phase" instead of "focus".
+
+        Never asks AI to judge success: verification is always the
+        real, exact-string-equality comparison
+        intelligence.verification.verify_project_state_field() performs
+        against the real, already-durable PlanStep.tool_input["value"]
+        and the verify step's real ToolResult.metadata["phase"].
+        ProjectState is always manually recorded - this response never
+        claims a phase value was auto-detected from Git, a document,
+        a commit, a test result, or the filesystem.
+
+        Args:
+            result: The real WorkflowResult from run() or resume().
+
+        Returns:
+            A JarvisResponse honestly reflecting exactly one of:
+            pending approval (WAITING); the write step itself never
+            executed (failed/blocked/declined - no verification
+            attempted); or, once the write step completed, a real
+            VerificationOutcome (VERIFIED/FAILED/UNAVAILABLE) grounded
+            in real values only - never AI prose, never a claimed
+            success the real results do not support.
+        """
+        if result.overall_status is StepStatus.WAITING:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: awaiting your approval to update the "
+                    "project phase.",
+                ),
+            )
+
+        write_outcome = result.step_outcomes[0]
+        if write_outcome.status is not StepStatus.COMPLETED:
+            base = self._workflow_result_to_response(result)
+            return replace(
+                base,
+                intelligence_trace=(
+                    "Step 1/2: update did not execute; no verification "
+                    "attempted.",
+                ),
+            )
+
+        verify_outcome = (
+            result.step_outcomes[1] if len(result.step_outcomes) > 1 else None
+        )
+        expected_value = str(write_outcome.step.tool_input.get("value", ""))
+        verification = verify_project_state_field(
+            field_name="phase",
+            expected_value=expected_value,
+            verifier_id=PROJECT_STATE_PHASE_EXACT_MATCH_VERIFIER_ID,
+            verify_tool_result=(
+                verify_outcome.tool_result if verify_outcome is not None else None
+            ),
+        )
+        trace = (
+            "Step 1/2: update executed.",
+            f"Step 2/2: verification {verification.outcome.value}.",
+        )
+
+        if verification.outcome is VerificationOutcome.VERIFIED:
+            message = (
+                f"Jarvis updated the project phase to: {expected_value}. "
+                "Verification succeeded - the stored value matches. "
+                "(Manually recorded - not auto-detected from Git, a "
+                "document, a commit, a test result, or the filesystem.)"
             )
             success = True
         elif verification.outcome is VerificationOutcome.FAILED:

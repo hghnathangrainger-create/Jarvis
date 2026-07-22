@@ -92,9 +92,10 @@ def test_focus_missing_but_other_fields_set_still_reports_empty_focus() -> None:
     assert result.metadata["last_updated"] != "not recorded yet"
 
 
-def test_metadata_contains_only_focus_and_last_updated() -> None:
-    """Data minimization (Batch 3 planning prompt): no branch, phase,
-    commit, or suite_result metadata is returned."""
+def test_metadata_contains_only_focus_phase_and_last_updated() -> None:
+    """Data minimization (Batch 3 planning prompt; Phase 96 added
+    "phase" once a second real consumer, PROJECT_STATE_UPDATE_PHASE,
+    existed): no branch, commit, or suite_result metadata is returned."""
     store = _store()
     store.update("branch", "main")
     store.update("phase", "Phase 90")
@@ -102,7 +103,8 @@ def test_metadata_contains_only_focus_and_last_updated() -> None:
     store.update("suite_result", "1 passed")
     store.update("focus", "test")
     result = _run(ProjectStateVerifyTool(store))
-    assert set(result.metadata) == {"focus", "last_updated"}
+    assert set(result.metadata) == {"focus", "phase", "last_updated"}
+    assert result.metadata["phase"] == "Phase 90"
 
 
 def test_output_is_short_and_honest() -> None:

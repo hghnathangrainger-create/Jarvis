@@ -306,3 +306,31 @@ Implementation must stop and report, never improvise past, if:
 ## 20. Manual Anthropic Limitation
 
 Live Anthropic manual acceptance testing remains **postponed** because the configured API account lacks sufficient credits. This is an **external account limitation, not a Jarvis production-code failure** - no production behavior is proposed to bypass it. All Phase 96 work (if implemented) will remain verifiable with deterministic and fake-provider tests, the same way every prior phase has been verified.
+
+---
+
+## 21. Implementation and Closure Evidence
+
+**Status: complete. Phase 96 is formally closed by this section and the accompanying `docs/phase_96_completion_report.md`.**
+
+### 21.1 Mandatory verifier-identity audit result
+
+Performed before any code was changed, exactly as the implementation task required. Confirmed: `CapabilityId` is never persisted anywhere (only plain `tool_name`/`tool_input` strings/dicts are - resolved fresh against the current `CAPABILITY_CATALOG` at reload time), so reusing `PROJECT_STATE_VERIFY_FOCUS`'s existing name/tool_name without renaming was both sufficient and safe. The smallest truthful, backward-compatible design (§7/§8 of this plan) was implemented exactly as proposed - no stop condition was triggered.
+
+### 21.2 One necessary correction beyond the plan's exact original wording
+
+Implementing the disambiguation this plan's §7 anticipated ("the current verifier can be generalized narrowly") surfaced a real, narrower architectural gap not named explicitly in the original plan text: `PROJECT_STATE_UPDATE_FOCUS` and `PROJECT_STATE_UPDATE_PHASE` share one *identical* write/verify tool-name pair (`project_state_update`/`project_state_verify`), unlike `SCHEDULE_ENABLE`/`SCHEDULE_DISABLE` (whose write tool names differ). The existing `_matches_two_step_workflow_shape()` matched purely on tool-name pair, so it would have silently returned whichever capability appeared first in the catalog for *both* real requests. Corrected by extending the check to also compare the write step's own already-built `tool_input` against that capability's own trusted `fixed_arguments_for()` data (a new, small, public accessor for the existing private `_FIXED_ARGUMENTS_BY_CAPABILITY` table) - still fully catalog-driven, never a hardcoded per-capability branch, and proven by a dedicated new test (`test_matching_two_step_write_capability_disambiguates_focus_from_phase`) plus a rejection test for a write step with no fixed-argument data at all.
+
+### 21.3 Verification results
+
+- Focused (16 files, run together): **1348 passed**.
+- New `tests/unit/test_orchestrator_update_phase_workflow.py`: **37 passed**.
+- Full suite, normal environment: **5203 passed, 3 skipped, 0 failed**.
+- Full suite, `AI_REASONING_ENABLED=false`: **5203 passed, 3 skipped, 0 failed** - identical.
+- Full suite, `PYTHON_DOTENV_DISABLED=1`: **5203 passed, 3 skipped, 0 failed** - identical.
+- Ruff, Git-derived file set (`git diff --name-only 21f2367 -- '*.py'` plus one new untracked file): exactly **16 files**. `ruff check` on all 16: **all checks passed, exit code 0, zero findings**.
+- `git diff --check`: exit code 0. Only pre-existing `LF will be replaced by CRLF` advisory notices, never a whitespace error.
+
+### 21.4 Scope confirmation
+
+No `PROJECT_STATE_UPDATE_BRANCH`/`COMMIT`/`SUITE`, no model-selectable `field` argument, no new `SecurityManager` rule, no tier change, no live Git/test-suite detection was added. `PROJECT_STATE_UPDATE_FOCUS`, `SCHEDULE_ENABLE`, and `SCHEDULE_DISABLE` remain provably bit-for-bit unchanged (all their pre-existing tests pass unmodified). `docs/phase_96_completion_report.md` was created. Phase 96 is formally closed. Phase 97 has not been started.
