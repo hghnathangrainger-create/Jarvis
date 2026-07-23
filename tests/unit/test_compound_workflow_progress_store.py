@@ -23,9 +23,14 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from storage.database import create_session_factory, initialize_database
-from storage.models import CompoundWorkflowProgress, PausedWorkflowState, ProjectState
-from workflow.compound_workflow_progress_store import (
+# These three imports must follow the importorskip() guard above -
+# moving them above it would import sqlalchemy-dependent modules
+# directly, causing a hard collection failure instead of a clean skip
+# when sqlalchemy is not installed. Matches the same, already-accepted
+# pattern in tests/unit/test_paused_workflow_store.py.
+from storage.database import create_session_factory, initialize_database  # noqa: E402
+from storage.models import CompoundWorkflowProgress, PausedWorkflowState, ProjectState  # noqa: E402
+from workflow.compound_workflow_progress_store import (  # noqa: E402
     ALLOWED_TEMPLATE_ID,
     CompoundOverallStatus,
     CompoundStepStatus,
