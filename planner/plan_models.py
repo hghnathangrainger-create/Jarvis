@@ -76,6 +76,44 @@ class PlanStep:
                 - is never interpreted or populated by an AI - only
                   deterministic, code-owned logic in a future WorkflowEngine
                   may act on it.
+        requires_verified_predecessor: Declares that this step may only
+            execute once the immediately preceding step's own real,
+            structured verification outcome is genuinely VERIFIED
+            (Phase 98, Batch 1 - docs/phase_98_implementation_plan.md).
+            False for every existing plan and for any step with no such
+            requirement - the default preserves every current workflow's
+            behavior exactly, since no live plan-construction code sets
+            this field yet (that remains a separately-approved, later
+            batch's responsibility).
+
+            This is a trusted, plan-construction-time-only property -
+            never model-selectable, never present in any structured AI
+            output, never a capability argument. WorkflowEngine
+            evaluates it generically (see workflow/engine.py's own
+            _verification_gate_failure_reason()), using only
+            verification_field_name/verification_expected_value below
+            and the immediately preceding step's own real
+            ToolResult.metadata - never AI output, never a second AI
+            call, never a generic expression or callback.
+        verification_field_name: The trusted, static metadata key to
+            read from the immediately preceding step's own
+            ToolResult.metadata, when requires_verified_predecessor is
+            True. None whenever requires_verified_predecessor is False.
+            Mirrors the field_name parameter
+            intelligence.verification.verify_project_state_field()
+            already accepts - this module intentionally does not import
+            that function (workflow/ has no dependency on intelligence/
+            today); WorkflowEngine's own gate performs the equivalent
+            exact-value comparison directly, generically, exactly like
+            its own existing _PROPAGATED_FIELDS mechanism already does
+            for input_from_previous_step.
+        verification_expected_value: The trusted, already-durable
+            expected value (e.g. the approved phase value) this step's
+            gate compares the preceding step's own real metadata value
+            against, exactly, when requires_verified_predecessor is
+            True. None whenever requires_verified_predecessor is False.
+            Always supplied by trusted plan-construction code - never
+            parsed from or influenced by model output.
     """
 
     number: int
@@ -86,6 +124,9 @@ class PlanStep:
     tool_name: str | None = None
     tool_input: dict[str, object] = field(default_factory=dict)
     input_from_previous_step: bool = False
+    requires_verified_predecessor: bool = False
+    verification_field_name: str | None = None
+    verification_expected_value: str | None = None
 
     @property
     def is_blocked(self) -> bool:

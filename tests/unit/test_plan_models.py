@@ -219,6 +219,12 @@ def test_plan_step_has_exactly_the_approved_field_set() -> None:
         "tool_name",
         "tool_input",
         "input_from_previous_step",
+        # Phase 98, Batch 1 (docs/phase_98_implementation_plan.md): the
+        # trusted verification-continuation gate. All three default to
+        # values that leave every existing PlanStep unchanged.
+        "requires_verified_predecessor",
+        "verification_field_name",
+        "verification_expected_value",
     }
 
 

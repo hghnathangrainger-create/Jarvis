@@ -886,3 +886,110 @@ class ProjectState(Base):
             A string identifying the row by id and last_updated.
         """
         return f"<ProjectState id={self.id} last_updated={self.last_updated!r}>"
+
+
+class CompoundWorkflowProgress(Base):
+    """Durable, authoritative step-progress state for exactly one future,
+    not-yet-live compound workflow template (Phase 98, Batch 1 -
+    docs/phase_98_implementation_plan.md):
+    PROJECT_STATE_UPDATE_PHASE -> internal phase verification ->
+    PROJECT_STATE_SHOW.
+
+    This table is deliberately narrow - scoped exclusively to this one
+    trusted template, never a generic workflow-progress framework.
+    `workflow.compound_workflow_progress_store.CompoundWorkflowProgressStore`
+    is the sole owner of every write to this table; a row's own
+    `overall_status`/`step_*_status` fields are this template's
+    authoritative execution state - unlike `WorkflowHistoryEntry`, which
+    remains a permanent, append-only, execution-decision-independent
+    audit log, and unlike `PausedWorkflowState`, which only ever
+    represents "paused awaiting approval," never "actively progressing
+    after approval." No code in this phase reads or writes this table
+    from any live request path - it exists only so its own dedicated
+    tests can prove the mechanism correct ahead of a later, separately-
+    approved batch that wires it into live execution.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        workflow_id: The workflow id this row describes (matches
+            WorkflowEngine's own per-run correlation id). Unique - at
+            most one row per workflow.
+        template_id: The trusted, static compound-template identity
+            (matches
+            intelligence.compound_grounding.CompoundTemplate.template_id)
+            this workflow was built from. Immutable once set - never
+            replaced.
+        request_id: The id of the linked approval/paused-workflow this
+            compound workflow began from, if any.
+        approved_phase_value: The exact, already-approved phase value
+            this workflow was authorized to write. Immutable once set.
+        pre_execution_phase_value: The real ProjectState.phase value
+            observed immediately before the write step was attempted,
+            or None if never recorded. Used only for honest, bounded
+            reconciliation (see
+            workflow.compound_workflow_progress_store.reconcile_phase_update) -
+            never to claim execution occurred by itself.
+        pre_execution_last_updated: The real ProjectState.last_updated
+            timestamp observed at the same moment as
+            pre_execution_phase_value, or None. A change between this
+            value and the real, current last_updated at reconciliation
+            time is evidence that *some* write touched the row since -
+            never, by itself, proof of which write.
+        step_1_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the phase-update write step.
+        step_2_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the internal phase-verification step.
+        step_2_verification_outcome: One of "verified" / "failed" /
+            "unavailable", or None before step 2 completes. Mirrors
+            intelligence.verification.VerificationOutcome's own bounded
+            vocabulary - never a raw metadata string.
+        step_3_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the ProjectState-show read step.
+        overall_status: One of "pending" / "in_progress" /
+            "needs_reconciliation" / "completed" / "failed".
+        created_at: UTC timestamp this row was first written.
+        updated_at: UTC timestamp this row was last written.
+    """
+
+    __tablename__ = "compound_workflow_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    template_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    request_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    approved_phase_value: Mapped[str] = mapped_column(Text, nullable=False)
+    pre_execution_phase_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pre_execution_last_updated: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    step_1_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    step_2_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    step_2_verification_outcome: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+    step_3_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    overall_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by workflow_id and overall_status.
+        """
+        return (
+            f"<CompoundWorkflowProgress workflow_id={self.workflow_id!r} "
+            f"overall_status={self.overall_status!r}>"
+        )

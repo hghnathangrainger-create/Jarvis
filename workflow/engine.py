@@ -672,6 +672,24 @@ class WorkflowEngine:
                     tool_result=tool_result,
                 )
 
+            gate_failure_reason = self._verification_gate_failure_reason(
+                step, tuple(outcomes)
+            )
+            if gate_failure_reason is not None:
+                tool_result = ToolResult(
+                    tool_name=step.tool_name or "",
+                    success=False,
+                    error=gate_failure_reason,
+                )
+                return self._stop(
+                    plan,
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                    completed_outcomes=tuple(outcomes),
+                    step=step,
+                    tool_result=tool_result,
+                )
+
             tool_result = self._executor.execute(
                 step.tool_name, tool_input, session_id=session_id
             )
@@ -909,6 +927,100 @@ class WorkflowEngine:
 
         return tool_input, False
 
+    # ----- trusted verification-continuation gate (Phase 98, Batch 1) --------
+
+    @staticmethod
+    def _verification_gate_failure_reason(
+        step: PlanStep, prior_outcomes: tuple[WorkflowStepOutcome, ...]
+    ) -> str | None:
+        """Decide whether a step whose requires_verified_predecessor is
+        True may proceed, and return an honest, bounded stop reason if
+        not (Phase 98, Batch 1 - docs/phase_98_implementation_plan.md).
+
+        A no-op (returns None immediately) for any step that does not
+        set requires_verified_predecessor - this is the exact condition
+        that keeps every existing plan's behavior byte-for-byte
+        unchanged, since no live plan-construction code sets this field
+        yet.
+
+        This method never consults ToolResult.success alone, a
+        verifier's own exit status, free-text output, or a fuzzy
+        metadata-string check: it performs the same exact-value
+        comparison intelligence.verification.verify_project_state_field()
+        already performs (workflow/ has no import dependency on
+        intelligence/, so this is a deliberate, generic, engine-native
+        re-implementation of the identical comparison, not a duplicate
+        philosophy) against the immediately preceding step's own real,
+        structured ToolResult.metadata - never AI output, never a
+        second AI call, never a generic expression or callback. A
+        genuinely successful read whose observed value differs from
+        the expected one is reported as a verification mismatch, kept
+        honestly distinct from a verifier read failure or an
+        unavailable value - never conflated with either, and never
+        capable of being satisfied by the gated step's own tool
+        succeeding or failing (this check runs before the gated step's
+        tool is ever invoked).
+
+        Args:
+            step: The step about to be attempted.
+            prior_outcomes: Every outcome recorded so far, in order.
+
+        Returns:
+            None if step does not require a verified predecessor, or
+            the immediately preceding outcome's real metadata exactly
+            matches step's own trusted expected value. Otherwise a
+            short, bounded, honest reason string describing exactly
+            why continuation is refused - the caller must not execute
+            the step.
+        """
+        if not step.requires_verified_predecessor:
+            return None
+
+        if not prior_outcomes:
+            return (
+                "Cannot execute this step: it requires a verified "
+                "preceding step, but there is no preceding step."
+            )
+
+        previous = prior_outcomes[-1]
+        if previous.status is not StepStatus.COMPLETED or previous.tool_result is None:
+            return (
+                "Cannot execute this step: the preceding verification "
+                "step did not complete, so verification is unavailable."
+            )
+
+        if not previous.tool_result.success:
+            return (
+                "Cannot execute this step: the preceding verification "
+                "step did not succeed, so verification is unavailable."
+            )
+
+        field_name = step.verification_field_name
+        expected_value = step.verification_expected_value
+        if field_name is None or expected_value is None:
+            return (
+                "Cannot execute this step: it requires a verified "
+                "preceding step, but no trusted verification field/value "
+                "is configured."
+            )
+
+        actual_value = previous.tool_result.metadata.get(field_name)
+        if actual_value is None or not isinstance(actual_value, str):
+            return (
+                "Cannot execute this step: the preceding verification "
+                "step returned no usable value, so verification is "
+                "unavailable."
+            )
+
+        if actual_value != expected_value:
+            return (
+                "Cannot execute this step: the preceding verification "
+                "did not confirm the expected value - this is a "
+                "verification mismatch, not a verifier failure."
+            )
+
+        return None
+
     # ----- executable-plan precondition validation ---------------------------
 
     @staticmethod
@@ -958,6 +1070,22 @@ class WorkflowEngine:
                 raise WorkflowError(
                     "The first workflow step cannot use "
                     "input_from_previous_step - there is no previous step."
+                )
+
+            if index == 0 and step.requires_verified_predecessor:
+                raise WorkflowError(
+                    "The first workflow step cannot use "
+                    "requires_verified_predecessor - there is no previous step."
+                )
+
+            if step.requires_verified_predecessor and (
+                step.verification_field_name is None
+                or step.verification_expected_value is None
+            ):
+                raise WorkflowError(
+                    f"Step {step.number} sets requires_verified_predecessor "
+                    "but does not configure both verification_field_name "
+                    "and verification_expected_value."
                 )
 
     # ----- workflow id ---------------------------------------------------------
@@ -1164,6 +1292,9 @@ class WorkflowEngine:
             "tool_name": step.tool_name,
             "tool_input": dict(step.tool_input),
             "input_from_previous_step": step.input_from_previous_step,
+            "requires_verified_predecessor": step.requires_verified_predecessor,
+            "verification_field_name": step.verification_field_name,
+            "verification_expected_value": step.verification_expected_value,
         }
 
     @staticmethod
@@ -1353,6 +1484,13 @@ class WorkflowEngine:
                     tool_input=dict(s.get("tool_input") or {}),
                     input_from_previous_step=bool(
                         s.get("input_from_previous_step", False)
+                    ),
+                    requires_verified_predecessor=bool(
+                        s.get("requires_verified_predecessor", False)
+                    ),
+                    verification_field_name=s.get("verification_field_name"),
+                    verification_expected_value=s.get(
+                        "verification_expected_value"
                     ),
                 )
                 for s in record.plan_steps

@@ -619,3 +619,241 @@ all scoped to exactly one consumer. The recommendation changes to
 **Outcome B**: build this foundation first, in its own batch, with
 complete regression proof, before any live selection or user-visible
 wiring begins.
+
+## 17. Batch 1 — Implementation Evidence
+
+Batch 1 (the trusted verification gate and durable compound-progress
+foundation, Sections 1 and 4 above) is implemented, closing no live
+wiring at all.
+
+### 17.1 Verification gate - exact implementation
+
+- `PlanStep` (`planner/plan_models.py`) gains three new, optional
+  fields: `requires_verified_predecessor: bool = False`,
+  `verification_field_name: str | None = None`,
+  `verification_expected_value: str | None = None`. All three default
+  to values that leave every existing `PlanStep` construction site
+  unchanged.
+- `WorkflowEngine` (`workflow/engine.py`) gains
+  `_verification_gate_failure_reason()`, called from `_run_from()`'s
+  loop immediately after the existing `input_from_previous_step`
+  "usable" check and before `ToolExecutor.execute()`. It is a no-op
+  (returns `None`) whenever `requires_verified_predecessor` is
+  `False` - the exact condition that keeps every existing plan
+  unchanged. When `True`, it examines the immediately preceding
+  outcome's own real `ToolResult` and distinguishes, honestly:
+  preceding step never completed / preceding step's own read failed
+  (`success=False`) / preceding step produced no usable value at the
+  configured key / the observed value exactly matches the configured
+  expected value (permitted) / the observed value differs (a genuine
+  mismatch, reported with a distinct message that never says
+  "verifier failure"). `_validate_executable_plan()` additionally
+  rejects, at construction time, a first step declaring the gate (no
+  predecessor exists) or a gated step missing either trusted
+  configuration value.
+- **Design refinement from the committed plan**: the committed
+  amendment's prose described the engine "calling
+  `verify_project_state_field()`... unchanged." Implementation found
+  that `workflow/engine.py` has no import dependency on
+  `intelligence/` today (confirmed directly), and that importing
+  `intelligence.verification` from it would invert this codebase's own
+  existing layering (today `intelligence/` depends on `workflow/`, via
+  `planner.plan_models`/`workflow.engine`, never the reverse). Instead,
+  `WorkflowEngine` performs the *identical* exact-match comparison
+  generically and engine-natively - reusing the same style already
+  established by `_PROPAGATED_FIELDS`/`_resolve_tool_input()` for
+  `input_from_previous_step` - never consulting
+  `intelligence.verification` at all. This achieves the exact same
+  semantic guarantee (a genuinely successful-but-mismatched read is
+  never conflated with a verifier failure) with a strictly smaller,
+  more additive footprint (zero new cross-package import). No
+  guarantee from Section 1 is weakened by this refinement.
+- **Mismatch vs. verifier-failure evidence**: proven by a dedicated
+  test (`test_mismatch_and_verifier_failure_produce_different_messages`)
+  constructing both scenarios against the same plan shape and asserting
+  their `ToolResult.error` text differs, with "mismatch" appearing only
+  in the mismatch case; a second test
+  (`test_tool_result_success_cannot_override_failed_verification`)
+  proves the verify step's own `ToolResult.success` remains `True`
+  (the read genuinely succeeded) even as the *gate* still stops the
+  workflow - the two concepts are structurally independent.
+- **Backward-compatible serialization**: `_plan_step_to_dict()` now
+  also emits the three new keys; `_try_reconstruct_paused_workflow()`
+  reads them via `.get(..., False)`/`.get(...)`, so an old, real,
+  already-persisted `plan_steps_json` payload lacking these keys
+  entirely reconstructs a `PlanStep` with `requires_verified_predecessor=False`
+  - proven directly (not merely asserted) by
+  `test_old_payload_without_new_keys_reconstructs_as_false`, which
+  builds a `PlanStep` from a literal, pre-Phase-98-shaped dict, and by
+  `test_round_trip_through_json_preserves_gate_fields`, which proves a
+  gated step survives a real `json.dumps`/`json.loads` round trip
+  unchanged.
+- **Trusted ownership**: proven structurally -
+  `test_gate_cannot_be_supplied_through_model_output` confirms neither
+  `intelligence/structured_output.py` nor
+  `intelligence/compound_structured_output.py`'s own source references
+  `requires_verified_predecessor` anywhere.
+
+### 17.2 CompoundWorkflowProgress - exact implementation
+
+- New table `compound_workflow_progress` (`storage/models.py`), created
+  additively via the existing `Base.metadata.create_all(bind=engine)`
+  mechanism - confirmed to add zero risk to any existing table.
+- New module `workflow/compound_workflow_progress_store.py`:
+  `CompoundStepStatus` (PENDING/IN_PROGRESS/COMPLETED/FAILED),
+  `CompoundOverallStatus` (PENDING/IN_PROGRESS/NEEDS_RECONCILIATION/
+  COMPLETED/FAILED), `CompoundVerificationOutcome` (VERIFIED/FAILED/
+  UNAVAILABLE), `CompoundWorkflowProgressStore` (create/get/list_all/
+  record_pre_execution_observation/mark_step_1_completed/start_step_2/
+  mark_step_2_completed/start_step_3/mark_step_3_completed/
+  mark_step_3_failed/mark_needs_reconciliation), and
+  `reconcile_phase_update()` plus `ReconciliationConfidence`/
+  `PhaseUpdateReconciliation`.
+- **Monotonic transitions and concurrency**: every transition method
+  routes through one shared `_compare_and_set()` helper issuing a
+  single, atomic SQL `UPDATE ... WHERE workflow_id = ? AND <expected
+  columns> = ?` statement and checking `rowcount` - never a
+  read-then-write pair, never an in-memory lock. A concurrent second
+  caller attempting the same transition from the same expected state
+  always sees `rowcount = 0` and receives `CompoundWorkflowProgressError`
+  - proven directly by `TestConcurrentAdvancement`. Illegal transitions
+  (completed→pending, verified→in-progress, reversed step order,
+  reactivating a terminal state, a second template id) are all proven
+  rejected in `TestIllegalTransitions`/`TestFixedTemplateIdentity`.
+- **Bounded fields only**: `CompoundWorkflowProgress`'s own column list
+  is fixed and directly asserted by
+  `test_model_declares_only_bounded_columns` - no raw tool output,
+  prompt, context, or secret column exists; `PROJECT_STATE_SHOW`'s own
+  output is never persisted at all (Section 3, Crash D) - the design
+  re-reads `ProjectState` fresh instead, whenever a later batch wires
+  this in.
+
+### 17.3 Reconciliation contract selected - Contract A, proven honest
+
+**Contract A** (sufficient pre-state and reconciliation evidence) is
+selected and implemented as `reconcile_phase_update()`, a pure
+function. Its critical refinement, found necessary during
+implementation of the ambiguity the task itself raised: matching the
+approved value *alone* cannot distinguish "already correct before
+execution" from "executed and trivially rewrote the same value" - so
+the function *also* consults `ProjectStateStore.last_updated`
+(observed both pre-execution and at reconciliation time). If
+`last_updated` changed since the pre-execution observation, *some*
+write demonstrably occurred; if it did not, no write occurred at all,
+regardless of whether the value already happened to match.
+
+- **Guarantees**: `POSTCONDITION_NOT_SATISFIED` is returned only when
+  the current value definitively does not equal the approved
+  value - proof the write has not (yet) taken effect.
+  `POSTCONDITION_SATISFIED_STATE_CHANGED` is returned only when real
+  evidence (a differing pre-execution value, or a changed timestamp)
+  shows a write occurred that left the expected value.
+- **Non-guarantees, stated honestly**: `POSTCONDITION_SATISFIED_STATE_CHANGED`
+  is never proof that *this specific* workflow's own tool call is what
+  produced the write (a genuinely concurrent, unrelated actor writing
+  the same value in the same narrow window is an irreducible ambiguity
+  of the current concurrency model, named here rather than hidden).
+  `POSTCONDITION_SATISFIED_EXECUTION_UNCONFIRMED` is returned whenever
+  neither the value nor the timestamp offers any evidence either way -
+  this function never resolves that case by guessing, and never
+  emits any status resembling "executed exactly once" (proven directly
+  by `test_reconciliation_never_claims_exactly_once`, which asserts no
+  `ReconciliationConfidence` member's own value contains the word
+  "exactly").
+- Already-matching pre-state without timestamp evidence is proven,
+  directly, to report `EXECUTION_UNCONFIRMED` - never a false
+  "executed" claim
+  (`test_already_matching_pre_state_without_timestamp_evidence_is_unconfirmed`).
+  The same pre-state *with* timestamp evidence correctly reports
+  `STATE_CHANGED`
+  (`test_already_matching_pre_state_with_timestamp_evidence_is_state_changed`).
+  An independently-changed, unexpected third value is distinguished
+  from "never executed" in the detail text
+  (`test_independently_changed_unexpected_state_is_not_satisfied`).
+- The function is proven to never call `ToolExecutor`/`ProjectStateStore`/
+  any tool, never touch `ApprovalManager`, and never reference
+  `workflow_history` - via AST-based real-identifier detection (not
+  raw text search, which would false-positive on the function's own
+  explanatory docstring).
+
+### 17.4 Approval-to-resume crash-gap re-audit
+
+Reconfirmed by direct re-inspection of the exact same code paths
+traced in the amendment (`ApprovalManager.approve()`/`_decide()`,
+`core/orchestrator.py`'s `execute_approved()`,
+`WorkflowEngine.resume()`/`reload_paused()`/
+`_try_reconstruct_paused_workflow()`): the finding stands unchanged.
+`approve()` durably decides a request and deletes its
+`pending_approval_state` row in one call, **before** the caller ever
+invokes `WorkflowEngine.resume()`. A process crash in that exact
+window leaves `paused_workflow_state` still present but its linked
+approval no longer "pending" - `reload_paused()`'s own
+`has_pending(record.request_id)` check then fails, and the entire
+approved-but-not-yet-executed workflow is invalidated on restart,
+silently, for **every** existing YELLOW capability (workflow-based or
+not) - not a defect Batch 1 introduces, and not fixed by Batch 1.
+
+No live compound wiring inherits this gap in Batch 1 - nothing built
+this batch calls `approve()`, `resume()`, or any approval flow at all
+(proven by `TestStoreHasNoSideEffects`/`TestNoLiveCompoundParserDispatch`
+in `tests/unit/test_phase98_batch1_isolation.py`).
+
+**Concrete required correction before Batch 2** (a durable
+approved-but-not-started handoff state, the first of the three options
+the amendment named): defer `pending_approval_state` row deletion for
+a workflow-linked request out of `ApprovalManager.approve()`/`_decide()`
+itself, into `WorkflowEngine.resume()` (mirroring exactly how
+`_remove_paused_state()` already only fires inside `resume()`, never
+inside `approve()`). `WorkflowEngine.reload_paused()`'s own
+`_try_reconstruct_paused_workflow()` would then need a small extension:
+accept a linked approval that is either still genuinely pending *or*
+already durably decided as approved-but-unconsumed (a new, narrow
+distinction - not "pending" in the sense `has_pending()` means today,
+but not yet "resumed" either), in addition to today's pending-only
+check.
+
+- **Would this affect existing YELLOW workflows?** Yes, unavoidably -
+  `ApprovalManager.approve()`/`_decide()` is one shared code path used
+  by every YELLOW action in the system, workflow-linked or not. This
+  confirms the correction is a **system-wide initiative**, outside the
+  proportionate scope of a compound-execution-specific foundation, and
+  must be its own, separately-scoped, separately-tested phase - not
+  folded into Phase 98's remaining batches.
+- **Backward-compatibility requirement**: any already-persisted
+  `pending_approval_state`/`paused_workflow_state` row (written before
+  this future correction ships) must continue to be interpreted
+  exactly as today - the new "approved-but-unconsumed" distinction
+  would need to default to "not applicable" for any row lacking the
+  new marker, so an in-flight upgrade never reinterprets old rows
+  differently than they already behave today.
+- **Per this batch's own instruction, Batch 2 must not begin** until
+  this correction is implemented as its own phase, or the residual risk
+  is explicitly, separately accepted through a dedicated approval
+  amendment - neither has happened as of this commit.
+
+### 17.5 Focused and regression evidence
+
+- New tests: 15 (verification gate) + 31 (progress store +
+  reconciliation) + 13 (isolation) = **59 passed**.
+- Existing regressions re-run (capability catalogue, structured
+  output, grounding, planning, plan models, workflow engine, paused-
+  workflow store, trusted workflow foundation, approval manager,
+  pending-approval store, verification, schedule enable/disable and
+  phase-update orchestrator workflows, Phase 97 compound modules,
+  command routing): **1403 passed**, with one pre-existing test
+  (`test_plan_step_has_exactly_the_approved_field_set`) updated to
+  include the three new, approved fields - an expected, legitimate
+  consequence of this batch's own intentional change, not a weakening.
+- Full suite: **5360 passed, 3 skipped, 0 failed**, identical in all
+  three required environments - exactly 59 more than the Phase 97
+  baseline of 5301.
+- Ruff: exit 0 on all new findings; three pre-existing `E402` findings
+  in the new `pytest.importorskip("sqlalchemy")`-guarded test file
+  match, verified identically, the same established, unfixed pattern
+  already present in the untouched `tests/unit/test_paused_workflow_store.py`.
+- `git diff --check`: clean.
+
+Phase 98 remains open. Batch 2 and Batch 3 were not started. No live
+compound selection, planning, orchestration, approval flow, command
+grammar, model instruction, help entry, or user-visible behavior was
+added.
