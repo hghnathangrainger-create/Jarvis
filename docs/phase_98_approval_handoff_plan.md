@@ -1,206 +1,250 @@
-# Phase 98 Safety Interlock Planning Gate — Durable Approved-to-Resume Handoff
+# Phase 98 Safety Interlock Planning Gate — Durable Approved-to-Resume Handoff (Amended)
 
 Status: **planning gate only**. No production or test code changed.
+This amendment resolves six mandatory gaps identified in the prior
+draft (committed at `5e90546`): the unstated process-concurrency
+assumption behind "no lease token"; the missing actionable lifecycle
+for `CLAIM_INTERRUPTED`; an incomplete post-claim transition matrix
+(most critically, the "crashed after real success, before the handoff
+was marked consumed" window); undefined approval-history/handoff
+consistency; and a `CONSUMED` state that conflated "ownership acquired"
+with "terminal outcome known." All resolutions below are grounded in
+direct, live inspection of the real calling code, not assumption.
 
 ## 1. Current baseline
 
-- Branch: `phase-4-ai-reasoning-and-write-actions`, HEAD `fc879c1`.
-- Phase 98 Batch 1 formally accepted and closed (`7feea73`, `fc879c1`).
-- Full suite: 5360 passed, 3 skipped, 0 failed, identical in all three
-  required environments.
-- Phase 98 remains open; Batch 2/3 have not started.
+Unchanged from the prior draft: HEAD `fc879c1` at the time of that
+draft, now amended after `5e90546`. Phase 98 Batch 1 accepted and
+closed. Batch 2/3 remain blocked.
 
-## 2. Exact discovered crash gap
+## 2. Supported process model (Mandatory gap 1)
 
-Confirmed by direct, live tracing of the real calling code (not
-assumption): `ui/cli.py` (the sole caller of this sequence in the
-running application) does exactly this, at lines 434-453:
+Directly inspected `main.py`, `ui/cli.py`, `dashboard.py`,
+`ui/dashboard_app.py`, `dashboard/read_model.py`, `scheduler.py`, and
+`storage/database.py`'s own WAL/busy-timeout configuration, and
+searched the whole repository for every production call site of
+`.approve(`, `.decline(`, `execute_approved(`, and `WorkflowEngine.resume(`.
 
-```python
-decision = self._orchestrator.approvals.approve(
-    request.request_id, decided_by=answer.decided_by
-)
-...
-if decision.is_approved:
-    executed = self._orchestrator.execute_approved(response, decision)
-```
+**Findings:**
 
-`ApprovalManager.approve()` (via `_decide()`) durably records the
-decision and **deletes** the `pending_approval_state` row in one call,
-synchronously, before `execute_approved()`/`WorkflowEngine.resume()`
-is ever invoked - confirmed directly in `approval/approval_manager.py`.
-A process crash between these two lines leaves: the decision durably
-recorded as APPROVED in `approval_history` (permanent, audit-only); no
-`pending_approval_state` row at all (deleted); and the linked
-`paused_workflow_state` row (if any) still present, but now orphaned -
-`WorkflowEngine.reload_paused()`'s own revalidation
-(`self._approvals.has_pending(record.request_id)`) finds the approval
-**not pending** (it was already decided) and invalidates the entire
-workflow as unresumable, silently discarding an already-approved user
-action.
+- Exactly **one** production code path ever calls
+  `approve()`/`decline()`/`execute_approved()`:
+  `ui/cli.py`'s `_handle_approval()` (lines 406-454), inside
+  `JarvisCLI.run()`'s single-threaded, synchronous, blocking
+  `while True: input()` loop. Within one running process, at most one
+  of these calls is ever in flight at a time - there is no
+  threading/asyncio anywhere in `approval/`, `workflow/`, `core/`,
+  `ui/`, or `main.py` (confirmed by direct search).
+- `main.py`'s `build_orchestrator()` calls
+  `approvals.reload_pending()` then `workflow_engine.reload_paused()`
+  exactly once, synchronously, strictly before `cli.run()` begins - no
+  live claimant can exist in this process before that pass completes,
+  by construction (the interactive loop that could ever call
+  `approve()`/`claim_for_resume()` has not started yet).
+- Two **other** real processes legitimately open the same SQLite file:
+  `dashboard.py` (confirmed, by direct inspection of its own docstring
+  and every write-method call site, to be **100% read-only** - it
+  never calls `ApprovalManager.approve()/decline()`,
+  `WorkflowEngine.resume()`, or any store's write method) and
+  `scheduler.py` (writes only to `ScheduleStore`/`InboxStore` - never
+  touches `pending_approval_state`, `paused_workflow_state`, or any
+  approval/workflow code path at all).
+- **No single-instance enforcement exists** (no PID file, no OS lock,
+  no documented "one instance only" policy) - nothing today
+  technically prevents a second `main.py` CLI process from being
+  started against the same database file.
 
-## 3. Current approval-to-resume sequence (exact, code-grounded)
+**Conclusion**: the real, documented, intended production model is
+**exactly one Jarvis CLI process is the sole actor in the
+approve-to-resume path** at any time; the two other processes that
+share the database never touch this path. The absence of enforcement
+is a real gap this correction closes explicitly (Section 7).
 
-1. A YELLOW step causes `WorkflowEngine`/`ToolExecutor` to return
-   `requires_confirmation=True`; `ApprovalManager.create_request()`
-   durably writes a `pending_approval_state` row (`PendingApprovalStore.save()`)
-   and, for a workflow, `WorkflowEngine._persist_paused_state()`
-   durably writes a `paused_workflow_state` row
-   (`PausedWorkflowStore.save()`) - two **independent**, separately
-   committed transactions, each via its own `session_scope()`.
-2. `ui/cli.py` prompts the user and calls
-   `ApprovalManager.approve(request_id, ...)`.
-3. `approve()` → `_decide()`: looks up the in-memory pending request,
-   builds the `ApprovalDecision`, removes it from `self._pending`,
-   stores it in `self._decisions`, writes one `approval_decision`
-   audit event, calls `_record_history_decision()` (durable,
-   permanent `approval_history` row - "approved"), and calls
-   `_remove_pending_state()` → `PendingApprovalStore.delete(request_id)`
-   (durable delete of `pending_approval_state`) - **all within this
-   one `approve()` call, all committed before it returns.**
-4. `ui/cli.py` prints the decision, then calls
-   `self._orchestrator.execute_approved(response, decision)`.
-5. `execute_approved()` derives `workflow_id` from `response` and
-   calls `WorkflowEngine.resume(workflow_id, decision, ...)`, which
-   pops `self._paused[workflow_id]` (in-memory) and calls
-   `_remove_paused_state()` → `PausedWorkflowStore.delete(workflow_id)`
-   (durable delete) **before** the approved step's `ToolExecutor.execute()`
-   call happens.
+**Selected: Design A - single-process, startup-exclusive recovery.**
+Design B (claim tokens/leases) is rejected as disproportionate: there
+is no genuine, intended concurrent-claimant scenario to defend against,
+and Design A's own requirements are fully satisfiable given this
+evidence.
 
-Step 3 and step 5 are two **separate**, independently committed
-database transactions, invoked by two **separate** function calls from
-the same calling code, with ordinary Python code (a `print`, an `if`)
-in between - never inside one atomic unit today.
+### Design A requirements, satisfied
 
-## 4. Current durable records after approval
+- CLAIMED recovery runs only inside the existing, one-time
+  `reload_pending()` startup pass (Section 8) - never during live
+  operation.
+- Recovery completes before `cli.run()` begins (unchanged ordering,
+  confirmed in `main.py`).
+- No live claimant can exist during that pass, by construction (the
+  loop that would create one has not started).
+- An ordinary reload/list operation (`PendingApprovalStore.get()`/
+  `.list_all()`) never itself mutates `handoff_status` - only the
+  dedicated startup-recovery pass inside `reload_pending()` does.
+- Concurrent calls *within* the one running process remain protected
+  by the database-level CAS (Section 9) regardless - defense in depth,
+  not required by the process model alone, but free and already
+  designed in.
+- **New, explicit documentation requirement**: this correction's own
+  module docstrings must state plainly that running two Jarvis CLI
+  processes concurrently against the same database is **unsupported**
+  for the approval/workflow path (the dashboard and scheduler remain
+  fully supported, since neither touches it).
 
-Immediately after step 3 above (before step 5 ever runs):
-`approval_history` has a permanent "approved" row (read-only, audit);
-`pending_approval_state` has **no row** for this request (deleted);
-`paused_workflow_state` still has its full row (plan, resolved input,
-approved arguments) - untouched, since only `resume()` itself ever
-deletes it. This is precisely why the paused workflow "exists" but is
-unreachable: its own row is fine, but the linked approval it depends on
-for revalidation is gone.
+### Exact stale-CLAIMED rule
 
-## 5. Current transaction boundaries
+- **Who judges staleness**: `ApprovalManager.reload_pending()`'s own
+  startup-recovery pass, and only that pass.
+- **When**: once, synchronously, during `build_orchestrator()`, before
+  `cli.run()` begins.
+- **What evidence**: the row's own `handoff_status == CLAIMED`,
+  observed at the moment this pass runs. Under the single-process
+  model, this is sufficient and complete evidence by itself: the
+  *current* process could not yet have created a `CLAIMED` row (its own
+  interactive loop has not started), so any `CLAIMED` row found here
+  can only be inherited from a *prior* run of this same process that
+  did not reach a terminal state before exiting.
+- **How a live claimant is protected from false interruption**: there
+  is no live claimant to protect against at this exact moment, by
+  definition of when this pass runs - it executes strictly before any
+  claim in this process could exist.
 
-Confirmed directly: `storage/database.py` provides exactly one
-`session_scope()` helper, and every store (`PendingApprovalStore`,
-`PausedWorkflowStore`, `ApprovalHistoryStore`, `WorkflowHistoryStore`,
-`CompoundWorkflowProgressStore`, etc.) is bound to the **same single**
-SQLAlchemy engine/session factory (one SQLite file, confirmed via
-`create_database_engine()`/`create_session_factory()` - there is
-exactly one `DATABASE_PATH`). However, **each store's own methods
-always open and commit their own independent `session_scope()`** -
-none accepts an externally-supplied session, and nothing in the
-current codebase coordinates two stores' writes into one shared
-transaction. They share one *database*, but not today's *transaction
-boundary* - confirming Option B's own literal requirement ("one
-database; one transaction boundary; and repository-supported session
-handling") is only partially met: the database is shared, but the
-session-sharing mechanism does not exist yet and would itself be new,
-cross-cutting production surface.
+## 3. Current approval-to-resume sequence
 
-## 6. Architecture options assessed
+Unchanged from the prior draft (Section 3 there); re-confirmed here.
 
-### Option A - Keep the approval row after approval (selected)
+## 4. Current durable records after approval / transaction boundaries
 
-Add one new, narrow status dimension to `PendingApprovalState` itself -
-never touching `PausedWorkflowState` at all, since (per Section 4) that
-row was never the problem. `approve()` transitions the row
-PENDING → APPROVED_UNCONSUMED instead of deleting it; a new, narrow
-`claim_for_resume()` operation performs a single-table, single-statement
-compare-and-set APPROVED_UNCONSUMED → CLAIMED, called once, at the one
-existing choke-point (`execute_approved()`, or immediately before it)
-that already handles both workflow-linked and plain single-tool YELLOW
-approvals identically. This is the smallest, most surgical option:
-one table, one store, one manager, zero change to
-`PausedWorkflowState`/`PausedWorkflowStore`/`WorkflowEngine`'s pause/
-resume mechanics themselves.
+Unchanged from the prior draft (Sections 4-5 there): one shared SQLite
+database, but no shared transaction boundary across stores today; each
+store's own methods always open and commit their own `session_scope()`.
 
-### Option B - Atomic approval-to-paused-workflow handoff (assessed, not selected)
+## 5. Approval-history authority and consistency (Mandatory gap 4)
 
-Would require introducing session-sharing across two independently-
-designed stores (Section 5's own finding: no repository-supported
-mechanism for this exists today) purely to protect a row
-(`paused_workflow_state`) that Section 4 already shows is **not** the
-one being lost. This is more invasive than the actual gap requires -
-proposing it would mean inventing new cross-store session-passing
-machinery to solve a problem Option A solves within one table. Rejected
-as disproportionate to the real, narrowly-diagnosed defect.
+Directly re-inspected `ApprovalManager._decide()`'s exact call order:
+`self._audit()` (generic event log) → `self._record_history_decision()`
+(durable `approval_history` write) → `self._remove_pending_state()`
+(today: delete). `_record_history_request()` already writes a
+"pending" `approval_history` row at *request creation* time, before any
+decision - `record_decision()` therefore always *updates* an existing,
+`request_id`-keyed row, never inserts a fresh one for the decision
+itself; this is confirmed to already be naturally idempotent by
+identity (re-applying the same update is a no-op change, not a
+duplicate row).
 
-### Option C - Durable approved-work queue or handoff record (assessed, not selected)
+**Answers to the seven required questions:**
 
-A new, separate table linking approval id/workflow id/claim status
-would duplicate data `PendingApprovalState` already owns (it already
-carries `request_id`, and - via `paused_workflow_state.request_id` -
-the link to any workflow is already established). Rejected: Option A
-achieves everything this option would, without a new table.
+1. Today, `approval_history` is written *before* the pending row is
+   deleted (both inside the same `_decide()` call, no crash window
+   possible between them today since nothing yields control between
+   the two calls - this ordering is unaffected by this correction).
+2. **Under the new design**: the authoritative handoff transition
+   (`PENDING → APPROVED_UNCONSUMED`) is applied **first**; the
+   `approval_history` update is applied **second**. Reasoning below.
+3. If the first commit (handoff transition) succeeds and the second
+   (history update) fails: the row is durably, correctly
+   `APPROVED_UNCONSUMED` (safe, resumable, authoritative); `approval_history`
+   still shows "pending" until repaired (Section "repair," below) - an
+   *incomplete* audit view, never an *actively wrong* one, and never a
+   safety issue, since nothing reads `approval_history` to decide
+   claim eligibility.
+4. Yes, `approval_history` can transiently show "pending" while the
+   handoff is `APPROVED_UNCONSUMED` (case 3) - always self-correcting
+   via the repair pass, never silently permanent.
+5. No - the reverse ordering (history-first) was considered and
+   rejected specifically because it could leave `approval_history`
+   durably claiming "approved" while the authoritative handoff was
+   still `PENDING` and could later be legitimately declined/expired -
+   an actual, permanent contradiction in the historical record, which
+   the chosen ordering cannot produce.
+6. No - `approve()`'s own precondition (`handoff_status == PENDING`)
+   means a genuine retry of the *whole* `approve()` call after its
+   first success always fails immediately (CAS precondition no longer
+   holds); only the narrow, internal "did the history update also
+   apply" question needs idempotent repair, never a duplicate decision.
+7. The **handoff state** (`pending_approval_state.handoff_status`)
+   alone is authoritative for claim eligibility - `approval_history` is
+   never consulted by `claim_for_resume()`.
+8. **Repair**: the same startup `reload_pending()` pass that performs
+   recovery (Section 8) also checks, for every row whose handoff status
+   is `APPROVED_UNCONSUMED`/`CLAIMED`/`CONSUMED`, whether
+   `approval_history` already reflects "approved" for that
+   `request_id`; if not, it idempotently backfills it using the
+   authoritative handoff state as the source of truth (an `UPDATE`
+   keyed by `request_id`, never an `INSERT` of a second row). A
+   genuinely contradictory pair (structurally should not occur given
+   the chosen ordering, but defended against) is *reported* (a distinct
+   audit entry) and resolved in the handoff state's own favor for claim
+   eligibility - never silently ignored, never allowed to block
+   legitimate recovery.
 
-### Option D - Other repository-grounded solution
+**Selected: Design B - authoritative transition plus idempotent history
+recording.** Design A (one shared transaction) was assessed and
+rejected: it would require introducing cross-store session-sharing
+machinery the repository does not have today (Section 4), to protect
+an audit-only table that never governs safety - disproportionate to the
+actual requirement.
 
-None found simpler than Option A after direct inspection.
+## 6. Exact final handoff state model (Mandatory gap 5)
 
-**Selected: Option A.**
+A deliberately **minimal** set - each justified by a distinct recovery
+need traced above, not added for theoretical completeness:
 
-## 7. Selected state model
-
-A new, narrow enum, `PendingApprovalHandoffStatus` (deliberately
-**separate** from the existing `ApprovalStatus`, which remains the
-user's own decision outcome - approved/declined - forever unchanged;
-this new enum describes the durable **row's own handoff lifecycle**,
-never conflated with the decision itself):
-
-- `PENDING` - awaiting a decision (today's only implicit state).
+- `PENDING` - unchanged from today.
 - `APPROVED_UNCONSUMED` - decided approved; execution handoff not yet
-  claimed.
-- `CLAIMED` - exactly one caller has acquired the right to execute;
-  execution has not yet been confirmed to have started.
-- `CONSUMED` - the claim was successfully handed off into
-  `WorkflowEngine.resume()`/direct `ToolExecutor.execute()`; the row is
-  deleted at this point (mirrors today's existing deletion timing,
-  just moved later).
-- `DECLINED` / `EXPIRED` - terminal, row deleted immediately (unchanged
-  from today).
-- `CLAIM_INTERRUPTED` - a claimed row found, on restart, with no
-  durable evidence execution ever began or completed - flagged for
-  operator visibility, **never** automatically re-claimed or resumed.
+  claimed. *(The fix.)*
+- `CLAIMED` - exactly one caller holds the right to attempt execution;
+  covers the entire span from "about to call `resume()`/`ToolExecutor.execute()`"
+  through "outcome not yet durably finalized." No separate
+  `EXECUTION_STARTED` state is introduced: `workflow_step_started`
+  history writes are wrapped in a swallowing `try/except`
+  (`WorkflowEngine._record_history()`'s own, already-existing,
+  documented behavior), so their *absence* is never reliable proof
+  execution did not begin - a finer-grained state here would buy no
+  additional, trustworthy recovery precision, only false confidence.
+- `CONSUMED` - ownership fully, terminally transferred: the approval
+  can never be claimed or reused again, **regardless of whether the
+  underlying action ultimately succeeded or failed**. The
+  success/failure *fact itself* is deliberately **not** duplicated onto
+  this column - it is already owned, authoritatively, by
+  `WorkflowHistoryStore`/`WorkflowResult` (for a workflow) or by the
+  caller's own immediate, synchronous knowledge (for a direct tool
+  call); duplicating it here would be redundant persisted data with no
+  recovery use this design requires (Gap 5's own "use only states
+  justified by actual recovery needs").
+- `CLAIM_INTERRUPTED` - a `CLAIMED` row found, at restart, with no
+  positive, authoritative evidence of a terminal outcome (Section 9).
+  Terminal for automation; not terminal in the database sense (see
+  Section 9's own bounded lifecycle).
+- `DECLINED` / `EXPIRED` - unchanged, terminal, row deleted immediately
+  exactly as today (a declined or expired request was never approved,
+  so none of this new machinery ever applies to it).
 
-No state is added for theoretical completeness - each one is required
-by a distinct, real transition this section's own crash-window analysis
-demands.
+`CLAIMED` and `CONSUMED` are never conflated: `CLAIMED` means ownership
+acquired, outcome pending; `CONSUMED` means a terminal outcome (of any
+kind) is now durably reflected elsewhere and this approval is retired.
 
-## 8. Selected handoff design
+## 7. Exact consumption semantics
 
-- `PendingApprovalState` gains one new column,
-  `handoff_status: str`, defaulting (for migration) to `"pending"`.
-- `ApprovalManager._decide(approved=True, ...)` no longer deletes the
-  `pending_approval_state` row; it durably transitions
-  `handoff_status` to `APPROVED_UNCONSUMED` via a single-statement
-  compare-and-set (`PENDING → APPROVED_UNCONSUMED`). A decline still
-  deletes the row immediately (unchanged - a declined request is
-  already fully terminal).
-- A new `ApprovalManager.claim_for_resume(request_id) -> ApprovalDecision`
-  method performs the single-statement CAS
-  `APPROVED_UNCONSUMED → CLAIMED`; on success, returns the same,
-  already-recorded, immutable `ApprovalDecision` from `self._decisions`
-  (or reconstructed on reload - Section 11); on failure (rowcount 0),
-  raises `ApprovalError` - the caller must not proceed to execute
-  anything.
-- `core/orchestrator.py`'s `execute_approved()` calls
-  `claim_for_resume()` as its very first action, before deriving
-  `workflow_id` or calling `resume()`/`ToolExecutor.execute()` - this
-  one insertion point already uniformly covers both workflow-linked
-  and plain single-tool YELLOW approvals, since `execute_approved()`
-  is already the sole existing choke-point for both (confirmed
-  directly in its own code).
-- Once `resume()`/direct execution genuinely begins, the row
-  transitions `CLAIMED → CONSUMED` and is deleted - mirroring today's
-  existing deletion timing, simply moved to occur after the claim
-  instead of after the decision.
+- **Decision** (user approved): `PENDING → APPROVED_UNCONSUMED`, inside
+  `ApprovalManager.approve()` (renamed internally from today's
+  `_decide()` deletion behavior).
+- **Claim** (one caller owns the right to attempt resume):
+  `APPROVED_UNCONSUMED → CLAIMED`, via the new
+  `ApprovalManager.claim_for_resume(request_id)`, called as the first
+  action inside `core/orchestrator.py`'s `execute_approved()` - the one
+  existing choke-point already common to both workflow-linked and
+  plain single-tool YELLOW approvals.
+- **Consumed** (non-reusable execution lifecycle entered, terminal
+  outcome not implied): `CLAIMED → CONSUMED`, applied synchronously by
+  `execute_approved()` immediately after `resume()`/`ToolExecutor.execute()`
+  returns - **before** the final `JarvisResponse` is constructed or
+  delivered (Section 9's own transition-matrix cases 3-4, 8).
+- **Completed** (terminal outcome known): never a separate handoff
+  column - always read from `WorkflowHistoryStore.latest_status_for(workflow_id)`
+  (a workflow) or the caller's own immediate `ToolResult` (a direct
+  tool call), both already-existing, unchanged sources of truth.
 
-## 9. Exact claim semantics
+## 8. Claim ownership / exact claim transaction
+
+Unchanged from the prior draft's own design (Section 9 there):
 
 ```sql
 UPDATE pending_approval_state
@@ -208,357 +252,301 @@ SET handoff_status = 'claimed'
 WHERE request_id = ? AND handoff_status = 'approved_unconsumed'
 ```
 
-- `rowcount == 1`: this caller, and only this caller, holds the claim.
-- `rowcount == 0`: another claimant already succeeded, or the row is
-  in an invalid state for claiming (still pending, already claimed,
-  already consumed, or gone) - reported as `ApprovalError`, never
-  silently retried.
-- No read-then-write pair anywhere in the claim path - one atomic SQL
-  statement, exactly mirroring Phase 98 Batch 1's own
-  `CompoundWorkflowProgressStore._compare_and_set()` pattern.
-- No owner/claim token is introduced for this narrow scope: the CAS
-  rowcount itself is sufficient, sole proof of exclusive ownership: at
-  most one process can ever observe `rowcount == 1` for a given
-  transition, by SQLite's own transactional guarantees (confirmed:
-  `session_scope()` commits or rolls back atomically per call). No
-  process identity, hostname, or other information is persisted.
-- Workflow id, request id, and approved arguments (`tool_input_json`,
-  unchanged) remain completely immutable throughout every transition -
-  no column touched by any claim operation ever mutates them.
+`rowcount == 1` → exclusive success; `rowcount == 0` → rejected,
+`ApprovalError` raised, nothing further attempted. No owner/claim
+token is introduced (Section 2's single-process finding makes one
+unnecessary); no read-then-write race; `request_id`/`workflow_id`/
+`tool_input_json` remain immutable through every transition (no claim
+operation ever writes to them).
 
-## 10. Crash-window analysis
+## 9. Post-claim transition matrix (Mandatory gap 3)
 
-### Window A - Before approval
+| Scenario | Handoff transition | Paused workflow | Audit |
+|---|---|---|---|
+| Claim succeeds, paused workflow missing | `CLAIMED → CLAIM_INTERRUPTED` (synchronous, not a crash-recovery case - discovered immediately) | none to clean up | honest entry: "linked paused workflow missing" |
+| Claim succeeds, `WorkflowEngine` rejects before any tool executes (invalid plan, incompatible payload) | `CLAIMED → CLAIM_INTERRUPTED` | retained, invalidation reason recorded | honest entry: "plan rejected before execution" |
+| Tool execution begins, ordinary failure (known, synchronous) | `CLAIMED → CONSUMED` | already deleted by existing `resume()` logic (unchanged) | unchanged existing behavior |
+| Execution + verification finish with a known failure (mismatch/unavailable) | `CLAIMED → CONSUMED` | already deleted (unchanged) | unchanged existing behavior (e.g. today's FOCUS/PHASE response builders) |
+| Workflow completes successfully | `CLAIMED → CONSUMED`, applied by `execute_approved()` immediately after `resume()` returns, before building the final response | already deleted (unchanged, at `resume()` entry) | unchanged existing `workflow_completed` entry |
+| **Crash after workflow success, before handoff marked consumed** | See Section "Terminal reconciliation" below - the mandatory case | already deleted (unchanged) | `workflow_completed` entry already durably present |
+| Crash after execution failure, before handoff terminal update | Same reconciliation rule (checks for `workflow_stopped` too) | already deleted (unchanged) | `workflow_stopped` entry already durably present |
+| Handoff marked consumed, response delivery fails | No further transition - already terminal `CONSUMED` | unaffected | unaffected |
 
-Unchanged: the row is `PENDING`; decline/expiry work exactly as today
-(both delete the row immediately, and never race the new mechanism,
-since it is never reached before a decision exists).
+### Terminal reconciliation (the mandatory crash case)
 
-### Window B - After durable approval, before claim (the primary gap)
+Confirmed directly: `WorkflowHistoryStore.latest_status_for(workflow_id)`
+**already exists**, unchanged, as a plain, read-only query returning
+the most recent transition for a `workflow_id`. This is a **one-directional**,
+reliable signal: if it returns `workflow_completed` or `workflow_stopped`,
+that transition genuinely, durably happened (a `WorkflowHistoryStore`
+write is never fabricated) - but its *absence* is **not** reliable proof
+nothing happened (`_record_history()`'s own swallowed-exception design
+means a real completion's history write could itself have failed).
 
-The row now durably shows `APPROVED_UNCONSUMED` instead of being
-deleted. Restart discovery (Section "claimed-but-not-started
-recovery" below) finds it via `PendingApprovalStore.list_all()`
-(already existing), recognizes `handoff_status == APPROVED_UNCONSUMED`,
-and makes it available for a caller to explicitly claim - no new
-approval is ever created; the exact, original `tool_input_json`/
-`action`/`reason` are read verbatim, unchanged.
+**The reconciliation rule uses only the reliable direction**: on
+restart, for any row found `CLAIMED`, if `latest_status_for(workflow_id)`
+returns a terminal status (`workflow_completed` or `workflow_stopped`),
+reconcile directly to `CONSUMED` - genuine, positive evidence, no
+ambiguity, no need for `CLAIM_INTERRUPTED`. If it returns anything else
+(including `None`), fall back to `CLAIM_INTERRUPTED` - absence of
+evidence is never treated as evidence of absence.
 
-### Window C - During atomic claim
+**This mechanism is asymmetric between workflow-linked and plain
+single-tool approvals**, stated honestly: a plain (non-workflow) YELLOW
+approval has no `workflow_id`/`workflow_history` trail at all, so it has
+no equivalent positive-evidence source available today - such a claim,
+if interrupted, always falls back to `CLAIM_INTERRUPTED` regardless of
+whether the tool actually completed. This is always *safe* (never risks
+replaying a write) though less *precise* than the workflow-linked case;
+closing this asymmetry is explicitly out of scope for this correction.
 
-Two concurrent claimants: the CAS statement (Section 9) guarantees
-exactly one succeeds; the other sees `rowcount == 0` and raises
-`ApprovalError`, attempting nothing further. A database error during
-the `UPDATE` rolls back via `session_scope()`'s own existing
-exception handling - the row remains `APPROVED_UNCONSUMED`, safely
-re-claimable. A process exit before commit: the transaction never
-completed, so the row is unchanged (`APPROVED_UNCONSUMED`), safely
-re-claimable. A process exit immediately after commit: the row is
-durably `CLAIMED` - see Window D.
+## 10. Interrupted-state lifecycle (Mandatory gap 2)
 
-### Window D - After claim, before WorkflowEngine/ToolExecutor starts
+**Selected: Option A - terminal manual-review state**, as the required
+default for every existing capability (no exact reconciliation strategy
+exists for arbitrary tools, per Section 9's asymmetry finding above).
+Option C (safe pre-execution reset via workflow-history absence) is
+**rejected**: absence of a `workflow_history` row is not authoritative,
+for the same reason given above - `_record_history()`'s own swallowed
+exceptions mean a real, started execution could produce no history
+trace at all. Inferring "never started" from that absence would be
+exactly the unsafe inference the task explicitly forbids.
 
-**Mandatory design decision.** A `CLAIMED` row found at restart, with
-no corresponding evidence execution began, cannot in general be proven
-safe to either re-claim or discard - for an **arbitrary** YELLOW tool
-(not merely the future phase-update case), there is no universal,
-safe way to determine whether the real side effect already occurred.
-The correction therefore defines one honest, universal rule for every
-existing YELLOW capability: on restart, a `CLAIMED` row with no
-completion evidence is transitioned to `CLAIM_INTERRUPTED` - a durable,
-visible, terminal-for-automation state. It is never automatically
-re-claimed, re-executed, or silently discarded; recording it durably
-(rather than deleting it, and rather than silently leaving it
-`CLAIMED` forever) is itself the entire correction for the general
-case - it makes an otherwise-invisible ambiguity durably visible for
-manual review, without ever guessing.
+**Exact contract**: `CLAIM_INTERRUPTED` means - approval was granted;
+one claimant acquired execution rights; final execution outcome cannot
+be proven from authoritative handoff state; automatic replay is
+prohibited; the old approval can never be reused (`claim_for_resume()`'s
+own CAS precondition structurally excludes it, permanently).
 
-For the one narrow, already-built exception - the future compound
-`PROJECT_STATE_UPDATE_PHASE` consumer - Phase 98 Batch 1's own
-`reconcile_phase_update()` (already implemented, already tested, not
-live-wired) can, in a **separately-approved future batch**, safely
-narrow `CLAIM_INTERRUPTED` down to a confirmed continuation point using
-its own real, evidence-based reconciliation contract (Contract A). This
-plan does not implement that wiring now - it only confirms the
-foundation already built in Batch 1 is the correct, compatible
-consumer of this new, more general handoff-recovery vocabulary.
+- **Cannot be claimed again**: `claim_for_resume()`'s precondition
+  (`handoff_status == APPROVED_UNCONSUMED`) excludes it.
+- **Cannot return to `APPROVED_UNCONSUMED`**: no code path performs
+  this transition for the generic case (Option C rejected above).
+- **Cannot be declined or expired**: both require `PENDING`.
+- **The linked paused workflow is retained, not deleted**: a small,
+  additive refinement to `WorkflowEngine._try_reconstruct_paused_workflow()`'s
+  own existing two-way check (pending vs. not-pending) into a
+  three-way check: still `PENDING` → reconstruct as resumable
+  (unchanged); linked approval is `DECLINED`/`EXPIRED` → invalidate and
+  delete exactly as today (unchanged); linked approval is
+  `APPROVED_UNCONSUMED`/`CLAIMED`/`CONSUMED`/`CLAIM_INTERRUPTED` → leave
+  the `paused_workflow_state` row untouched, do not add it to
+  `self._paused`, do not delete it. This is the only way the exact
+  approved tool arguments remain durably, physically inspectable (via
+  `PausedWorkflowStore.get()`/`.list_all()`, already-existing) after an
+  interruption - `workflow_history` deliberately never stores
+  `tool_input` at all, so relying on it alone would silently discard
+  the approved arguments.
+- **A new request requires a new approval**: unchanged - re-issuing the
+  same natural-language request creates an entirely new, independent
+  approval/paused-workflow pair; the quarantined pair is never reused.
+- **Cleanup is explicit, not automatic**: this correction never
+  auto-deletes a `CLAIM_INTERRUPTED` row or its retained paused
+  workflow. Indefinite retention, pending a future, separately-approved,
+  explicit operator-facing cleanup/inspection design, is the correct,
+  honest answer for this phase - never silent purging.
 
-### Window E - After WorkflowEngine begins
+### Visibility
 
-Ownership transfers from the approval handoff (`CLAIMED`) to
-`WorkflowEngine`'s own existing pause/resume semantics exactly as
-today, the moment `resume()` genuinely starts - the row moves to
-`CONSUMED` and is deleted at that point (not before), closing the
-window entirely; the approval can never be reused once this happens,
-since the row backing any future claim attempt no longer exists. For
-the future compound consumer, ownership further transfers into
-`CompoundWorkflowProgress`'s own already-existing, already-tested
-step-by-step tracking (Batch 1) - unaffected by this plan.
+- **Approval history**: the startup-recovery pass that produces
+  `CLAIM_INTERRUPTED` also writes one honest, distinct
+  `approval_history` entry (reusing the existing `record_timeout()`-shaped
+  write, exactly like today's reload-invalidation path already does),
+  visible via the existing `show approval history` command - no new
+  user-facing surface needed.
+- **Workflow history**: unaffected/unchanged for a workflow whose
+  linked approval becomes `CLAIM_INTERRUPTED` - its own prior entries
+  (whatever real steps did complete) remain exactly as recorded.
+- **Paused-workflow inspection**: the retained row is queryable via
+  existing store methods, not yet exposed as its own user command
+  (consistent with adding no new user-facing surface during planning).
+- No new user-facing command is proposed in this planning gate.
 
-### Window F - After workflow completion
+## 11. Startup recovery behavior (exact)
 
-Unchanged and already safe: `resume()` cannot be invoked twice for one
-`workflow_id` (raises `WorkflowError`); with this correction, the
-approval row is already deleted (`CONSUMED`) by the time completion is
-reached, so there is nothing left to reclaim by any path.
+`ApprovalManager.reload_pending()` gains one additional pass, after its
+existing pending-row revalidation, iterating every row whose
+`handoff_status` is `CLAIMED`:
 
-## 11. Claimed-state recovery (restart-discovery)
+1. If `WorkflowHistoryStore.latest_status_for(workflow_id)` (when the
+   row is workflow-linked) shows a terminal status → `CLAIMED → CONSUMED`.
+2. Otherwise → `CLAIMED → CLAIM_INTERRUPTED`, plus the paused-workflow
+   retention behavior (Section 10) and the `approval_history` entry
+   (Section 10's "Visibility").
 
-`ApprovalManager.reload_pending()` is extended (not replaced) with a
-second pass, after its existing pending-row revalidation: for every
-persisted row whose `handoff_status` is `APPROVED_UNCONSUMED`, revalidate
-identically to a pending row (tool still registered, action still
-classifies YELLOW) and, if valid, make it available via a new,
-narrow accessor (e.g. `list_approved_unconsumed()`) - never
-auto-claimed, never auto-resumed; a caller (main.py's own startup
-sequence, or a future explicit CLI command) must still explicitly
-decide to claim and resume it, exactly mirroring how a reloaded
-*pending* request already requires an explicit human decision today.
-For every row whose `handoff_status` is `CLAIMED`, the same reload
-pass transitions it to `CLAIM_INTERRUPTED` (Section 10, Window D) and
-records an honest terminal entry in `approval_history` - never
-resumed, never silently dropped.
+A second pass also repairs any `approval_history` row not yet reflecting
+an already-authoritative `APPROVED_UNCONSUMED`/`CLAIMED`/`CONSUMED`
+handoff state (Section 5's idempotent repair).
+
+Neither pass ever auto-claims, auto-resumes, or auto-executes anything -
+both only ever adjust durable bookkeeping to honestly reflect what is
+already, separately known to be true.
 
 ## 12. Expiry and decline semantics
 
-- **Pending**: may be declined; may expire (`_sweep_expired()`,
-  unchanged - it only ever iterates `self._pending`, which a decided
-  request has already left, by construction, regardless of this
-  correction); may not execute.
-- **Approved-unconsumed**: cannot later be declined or expire as
-  though never approved - `_sweep_expired()` never touches it (it is
-  not in `self._pending`); `decline()`/`approve()` called again for the
-  same `request_id` raise `ApprovalError` (the row is no longer
-  `PENDING`, so `get_pending()`'s own lookup - extended to check
-  `handoff_status == PENDING` - correctly fails). Remains resumable via
-  `claim_for_resume()` only; approved arguments (`tool_input_json`)
-  are never touched by any transition.
-- **Claimed**: cannot be reclaimed by another process (Section 9's CAS
-  guarantee); cannot be reused for another workflow (the row is
-  identity-bound to one `request_id`/one `tool_input_json`, immutable).
-- **Terminal (consumed/declined/expired/claim-interrupted)**: the
-  approval is no longer actionable through any code path - `claim_for_resume()`'s
-  own CAS precondition (`handoff_status == APPROVED_UNCONSUMED`)
-  structurally excludes every terminal state.
+Unchanged in substance from the prior draft (Section 12 there),
+re-confirmed correct given the refined state model: pending may be
+declined or expire; approved-unconsumed/claimed/consumed/interrupted
+can never be declined or expire (all are already outside
+`self._pending` the moment a decision is made, exactly as today -
+`_sweep_expired()` is untouched).
 
-## 13. Approval-consumption semantics
+## 13. Backward compatibility
 
-"Decided" (approve()/decline() called) and "consumed" (execution
-genuinely began) become two **distinct**, separately-observable
-events for the first time - closing exactly the ambiguity Section 2
-identifies. "Decided" now durably persists past the moment of decision
-(for an approval); "consumed" is deferred until `WorkflowEngine.resume()`/
-direct execution truly starts. `approval_history` remains completely
-unchanged in shape and meaning - it already only ever records the
-*decision* (approved/declined/expired), never execution progress; this
-plan adds no new column there.
+Unchanged in substance from the prior draft (Section 14 there): one new
+column, `pending_approval_state.handoff_status`, migrated via the same,
+already-proven guarded `ALTER TABLE ... DEFAULT` pattern
+(`_ensure_memory_category_column()`), defaulting existing rows to
+`'pending'` - exactly and only what they already, implicitly meant
+under today's code.
 
-## 14. Backward compatibility
+## 14. Migration assessment
 
-1. **Existing pending-approval rows**: any row present at migration
-   time is, by definition, still genuinely pending under today's code
-   (no other state was ever possible) - the migration's default
-   (`handoff_status = 'pending'`) is exactly correct for every one of
-   them, with zero reinterpretation.
-2. **Existing paused-workflow rows**: entirely untouched - Option A
-   makes no change to `PausedWorkflowState`/`PausedWorkflowStore`.
-3. **Existing approval-history rows**: untouched - no schema or
-   meaning change.
-4. **Existing serialized approval status values**: `ApprovalStatus`
-   (PENDING/APPROVED/DECLINED/EXPIRED) is untouched; the new
-   `PendingApprovalHandoffStatus` is a wholly separate, new enum/column,
-   never replacing or reinterpreting the existing one.
-5. **Old code assuming the row disappears after `approve()`**: only
-   `ApprovalManager`'s own internal `_decide()`/`_remove_pending_state()`
-   call sites assume this today - both are being changed together, in
-   the same commit, as part of this correction; no other module reads
-   `pending_approval_state` directly (confirmed: only
-   `PendingApprovalStore`/`ApprovalManager` reference it).
-6. **Existing tests expecting deletion**: any test asserting
-   `pending_approval_state` is empty immediately after `approve()`
-   would need updating to expect `APPROVED_UNCONSUMED` until
-   `claim_for_resume()` runs - an expected, legitimate consequence of
-   the corrected contract, not a weakening; enumerated in Section 22.
-7. **Restart behavior for pre-correction rows**: covered by item 1 -
-   identical to today's behavior for anything genuinely mid-flight
-   during an upgrade.
-8. **`create_all()` behavior**: adds new tables automatically, but
-   (confirmed directly, `storage/database.py`) **does not alter an
-   existing table** - a genuine migration step is required for the new
-   column, exactly like the existing, already-precedented
-   `_ensure_memory_category_column()` pattern.
-9. **Migration required**: **yes** - one new column,
-   `pending_approval_state.handoff_status`, added via a guarded,
-   idempotent `ALTER TABLE ... ADD COLUMN handoff_status VARCHAR(24)
-   NOT NULL DEFAULT 'pending'`, mirroring the existing
-   `episodic_memories.category` migration exactly.
-10. **Default state preserves old rows safely**: yes - confirmed in
-    item 1/9 together; no data loss, no reinterpretation.
+Unchanged: **required**, one column, one guarded, idempotent
+`ALTER TABLE` statement, zero risk to any other table or existing row's
+meaning.
 
-## 15. Impact on all existing YELLOW workflows
+## 15. Existing YELLOW workflow guarantees (Mandatory gap 6)
 
 For `PROJECT_STATE_UPDATE_FOCUS`, `PROJECT_STATE_UPDATE_PHASE`,
-`SCHEDULE_ENABLE`, `SCHEDULE_DISABLE` - none of their own execution,
-verification, or response-building logic changes at all. Confirmed,
-per capability:
+`SCHEDULE_ENABLE`, `SCHEDULE_DISABLE`:
 
-- The paused workflow (plan, resolved tool input) remains available
-  after approval exactly as today - untouched (Section 6, Option A).
-- Approved arguments remain immutable - `tool_input_json` is never
-  written to by any new transition.
-- Restart before execution begins can recover via the new
-  `list_approved_unconsumed()`/`claim_for_resume()` path - previously
-  impossible; this is a strict safety improvement, not a behavior
-  change to the capability itself.
-- Exactly one claimant can resume (Section 9's CAS); duplicate claim
-  is refused (`rowcount == 0`).
-- Decline and expiry are unchanged (Section 12).
-- A completed workflow cannot restart - unchanged
-  (`WorkflowError` on a second `resume()`; the approval row is already
-  `CONSUMED`/deleted by then).
+**Guaranteed**: an approved-before-claim workflow survives a restart
+and is discoverable (never silently discarded); no second approval is
+ever required to complete an already-approved action; approved
+arguments remain immutable through every transition; exactly one
+claimant wins a race, ever; a duplicate claim is always rejected; an
+approval can never be redirected to a different workflow or request.
+
+**Not automatically guaranteed**: exactly-once tool execution for a
+crash occurring strictly *after* a claim is acquired but *before* a
+terminal outcome is durably confirmable (Section 9's asymmetry: only
+the workflow-linked case, and only when its own `workflow_history`
+happens to have durably recorded a terminal transition, can be
+automatically reconciled - a plain single-tool approval, or a workflow
+whose terminal history write itself silently failed, falls back to the
+honest, non-automatic `CLAIM_INTERRUPTED` review state); no automatic
+replay of an interrupted write, ever; no claim that a tool "ran exactly
+once" is ever made without direct, positive evidence.
+
+**Precise wording for this correction**: it delivers **"durable
+approved-to-claim handoff safety"** - not "complete crash-safe
+execution." The distinction is deliberate and load-bearing.
 
 ## 16. Future Phase 98 compound integration
 
-Once this correction ships, the future Batch 2 design can: call
-`claim_for_resume()` for the compound template's own approval exactly
-like any other YELLOW action (no compound-specific claim logic
-needed); use the now-successfully-claimed, immutable
-`ApprovalDecision`/paused-workflow data to locate its own
-`CompoundWorkflowProgress` row (already keyed by `workflow_id`,
-Batch 1); resume execution from the durable next step exactly as
-Batch 1's own store already supports; and never recreate approval,
-since the claim mechanism guarantees the same approval can never launch
-a second execution. This is precisely how the handoff correction
-unblocks Batch 2 - Batch 2 no longer needs to solve the approve-then-
-resume gap itself; it only needs to call the now-existing
-`claim_for_resume()` before proceeding, exactly like every other
-capability.
+Unchanged in conclusion from the prior draft: the future compound
+Batch 2 design calls `claim_for_resume()` like any other capability,
+then locates its own `CompoundWorkflowProgress` row and resumes from
+the durable next step. Additionally, and newly clarified by this
+amendment: the future compound consumer *can*, in its own separately-
+approved batch, use `reconcile_phase_update()` (already built, already
+tested, Batch 1) to narrow a `CLAIM_INTERRUPTED` compound workflow down
+to a confirmed continuation point - this is Option B from Mandatory
+gap 2's own menu, legitimately available *only* to this one consumer
+because it alone has an exact, trusted reconciliation strategy; every
+other existing capability correctly remains on the universal, safe
+`CLAIM_INTERRUPTED` review path.
 
 ## 17. Selected outcome
 
-**Outcome A - narrow correction is ready** (to plan; not implemented in
-this gate).
+**Final Outcome B - split foundations**, given the amount of
+independently-testable, sequentially-dependent machinery now specified
+(schema/state model, claim API/startup recovery/interrupted-state
+lifecycle, and orchestrator wiring/full regression) - each batch
+should be provable in isolation before the next depends on it.
 
-- **Exact implementation title**: "Durable Approved-to-Resume Handoff
-  Interlock."
-- **Exact files expected to change**: `storage/models.py`
-  (`PendingApprovalState.handoff_status` column),
-  `storage/database.py` (new guarded migration step, mirroring
-  `_ensure_memory_category_column()`), `approval/pending_approval_store.py`
-  (read/write the new column; new compare-and-set methods),
-  `approval/approval_manager.py` (`_decide()` no longer deletes on
-  approval; new `claim_for_resume()`; `reload_pending()` extended),
-  `core/orchestrator.py` (`execute_approved()` calls
-  `claim_for_resume()` first).
-- **Exact state model**: Section 7.
-- **Exact claim API**: Section 9.
-- **Exact transaction boundaries**: one single-statement CAS per
-  transition, each its own `session_scope()` - no cross-store
-  transaction introduced (Option A's own defining property).
-- **Exact restart-discovery path**: Section 11.
-- **Exact claimed-state recovery**: Section 10, Window D.
-- **Exact compatibility design**: Section 14.
-- **Phase size**: Large/risky (Section 21).
-- **Batch structure**: Section 21.
-- **Tests**: Section 22.
-- **Acceptance criteria**: Section 23.
-- **Stop conditions**: Section 25.
+## 18. Revised phase size and batches
 
-## 18. Exact scope
+**Large/risky - three batches** (unchanged classification, refined
+structure):
 
-Exactly the five files in Section 17's "files expected to change" list.
-No change to `PausedWorkflowState`/`PausedWorkflowStore`/
-`WorkflowEngine`'s pause/resume mechanics, `SecurityManager`,
-`ToolExecutor`, `WorkflowHistoryStore`, or any capability-specific
-tool/verification code.
+- **Batch 1**: `pending_approval_state.handoff_status` column +
+  migration; `PendingApprovalHandoffStatus` enum; `PendingApprovalStore`
+  CAS methods (transition + claim); `approval_history` idempotent-repair
+  helper. No `ApprovalManager`/orchestrator behavior change yet -
+  purely additive schema and store-level primitives, fully unit-tested
+  in isolation.
+- **Batch 2**: `ApprovalManager.approve()`/`claim_for_resume()`/
+  `reload_pending()` (startup recovery + terminal reconciliation via
+  `latest_status_for()` + interrupted-state handling);
+  `WorkflowEngine._try_reconstruct_paused_workflow()`'s three-way
+  retention refinement. Complete regression for every existing YELLOW
+  capability (decline, expiry, restart, duplicate-resume, duplicate
+  claim).
+- **Batch 3**: `core/orchestrator.py`'s `execute_approved()` wiring
+  (calls `claim_for_resume()` first; marks `CONSUMED` after
+  execution); full end-to-end crash-window tests; explicit,
+  documented single-process-model statement; full three-environment
+  regression; closure.
 
-## 19. Exact non-goals
+## 19. Updated required tests
 
-No SecurityManager rule change; no weaker tiers; no execution before
-approval; no automatic re-approval; no approval reuse; no
-model-controlled claim states; no background workers; no generic job
-queue; no arbitrary workflow scheduling; no retries; no replanning; no
-rollback; no compensation; no autonomous behavior; no new
-capabilities; no live compound wiring; no distributed lease system.
+All 42 items the task requires map onto the three batches: schema/CAS/
+migration tests (Batch 1, items covering compatibility and claim
+ownership mechanics); `ApprovalManager` transition, history-consistency,
+startup-recovery, interrupted-claim, and per-capability regression
+tests (Batch 2); orchestrator wiring, full post-claim transition-matrix,
+and full-suite/Ruff verification (Batch 3).
 
-## 20. Phase size and batches
-
-Per the task's own rule ("if approval schema, workflow schema or
-restart behavior changes, it is at least medium... if migration or
-transactional redesign is required, classify it as large/risky") and
-given this touches a real column migration on `pending_approval_state`
-and changes the timing of an existing, universally-used deletion in
-`ApprovalManager._decide()` (affecting every YELLOW action in the
-system): **Large/risky - three batches.**
-
-- **Batch 1**: schema migration + `PendingApprovalHandoffStatus` +
-  `PendingApprovalStore` CAS methods, fully tested in isolation with
-  zero behavior change to `ApprovalManager` yet (additive column and
-  store methods only).
-- **Batch 2**: `ApprovalManager._decide()`/`claim_for_resume()`/
-  `reload_pending()` changes, with complete regression proof for every
-  existing YELLOW capability (decline, expiry, restart, duplicate-resume).
-- **Batch 3**: `core/orchestrator.py`'s `execute_approved()` wiring,
-  full end-to-end crash-window tests, full three-environment
-  regression, and closure.
-
-## 21. Required tests
-
-All 29 items the task requires map onto the batches above: schema/CAS
-tests (Batch 1); decision-timing, claim, expiry/decline, restart,
-duplicate-claim, and per-capability regression tests (Batch 2);
-end-to-end crash-window, audit-truthfulness, and full-suite/Ruff
-verification (Batch 3).
-
-## 22. Acceptance criteria
+## 20. Updated acceptance criteria
 
 All required tests pass; every existing YELLOW capability's own test
-suite passes, with only the narrow, expected update noted in Section
-14, item 6 (any test asserting immediate row deletion on approval);
-full suite matches baseline plus new tests, in all three environments;
-a fresh database and an existing pre-correction database both behave
-identically after migration; Ruff and `git diff --check` clean.
+suite passes (with the narrow, expected update noted for any test
+asserting immediate row deletion on approval); a fresh database and an
+existing pre-correction database behave identically after migration;
+the documented single-process assumption is stated explicitly in the
+shipped module docstrings; Ruff and `git diff --check` clean.
 
-## 23. Risks and mitigations
+## 21. Updated risks and mitigations
 
-- **Risk**: changing `_decide()`'s deletion timing regresses existing
-  approval tests. **Mitigation**: Batch 2's own explicit regression
-  scope, run before Batch 3 begins.
-- **Risk**: the migration is skipped on an existing database.
-  **Mitigation**: mirrors the already-proven, already-shipped
-  `_ensure_memory_category_column()` pattern exactly.
-- **Risk**: `CLAIM_INTERRUPTED` rows accumulate with no cleanup path.
-  **Mitigation**: explicitly out of scope for automatic handling by
-  design (Section 10) - a future, separately-approved operator-facing
-  view is a candidate follow-up, not part of this correction.
+- **Risk**: `latest_status_for()` is later found to have an edge case
+  making its terminal-status read unreliable. **Mitigation**: this
+  amendment relies only on its *positive* signal (presence of a
+  terminal row), never its absence - the one-directional design is
+  robust to any additional, yet-undiscovered way a write could fail to
+  happen, since absence already defaults to the safe path.
+- **Risk**: `CLAIM_INTERRUPTED`/retained paused-workflow rows
+  accumulate indefinitely with no cleanup. **Mitigation**: explicitly
+  named as out of scope (Section 10), a candidate for a future,
+  separately-approved operator-facing follow-up.
+- **Risk**: a second Jarvis CLI process is started against the same
+  database despite being unsupported. **Mitigation**: explicitly
+  documented as unsupported (Section 2); the CAS-based claim mechanism
+  still provides defense in depth even in that unsupported scenario
+  (it would simply make the startup-recovery pass's own "stale means
+  found-at-startup" assumption unsound - a documented limitation, not
+  a silent one).
 
-## 24. Stop conditions
+## 22. Updated stop conditions
 
-Stop and report if: the migration cannot be made additive/backward-
-compatible; the claim CAS cannot guarantee exclusivity; `CLAIMED` rows
-cannot be durably distinguished from `APPROVED_UNCONSUMED`; any
-existing YELLOW capability's execution/verification behavior would
-need to change; workflow history would need to become authoritative;
-or a cross-store atomic transaction (Option B) becomes unavoidable.
+Unchanged in spirit from the prior draft, refined: stop if the
+migration cannot be made additive/backward-compatible; the claim CAS
+cannot guarantee exclusivity; `CLAIMED` rows cannot be durably
+distinguished from `APPROVED_UNCONSUMED`; any existing YELLOW
+capability's execution/verification behavior would need to change;
+`workflow_history` would need to become authoritative (rather than a
+one-directional corroborating signal); a cross-store atomic transaction
+becomes unavoidable; `CLAIM_INTERRUPTED` has no terminal/review path;
+approval history and handoff state may contradict without detection or
+repair; duplicate history decisions can be inserted; claim success and
+terminal outcome are collapsed into one misleading status; or a
+successful workflow could be replayed after a terminal-update crash.
 
-## 25. Manual Anthropic limitation
+## 23. Manual Anthropic limitation
 
-Live Anthropic manual acceptance remains postponed because the
-configured API account lacks sufficient credits - an external account
-limitation, not a Jarvis production-code failure. No production change
-may bypass it. The approval-handoff correction must be, and will be,
-proven entirely with deterministic, repository-level tests (real
-SQLite, fake providers) - exactly as every prior phase in this session
-has been.
+Unchanged: live Anthropic manual acceptance remains postponed
+(insufficient API credits, an external limitation). No production
+change may bypass it. This correction must be, and will be, proven
+entirely with deterministic, repository-level tests.
 
-## 26. Formal planning-gate conclusion
+## 24. Formal amendment conclusion
 
-The real, code-grounded gap is narrower than it first appears: the
-`paused_workflow_state` row was never the problem; the
-`pending_approval_state` row's own destructive deletion on approval is
-the entire defect. Option A closes it with a single-table, single-store
-change, reusing the exact compare-and-set pattern Phase 98 Batch 1
-already established, with an honest, universal (not compound-only)
-answer for the one truly hard case (a claimed-but-unconfirmed
-arbitrary side effect). Recommended for future implementation as a
-three-batch, large/risky phase, not implemented in this planning gate.
+Every mandatory gap is resolved with a concrete, code-grounded design:
+a single-process recovery model justified by direct inspection of the
+real (and only) call site; a minimal, non-conflated state model; an
+honest, one-directional terminal-reconciliation rule using an
+already-existing store method; and an explicit, permanent,
+non-automatic review path for the one case (arbitrary interrupted
+writes) that cannot be safely automated. Recommended as a three-batch,
+large/risky future phase - not implemented in this planning gate.
