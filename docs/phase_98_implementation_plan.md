@@ -857,3 +857,11 @@ Phase 98 remains open. Batch 2 and Batch 3 were not started. No live
 compound selection, planning, orchestration, approval flow, command
 grammar, model instruction, help entry, or user-visible behavior was
 added.
+
+## 18. Approval-to-Resume Handoff Interlock — Reference
+
+Phase 98 Batch 2 remains blocked. The durable approved-to-resume
+handoff safety interlock required before Batch 2 may begin is planned
+separately in `docs/phase_98_approval_handoff_plan.md`, which controls
+the exact required correction. No live compound wiring may begin until
+that interlock is implemented and formally accepted.
