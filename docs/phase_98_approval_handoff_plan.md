@@ -1,430 +1,394 @@
-# Phase 98 Safety Interlock Planning Gate — Durable Approved-to-Resume Handoff (Final Amendment)
+# Phase 98 Safety Interlock Planning Gate — Durable Approved-to-Resume Handoff (Final Correction: OS-Enforced Exclusivity)
 
 Status: **planning gate only**. No production or test code changed.
-This final amendment resolves the three remaining implementation
-blockers identified against the prior draft (`b824e6f`): the
-undefined-but-load-bearing process-exclusivity assumption; the
-insufficiently audited reliability of `WorkflowHistoryStore.latest_status_for()`
-as a reconciliation signal; and the missing durable, visible record of
-a `CLAIM_INTERRUPTED` outcome. All three are resolved below using
-direct, live code inspection - not assumption.
+This correction replaces the database-row `ProcessInstanceLock` +
+PID-liveness design (committed at `b59a3f6`) with a genuinely
+OS-enforced file lock, and resolves a second, independently discovered
+defect: placing lock acquisition inside `build_orchestrator()` would
+have broken a real, established test pattern that calls it twice, in
+one process, to simulate a restart.
 
-## 1. Enforced process model (Blocker 1)
+## 1. Why PID plus token was rejected
 
-### 1.1 Real, evidence-based process inventory
+A database-stored UUID token is only ever checked *from the database
+side*, by a *new* process reading an *old* row - it is never presented
+to, or verifiable against, the *actual, live* process holding a reused
+PID. An unrelated process that later reuses the same PID has no
+knowledge of, and makes no use of, the stored token; nothing forces
+it to. PID-liveness alone answers "is *some* process running with this
+number," never "is it *this* Jarvis instance." Neither the PID nor the
+token is externally verifiable against the live process's own
+identity, so their combination cannot prove ownership - only an
+OS-held lock, which the kernel itself ties to a specific open file
+handle for the lifetime of the holding process, can.
 
-Directly traced every production call site of
-`.approve(`/`.decline(`/`execute_approved(`/`WorkflowEngine.resume(`,
-and inspected `main.py`, `ui/cli.py`, `dashboard.py`,
-`ui/dashboard_app.py`, `dashboard/read_model.py`, and `scheduler.py`:
+## 2. Repository inspection
 
-- **Exactly one code path** (`ui/cli.py`'s `_handle_approval()`, inside
-  `JarvisCLI.run()`'s single-threaded, blocking `while True: input()`
-  loop) ever calls the approve-to-resume sequence in production. No
-  threading/asyncio exists anywhere near this path.
-- **`dashboard.py`/`ui/dashboard_app.py`/`dashboard/read_model.py`** are
-  confirmed, by direct inspection of every write-method call site
-  (`.save(`, `.update(`, `.delete(`, `.create(`, `record_*`, `.approve(`,
-  `.resume(`), to be **100% read-only** - they never touch
-  `ApprovalManager`/`WorkflowEngine` at all.
-- **`scheduler.py`** is a separate process that writes only to
-  `ScheduleStore`/`InboxStore` - it never calls
-  `ApprovalManager.approve()`/`claim_for_resume()` or
-  `WorkflowEngine.resume()`. Its own execution of a due, scheduled
-  action is a **different, already-established trust boundary**:
-  Jarvis's own existing schedule design requires approval once, at
-  schedule-*creation* time (a YELLOW action, per
-  `security/security_manager.py`'s own "schedule web search" rule);
-  the scheduled run itself is a pre-authorized, repeated, automatic
-  action that never re-enters the per-action YELLOW approval flow.
-  `scheduler.py` is therefore correctly, structurally exempt from this
-  correction's own guard - it is not a second claimant of anything this
-  interlock protects.
-- **No single-instance enforcement exists today** - confirmed by
-  searching for any PID file, OS lock, or documented policy; none
-  exists.
+- `pyproject.toml`: `requires-python = ">=3.14"`; dependencies are
+  `anthropic`, `sqlalchemy`, `pydantic`, `python-dotenv`,
+  `duckduckgo-search`, `httpx` - **no existing locking library**
+  (`filelock`, `portalocker`, `fasteners`, etc.) is present. No new
+  dependency is introduced (per the task's own constraint); the
+  correction uses only the standard library.
+- `config/settings.py`: `database_path: Path`, defaulting to the
+  **relative** path `Path("data/jarvis.db")` - confirming relative-vs-
+  absolute normalization is a genuine, live concern, not a theoretical
+  one.
+- `storage/database.py`'s own `_build_sqlite_url()` **already**
+  canonicalizes via `database_path.expanduser().resolve()` for the
+  database URL itself - the identical technique is reused for the lock
+  identity, so the two can never disagree.
+- `main.py`: `build_orchestrator()` is the composition root (loads
+  settings, creates the engine, initializes the database, builds every
+  manager, calls `reload_pending()`/`reload_paused()`); `main()` is a
+  short wrapper calling `build_orchestrator()`, then constructing and
+  running `JarvisCLI`. `main()` already has an established precedent
+  (Phase 54, Batch 1) for keeping process-entry-point-only concerns
+  *out* of `build_orchestrator()`, specifically so its many test
+  callers are unaffected - `configure_console_logging()` is called only
+  in `main()`, never inside `build_orchestrator()`, by explicit design.
+- **Critical finding**: `build_orchestrator()` is called directly by
+  over 100 existing tests (confirmed:
+  `grep -rl build_orchestrator tests/` matches 15+ real test files).
+  Several - most importantly
+  `tests/integration/test_paused_workflow_restart_end_to_end.py` and
+  `tests/integration/test_pending_approval_restart_end_to_end.py` -
+  call `main.build_orchestrator()` **twice in one test function**,
+  against the **same** temp database file, with a bare Python `del` of
+  the first orchestrator in between, deliberately simulating "process
+  one crashes; process two starts" **without any real process
+  boundary**. A `del` does not deterministically close file handles or
+  release an OS-level lock. Placing lock acquisition inside
+  `build_orchestrator()` itself would make the *second* call in every
+  such test fail to acquire the lock the *first* call never released,
+  breaking this entire, real, already-established restart-simulation
+  test pattern.
+- `dashboard.py`/`scheduler.py`: confirmed unchanged from the prior
+  audit (Section "Read-only components," below).
+- Windows/POSIX: the target platform (this repository's own
+  development environment) is Windows; the standard library provides
+  `msvcrt.locking()` there and `fcntl.flock()` on POSIX - both already
+  available with no new dependency, in every supported Python 3.14
+  environment.
 
-**Selected: Option A - enforced single-instance database guard.** The
-real, intended, documented deployment is exactly one Jarvis CLI process
-per database; Option B (claim tokens/liveness for genuinely concurrent
-execution-capable processes) is rejected as solving a problem the real
-architecture does not have.
+## 3. Exact OS-lock mechanism (selected: preferred option)
 
-### 1.2 Exact guard design
+A new, narrow module (e.g. `runtime/process_lock.py`) providing one
+small, platform-dispatching class/context-manager,
+`ExecutionProcessLock`, wrapping a sidecar file opened and
+OS-locked for the caller's lifetime - never a database row, never an
+in-memory flag.
 
-A new, narrow, singleton-row table, `ProcessInstanceLock` (mirroring
-`ProjectState`'s own established singleton-row convention), scoped
-entirely within the same SQLite database file every other store
-already uses (so it is automatically scoped per `DATABASE_PATH` - two
-different configured database files never contend, with zero extra
-scoping logic required):
+### POSIX
 
-- `owner_pid: int` - the OS process id of the current holder.
-- `owner_token: str` - a fresh UUID generated at acquisition, guarding
-  against the (extremely rare) case of PID reuse by an unrelated
-  process across a reboot.
-- `acquired_at: datetime`.
-- A `UNIQUE` constraint on a fixed singleton key ensures at most one
-  row can ever exist, giving true atomic "only one owner" semantics at
-  the database level - not an in-memory flag.
+```python
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+```
 
-**Exact acquisition** (`acquire_process_guard()`, in a new, narrow
-module): attempt an `INSERT`; on success, the caller holds the guard,
-represented by an opaque token object (no other code can construct or
-forge one, so a caller cannot call the recovery pass without a
-genuine, successful acquisition - a structural, not merely
-conventional, guarantee). If a row already exists, perform the
-**stale-owner liveness check**: determine whether a process with the
-recorded `owner_pid` is currently running on this machine (a small,
-platform-specific liveness check - POSIX via `os.kill(pid, 0)`,
-Windows via `ctypes`-based `OpenProcess` - a narrow, bounded utility
-function, not a distributed system). If the recorded owner is
-confirmed dead, delete the stale row and retry the `INSERT` once
-(recovering from an abnormal prior termination). If the recorded owner
-is confirmed alive (or liveness cannot be determined), acquisition
-**fails**, and `main.py` refuses to start, reporting that Jarvis
-appears to already be running against this database.
+`fcntl.flock()` raises `OSError`/`BlockingIOError` immediately
+(non-blocking) if another process already holds the lock. The lock is
+tied by the kernel to the open file description and is **automatically
+released when the process exits, for any reason**, including `SIGKILL`
+- no cleanup code required for the crash case.
 
-**Release**: `main.py`'s own top-level `try/finally` around `cli.run()`
-deletes the row (keyed by `owner_token`) on any clean exit path,
-including normal completion and a handled `KeyboardInterrupt`.
+### Windows
 
-**Startup ordering** (`main.py`'s `build_orchestrator()`): the guard is
-acquired as the **first** action, strictly before `reload_pending()`,
-`reload_paused()`, or the new CLAIMED-reconciliation pass (Section 3)
-- all of which now require the caller to present the guard token,
-making it structurally impossible to run recovery without first
-acquiring it.
+```python
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+os.write(fd, b"\0")  # msvcrt.locking() requires at least one byte
+os.lseek(fd, 0, os.SEEK_SET)
+msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+```
 
-**Read-only components are unaffected**: `dashboard.py` never calls
-`acquire_process_guard()` at all (confirmed structurally separate,
-Section 1.1) - it continues to read the same database file with zero
-change, protected only by the pre-existing WAL/busy-timeout
-configuration, exactly as today.
+`msvcrt.locking()` with `LK_NBLCK` raises `OSError` immediately if
+another process already holds the byte-range lock. Like POSIX
+`flock()`, this lock is tied to the process/handle and is released by
+the operating system when the process terminates, including abnormal
+termination - no cleanup code required.
 
-**Test harnesses**: every existing test constructs `ApprovalManager`/
-`WorkflowEngine` directly, bypassing `main.py`'s own
-`build_orchestrator()` entirely - the guard is acquired only by
-`main.py`'s own explicit call, never implicitly required by any
-manager's constructor, so the entire existing test suite is
-unaffected. Dedicated new tests exercise the guard module itself in
-isolation (Section 12).
+Both branches are dispatched by a single, small,
+`sys.platform`-conditional import at the top of the new module (`fcntl`
+does not exist on Windows; `msvcrt` does not exist on POSIX) - a
+narrow, bounded, fully standard-library implementation, never a new
+dependency, never a distributed lock platform.
 
-### 1.3 Mandatory rule, honored
+### Rejected: an existing third-party library
 
-"Any CLAIMED row found at startup is definitionally from a crashed
-process" now holds **only because** runtime exclusivity is technically
-enforced (via the guard) immediately before the reconciliation pass
-that relies on this assumption - the assumption is no longer
-documentation-only.
+None is present in this repository's dependencies (Section 2); adding
+one is explicitly excluded by the task's own constraint. The standard-
+library mechanism above is sufficient and narrower.
 
-## 2. Workflow-history terminal-evidence audit (Blocker 2)
+## 4. Canonical database identity
 
-Directly inspected `workflow/workflow_history_store.py` in full and
-every writer in `workflow/engine.py`.
+`Path(settings.database_path).expanduser().resolve()` - identical to
+`storage/database.py`'s own existing canonicalization for the database
+URL itself, so the lock and the database file it protects can never
+disagree about identity. On Windows, additionally apply
+`os.path.normcase()` (the standard-library, platform-aware
+normalization function - a no-op on POSIX, lowercasing and
+slash-normalizing on Windows) so that two configuration values
+differing only in case or slash style resolve to the identical lock
+identity, matching Windows' own case-insensitive-but-case-preserving
+filesystem semantics. Symbolic links are resolved by `.resolve()`
+itself (standard `pathlib` behavior). Multiple, genuinely distinct
+database files each canonicalize to their own distinct path and
+therefore their own distinct, independent lock file - no shared state
+between them. An in-memory database
+(`sqlite:///:memory:`, used throughout the test suite via direct
+`create_engine()` calls that bypass `Settings`/`create_database_engine()`
+entirely) never goes through this canonicalization at all, since the
+lock is only ever acquired via the real, settings-driven startup path
+(Section 6) - no special-casing is needed.
 
-1. **Exact workflow identity**: `workflow_id`, a fresh `uuid.uuid4()`
-   string generated once per `run()` call
-   (`WorkflowEngine._new_workflow_id()`).
-2. **Uniqueness**: a fresh UUID4 per workflow attempt; old workflow ids
-   are never reused for a different workflow.
-3. **Exact terminal status values**: `workflow_completed` (success) and
-   `workflow_stopped` (the single STOP-only outcome for any failure,
-   decline, or block - there is no separate "workflow_failed" event
-   name; confirmed against `KNOWN_WORKFLOW_STATUSES`'s own fixed
-   seven-entry vocabulary).
-4. **Writers**: `_run_from()`'s own success path calls
-   `_record_history(_EVENT_WORKFLOW_COMPLETED, ...)` as its final
-   action, after every step has genuinely, sequentially executed;
-   `_stop()` calls `_record_history(_EVENT_WORKFLOW_STOPPED, ...)` as
-   its final action, after the failing step's own real `ToolResult` is
-   already known.
-5. **Written only after a real terminal result exists**: yes -
-   confirmed by the code's own sequencing; neither call is reachable
-   before the real, synchronous outcome is already determined.
-6. **Cannot be written before tool execution/verification finishes**:
-   confirmed - `self._executor.execute(...)` (the real, blocking tool
-   call) always precedes any terminal history write for that step/workflow.
-7. **Duplicate or contradictory terminal rows**: not possible under
-   normal operation - `resume()` cannot be invoked twice for the same
-   `workflow_id` (raises `WorkflowError`), and `_run_from()`/`_stop()`
-   each write their own terminal event at most once per workflow
-   lifecycle, which never repeats.
-8. **Ordering**: `latest_status_for()` orders by
-   `created_at.desc(), id.desc()`.
-9. **Timestamp ordering alone is not used**: the `id` column (an
-   autoincrementing primary key) is an explicit tiebreaker, giving a
-   true, unambiguous insertion-order signal even when two events share
-   an identical stored timestamp.
-10. **A later non-terminal row cannot obscure a terminal one**: for a
-    given `workflow_id`, nothing is ever written after its own terminal
-    event - the workflow is over. Structurally impossible.
-11. **Failed history insertion does not change execution**: confirmed
-    (`_record_history()`'s own try/except swallows any write failure,
-    per its own docstring) - this is exactly why *absence* of a
-    terminal row is not reliable evidence, but has no bearing on the
-    reliability of *presence*.
-12. **Old rows never share a workflow identity with a new workflow**:
-    confirmed (UUID4, never reused).
+## 5. Lock-file location
 
-### Reconciliation contract (final)
+`<canonical_database_path>.jarvis.lock` - a sidecar file in the exact
+same directory as the database file itself (whose existence is already
+guaranteed by `storage/database.py`'s own `_ensure_parent_directory()`,
+requiring no new directory-creation logic). The file's own contents are
+never authoritative and are not required to contain anything - an
+empty file (or, optionally, a single byte written for the Windows
+locking call, Section 3) is sufficient; **existence of this file proves
+nothing** - only a live, OS-held lock on an open handle to it does.
+File deletion is never how the lock is released (Section 7).
 
-**Accepted**: an exact `workflow_completed` record for the *same*
-`workflow_id` reconciles `CLAIMED → CONSUMED`; an exact
-`workflow_stopped` record for the *same* `workflow_id` also reconciles
-`CLAIMED → CONSUMED` (a known, definite terminal outcome - not
-uncertain, regardless of whether that outcome was success or failure).
-**Not accepted, and not relied upon anywhere in this design**: absence
-proving non-execution; a generic (non-workflow-scoped) audit event;
-tool-level audit records alone; inference from paused-workflow deletion
-alone; or a matching postcondition value alone (Batch 1's own
-`reconcile_phase_update()` remains a *separate*, narrower, only-later
-integrated mechanism for its one specific future consumer, per Section
-9's own compound-integration note - never a substitute for this
-general rule).
+## 6. Exact acquisition ordering
 
-`latest_status_for()` is confirmed reliable for this exact purpose by
-points 1-12 above; **no corrected query is required** - it is used
-unmodified.
+A new, small wrapper function (e.g. `main.start_execution_session()`),
+called only by `main()` - **never inside `build_orchestrator()`
+itself**, preserving that function, and every one of its 100+ existing
+test callers, completely unchanged (Section 2's critical finding):
 
-## 3. CLAIM_INTERRUPTED durable visibility (Blocker 3)
+1. Resolve the canonical database identity (Section 4).
+2. Acquire the OS-enforced execution-process lock (Section 3). If
+   acquisition fails, return a bounded, honest "Jarvis appears to
+   already be running against this database" error - `build_orchestrator()`
+   is never called, nothing is initialized, no approval/workflow state
+   is touched, no tool executes.
+3. Call the existing, unchanged `build_orchestrator()` - database
+   initialization/migration, existing `reload_pending()`/`reload_paused()`
+   (unchanged, still callable independently by every existing test with
+   no lock involved).
+4. Call a new, small function, e.g. `reconcile_claimed_handoffs(lock, ...)`,
+   whose signature **structurally requires** the already-acquired lock
+   object as a parameter - it is impossible to call without one, making
+   "recovery cannot run before lock acquisition" a structural, not
+   conventional, guarantee. This function performs, in order: approval/
+   history consistency repair; inherited-`CLAIMED` reconciliation;
+   missing interruption/terminal audit-event backfill (Sections
+   inherited unchanged from the prior draft).
+5. Rebuild the in-memory pending/approved-unconsumed views (unchanged).
+6. Only then does `main()` construct `JarvisCLI` and call `cli.run()`,
+   accepting approval or execution input.
 
-Directly inspected `approval/approval_history_store.py` in full:
-`ApprovalHistoryEntry` is one row per `request_id` (a request is
-recorded once, as "pending", and later updated **in place** - never a
-second row for the same request), with a fixed, small
-`KNOWN_APPROVAL_STATUSES = ("pending", "approved", "declined", "expired")`
-vocabulary used by the dashboard's own status breakdown.
+This resolves the ordering requirement precisely while keeping
+`build_orchestrator()` itself - and therefore the restart-simulation
+tests identified in Section 2 - completely untouched: those tests
+exercise `reload_pending()`/`reload_paused()`'s own existing,
+already-proven restart-safety directly, never the new lock or the new
+`CLAIMED`-reconciliation pass, which is correctly scoped to the one,
+real production entry point only.
 
-**Selected: Option A - approval-history interruption event.** A new
-method, `record_interruption(*, request_id, interrupted_at, reason=None)`,
-mirrors `record_timeout()`'s exact shape: looks up the existing row by
-`request_id`, and updates it to a new, fixed status value,
-`"interrupted"` (added to `KNOWN_APPROVAL_STATUSES` so the dashboard's
-own breakdown honestly includes it), with `decided_by="claim_interrupted"`
-and a **fixed, trusted, canned `reason` string** (never derived from
-model output, tool output, or any unbounded text) stating plainly that
-execution was claimed, its outcome could not be confirmed after a
-restart, and the approval cannot be reused.
+## 7. Lifetime and release
 
-**Idempotency**: because the table has exactly one row per
-`request_id`, calling `record_interruption()` more than once (e.g.
-across repeated startup-recovery attempts after another crash *during*
-recovery itself) can never create a duplicate row. For genuine,
-value-level idempotency (not merely row-count idempotency), the method
-is a no-op if the row's `status` is already `"interrupted"` - it never
-overwrites the original `interrupted_at` timestamp on a later,
-redundant call.
+`ExecutionProcessLock` is a context manager; `main()` acquires it (via
+`start_execution_session()`) and holds it, via a `try/finally` (or the
+context manager's own `__exit__`), across the complete interactive CLI
+lifetime - through every approval decision, claim, and
+`WorkflowEngine` execution, released only when `main()` itself exits,
+by any path (normal completion, a handled `KeyboardInterrupt`, or an
+unhandled exception propagating out of `cli.run()`). Release simply
+closes the file descriptor, which the operating system uses to drop
+the lock - the sidecar file itself is never deleted as part of release
+(Section 5).
 
-**Properties satisfied**: durable (a real database row); bounded (one
-fixed status string plus one fixed, canned reason - no free-form or
-unbounded content); identifies the exact approval via `request_id`
-(and, for a workflow-linked approval, the same `request_id` is already
-present on the retained `paused_workflow_state` row, Section 5,
-cross-referencing the exact workflow); states uncertainty and prohibits
-replay via its own fixed reason text; idempotent; survives restart (a
-real row, not in-memory); remains inspectable via the existing
-`show approval history` / `ApprovalHistoryTool` read path, with the
-exact same visibility as any other status - **this specific claim is
-flagged, honestly, as needing direct confirmation in Batch 2** against
-the tool's own real display code (not verified line-by-line in this
-planning gate); if that code turns out to special-case or reject
-unknown status strings, a small, narrow, additive display fix is
-explicitly in scope for that same batch, not a surprise discovered
-later. Never authorizes execution - `record_interruption()` never
-touches `pending_approval_state`, `ApprovalManager`, or any execution
-code path.
+## 8. Abnormal termination
 
-## 4. Approval-history repair ordering (final)
+No custom cleanup script or code path is required: both `fcntl.flock()`
+and `msvcrt.locking()` locks are released by the operating system the
+moment the holding process's file descriptors are closed, which the OS
+itself guarantees on process termination for any reason, including
+`SIGKILL`/a crash/a forced shutdown. A stale sidecar file left behind
+by a crashed process contains no lock by the time a new process
+inspects it - the new process's own non-blocking acquisition attempt
+succeeds immediately, exactly as if the file had never existed.
 
-Exact, deterministic startup sequence (matching the task's own
-required order, confirmed coherent given the dependencies above):
+## 9. Second-instance behavior
 
-1. Acquire the exclusive execution-process guard (Section 1) - refuses
-   to proceed if a live owner already holds it.
-2. Repair approval/handoff consistency: for every row whose
-   `handoff_status` is `APPROVED_UNCONSUMED`/`CLAIMED`/`CONSUMED`
-   (i.e., every row that was genuinely approved, regardless of its
-   current sub-state), idempotently backfill an `approval_history`
-   "approved" entry if one is not already present (Section 5 of the
-   prior draft, unchanged) - this step depends only on the *immutable*
-   fact "was this approved," never on the CLAIMED-reconciliation
-   outcome that has not run yet.
-3. Reconcile inherited `CLAIMED` rows (Section 2's reconciliation
-   contract): each becomes `CONSUMED` (exact terminal evidence found)
-   or `CLAIM_INTERRUPTED` (no exact evidence found).
-4. Append any missing, idempotent interruption audit events (Section 3)
-   for whatever newly landed in `CLAIM_INTERRUPTED` during step 3 -
-   sequenced after step 3 specifically because it depends on that
-   step's own outcome.
-5. Rebuild the in-memory pending view (`reload_pending()`'s own
-   existing, unchanged logic) and a new, separate, read-only
-   approved-unconsumed view (never auto-claimed).
-6. Only then does `main.py` proceed to `cli.run()`, accepting user
-   input.
+A second Jarvis CLI process attempting to start against the same
+(canonicalized) database path fails at Section 6, step 2, before any
+database initialization, recovery, or state mutation of any kind - it
+receives a bounded, honest "already running" message and exits.
 
-**Crash-during-repair recoverability**: every step above is idempotent
-individually (guard re-acquisition after this same process's own
-restart; history repair via update-in-place; CLAIMED reconciliation via
-the same deterministic evidence check; interruption-event recording via
-update-in-place) - a crash at any point during this sequence is safely
-recovered simply by re-running the entire sequence, from step 1, on the
-next launch. No step depends on a partially-completed prior run leaving
-any transient, unrecoverable state.
+## 10. Dashboard and scheduler boundaries
 
-## 5. Final transition matrix
+- **Dashboard**: confirmed, unchanged from the prior audit, to be
+  100% read-only - it never calls `start_execution_session()` or the
+  new lock module at all, and is structurally incapable of mutating
+  approval, workflow, or handoff state (no write-method call site
+  exists anywhere in `dashboard.py`/`ui/dashboard_app.py`/
+  `dashboard/read_model.py`). Because the new lock is a **separate
+  file** from the SQLite database itself, the dashboard's own read
+  access to the database is entirely unaffected by, and independent
+  of, this lock - the two files are never in contention.
+- **Scheduler**: `scheduler.py` writes only to `ScheduleStore`/
+  `InboxStore` - it never touches `pending_approval_state`,
+  `paused_workflow_state`, or any code this interlock protects, so it
+  introduces no risk to the handoff state machine specifically.
+  However, per the task's own instruction, it is **not** exempted
+  merely on that basis: `scheduler.py` is a genuinely separate,
+  execution-capable process (it does perform real, scheduled actions).
+  This correction does **not** make it acquire the same lock - doing so
+  would prevent scheduled actions from ever running while the
+  interactive CLI is open, defeating `scheduler.py`'s own purpose.
+  Instead, this is stated **honestly as an explicit, acknowledged,
+  out-of-scope limitation**: `scheduler.py` running concurrently with
+  the interactive CLI remains unsupported *with respect to any future,
+  broader single-writer guarantee*, though it introduces zero new risk
+  to *this specific* approval-handoff correction. Designing
+  `scheduler.py`'s own participation in a shared exclusivity model is
+  explicitly deferred to a future, separately-scoped phase - never
+  silently assumed safe.
 
-| Transition | Status |
-|---|---|
-| `PENDING → DECLINED` | Allowed (unchanged) |
-| `PENDING → EXPIRED` | Allowed (unchanged) |
-| `PENDING → APPROVED_UNCONSUMED` | Allowed (the fix) |
-| `APPROVED_UNCONSUMED → CLAIMED` | Allowed (CAS, exactly one claimant) |
-| `CLAIMED → CONSUMED` | Allowed, when exact terminal workflow evidence exists (Section 2), or when a non-workflow tool call's own synchronous outcome is already known |
-| `CLAIMED → CLAIM_INTERRUPTED` | Allowed, only when inherited across an *enforced* exclusive-startup boundary (Section 1) with no exact terminal evidence (Section 2), **or** synchronously, when the claimed handoff discovers its own paused workflow missing/invalid before any tool executes (reuses this same bucket - no new state) |
-| `CLAIM_INTERRUPTED → *` | **Rejected** - always terminal |
-| `CONSUMED → *` | **Rejected** - always terminal |
-| `APPROVED_UNCONSUMED → PENDING` | **Rejected** |
-| `CLAIMED → APPROVED_UNCONSUMED` | **Rejected** |
-| `CLAIM_INTERRUPTED → CLAIMED` | **Rejected** |
-| `CONSUMED → CLAIMED` | **Rejected** |
-| `DECLINED`/`EXPIRED → APPROVED_*` | **Rejected** |
-| Any transition altering `approved_phase_value`-equivalent tool input | **Rejected** - no transition in this table ever writes to `tool_input_json` |
+## 11. `ProcessInstanceLock` table decision
 
-Missing/invalid paused workflow after a claim transitions directly to
-`CLAIM_INTERRUPTED` - the smallest state model already covers this
-case; no separate `TERMINAL_INVALID` state is introduced.
+**Removed from the plan entirely.** The OS-level lock is fully
+authoritative and self-sufficient (Sections 3, 8); a parallel database
+row would be redundant, would risk the two authorities disagreeing, and
+serves no concrete, currently-justified diagnostic need. This also
+simplifies Batch 1's own schema scope: the only remaining schema change
+across the whole handoff correction is the previously-planned
+`pending_approval_state.handoff_status` column.
 
-## 6. Process guard and read-only components (summary)
+## 12. Workflow-history relationship (reaffirmed, responsibilities separated)
 
-- **Interactive CLI**: acquires the guard at startup, holds it for its
-  entire lifetime, releases on clean shutdown.
-- **Test harnesses**: unaffected - never call the guard's acquisition
-  function unless a test targets the guard module directly.
-- **Read-only dashboard**: unaffected, structurally exempt (never calls
-  the guard or any approval/workflow write method).
-- **Scheduler**: unaffected, structurally exempt - it writes only to
-  `ScheduleStore`/`InboxStore`, never to `pending_approval_state`/
-  `paused_workflow_state`; its own execution of a due schedule remains
-  the separate, pre-existing, approved-once-at-creation trust boundary
-  documented in Section 1.1, unrelated to this interlock.
-- **Multiple database files**: each has its own, independent guard row,
-  since the guard lives inside the same file every other store already
-  uses - no cross-file contention possible.
-- **Read-only commands** (e.g. "show approval history"): unaffected -
-  they never call the guard, exactly like the dashboard.
+Unchanged from the prior draft's own twelve-point audit
+(`WorkflowHistoryStore.latest_status_for()` remains the positive-only
+reconciliation signal), with the two responsibilities now explicitly,
+permanently separated: **the OS lock proves startup exclusivity** (no
+other execution-capable process is live for this database, so any
+inherited `CLAIMED` row is genuinely orphaned, never actively owned);
+**workflow history only ever distinguishes a known terminal outcome
+from an uncertain one**, for a row already known, via the lock, to be
+orphaned. Neither responsibility substitutes for the other; they are
+never combined into one claim.
 
-## 7. Existing YELLOW workflow impact, backward compatibility, migration
+## 13. `CLAIM_INTERRUPTED` relationship (unchanged)
 
-Unchanged in substance from the prior draft (its own Sections 13-15):
-one new column (`pending_approval_state.handoff_status`) plus one new
-table (`process_instance_lock`) plus one new status string
-(`"interrupted"` in `ApprovalHistoryEntry.status`) - all additive,
-migrated via the same guarded `ALTER TABLE`/`create_all()` pattern
-already proven for `episodic_memories.category`; existing rows default
-safely; `PROJECT_STATE_UPDATE_FOCUS`/`PHASE`/`SCHEDULE_ENABLE`/`DISABLE`
-guarantees and non-guarantees restated precisely as **"durable
-approved-to-claim handoff safety,"** never "complete crash-safe
-execution."
+Unchanged from the prior draft: `record_interruption()` on
+`ApprovalHistoryStore`, one bounded, idempotent, `request_id`-keyed
+event, fixed trusted reason text, no unrestricted output, old approval
+non-reusable, paused workflow retained, no automatic retry. No further
+visibility redesign is required by this correction.
 
-## 8. Future Phase 98 compound integration
+## 14. Test isolation and subprocess tests
 
-Unchanged in conclusion: the future compound consumer calls
-`claim_for_resume()` like any other capability, then locates its
-`CompoundWorkflowProgress` row; it may additionally, in its own
-separately-approved batch, narrow a `CLAIM_INTERRUPTED` compound
-workflow using `reconcile_phase_update()`'s own exact evidence - a
-capability-specific refinement layered *on top of* this general
-interlock, never a substitute for it.
+Tests using distinct temporary database files (the overwhelming
+majority of this repository's existing tests, via `tmp_path`/`:memory:`)
+are unaffected and remain fully independent - each canonicalizes to its
+own lock file. `build_orchestrator()`'s own existing test callers
+(Section 2) are unaffected, since neither the lock nor the new
+reconciliation pass lives inside it. New tests targeting the lock
+mechanism itself must use **real subprocesses** (`subprocess.Popen`
+running a small, dedicated helper script), not a mocked lock API -
+this is a hard requirement, since only a real OS call can prove real
+OS-enforced exclusivity.
 
-## 9. Selected outcome
+## 15. Final batch structure
 
-**Outcome A - three-batch interlock is implementation-ready.**
-
-## 10. Final batch structure
-
-- **Batch 1 - Schema, migration, and exclusive-process primitive**:
+- **Batch 1 - OS execution lock and CAS primitives**: `runtime/process_lock.py`
+  (cross-platform `ExecutionProcessLock`, canonical-path helper);
   `pending_approval_state.handoff_status` column + migration;
-  `process_instance_lock` table + `acquire_process_guard()`/
-  `release_process_guard()` + stale-owner liveness check;
   `PendingApprovalHandoffStatus` enum; `PendingApprovalStore` CAS
-  transition/claim methods. No `ApprovalManager`/orchestrator behavior
-  change yet - purely additive primitives, fully unit-tested in
-  isolation.
-- **Batch 2 - ApprovalManager lifecycle, history consistency, and
-  startup recovery**: `approve()`'s new transition;
-  `claim_for_resume()`; the full deterministic startup sequence
-  (Section 4); `record_interruption()` +
+  transition/claim methods. No `ApprovalManager`/orchestrator change
+  yet; no `main.py` wiring yet - the lock module and CAS primitives are
+  each fully, independently unit- and subprocess-tested in isolation.
+- **Batch 2 - Approval lifecycle, history consistency, and startup
+  recovery**: `approve()`'s new transition; `claim_for_resume()`;
+  `reconcile_claimed_handoffs()`; `record_interruption()` +
   `KNOWN_APPROVAL_STATUSES` update; `WorkflowEngine._try_reconstruct_paused_workflow()`'s
-  three-way retention refinement; confirmation (and, if needed, a
-  small fix) that `ApprovalHistoryTool`'s existing display path shows
-  `"interrupted"` truthfully. Complete regression for every existing
-  YELLOW capability.
-- **Batch 3 - Orchestrator integration and full closure**:
-  `execute_approved()` calls `claim_for_resume()` first and marks
-  `CONSUMED` after execution; explicit, documented single-process
-  statement shipped in module docstrings; full end-to-end crash-window
-  tests; full three-environment regression; closure.
+  three-way retention refinement; confirmation (or a small fix) that
+  `ApprovalHistoryTool`'s display path shows `"interrupted"` truthfully.
+  Complete regression for every existing YELLOW capability.
+- **Batch 3 - `main.py`/orchestrator integration and closure**:
+  `main.start_execution_session()` wiring `main()`'s own call to
+  `build_orchestrator()` plus the lock and reconciliation pass;
+  `execute_approved()` calling `claim_for_resume()` first; full
+  end-to-end crash-window and second-instance subprocess tests; full
+  three-environment regression; closure.
 
-## 11. Updated required tests
+The OS lock does not require its own, separately-scoped foundation
+phase - it is narrow enough to be Batch 1's own first deliverable,
+alongside the already-planned schema/CAS primitives.
 
-All 49 items the task requires map onto the three batches: exclusive-
-process-ownership and terminal-history-evidence tests (Batch 1, plus
-Batch 1's own share of compatibility tests); interrupted-visibility,
-startup-ordering/idempotency, and per-capability regression tests
-(Batch 2); orchestrator wiring, full existing-YELLOW-workflow
-end-to-end tests, and full-suite/Ruff verification (Batch 3).
+## 16. Updated required tests
 
-## 12. Updated acceptance criteria
+All 14 subprocess-test items the task requires, plus the previously
+specified 49 items (largely unchanged in substance, now referencing
+the OS lock instead of PID/token), map onto the three batches: lock
+mechanism and canonical-identity tests (Batch 1, using real
+subprocesses per Section 14); approval lifecycle, history-consistency,
+and startup-recovery tests (Batch 2); full `main.py` integration,
+existing-YELLOW-workflow, and full-suite/Ruff verification (Batch 3).
+No PID-reuse simulation is required anywhere, since PID is never
+authoritative.
 
-All required tests pass; the guard prevents a genuine second
-execution-capable process while never blocking the dashboard/scheduler;
-`latest_status_for()`-based reconciliation is exercised against real,
-distinct workflow ids proving no cross-workflow leakage; `record_interruption()`
-is proven idempotent (row count and value); every existing YELLOW
-capability's own suite passes; fresh and migrated databases behave
-identically; Ruff and `git diff --check` clean.
+## 17. Updated acceptance criteria
 
-## 13. Updated risks and mitigations
+All required tests pass, including real-subprocess proof that: a
+second process against the same database is rejected; a process against
+a different database succeeds independently; clean shutdown and abrupt
+termination both permit a later acquisition; a stale lock file with no
+held OS lock never blocks acquisition; equivalent relative/absolute/
+case-varied paths collide correctly. `build_orchestrator()`'s own 100+
+existing test callers, including both restart-simulation tests
+identified in Section 2, pass completely unmodified. Fresh and migrated
+databases behave identically. Ruff and `git diff --check` clean.
 
-- **Risk**: cross-platform PID-liveness checking has a subtle bug.
-  **Mitigation**: a narrow, isolated utility function, its own
-  dedicated tests per platform behavior, never load-bearing beyond
-  stale-guard recovery.
-- **Risk**: `ApprovalHistoryTool`'s existing display path silently
-  hides an unrecognized status. **Mitigation**: explicitly named as a
-  Batch 2 confirmation-or-fix item, not assumed away.
-- **Risk**: PID reuse coincides with a stale guard row. **Mitigation**:
-  the `owner_token` UUID is checked alongside the PID as an additional,
-  cheap safeguard, documented as reducing (not eliminating) this
-  already-rare risk.
+## 18. Updated risks and mitigations
 
-## 14. Updated stop conditions
+- **Risk**: Windows `msvcrt.locking()` has subtle, under-documented
+  edge cases. **Mitigation**: dedicated, real-subprocess tests specific
+  to this platform, proven before Batch 1 closes - never assumed
+  correct from documentation alone.
+- **Risk**: a future contributor re-adds lock acquisition inside
+  `build_orchestrator()`, reintroducing the restart-test regression
+  found in Section 2. **Mitigation**: this plan documents the reason
+  explicitly, and Batch 3's own test suite includes the two
+  restart-simulation tests as an explicit, permanent regression guard.
+- **Risk**: `scheduler.py`'s own exemption is later mistaken for "safe
+  in all respects." **Mitigation**: Section 10 states the boundary
+  honestly, as a named, acknowledged, deferred gap - never as a closed
+  question.
 
-Stop before implementation if: the single-process rule remains
-documentation-only (i.e., the guard is not actually enforced before
-recovery runs); a second process could run the reconciliation pass
-while another genuine claimant is live; stale-owner detection cannot be
-determined safely; `latest_status_for()` cannot provide exact,
-workflow-scoped positive terminal evidence; a terminal row could be
-written before real completion; `CLAIM_INTERRUPTED` remains invisible
-through a real, confirmed bounded read path; interrupted-event
-insertion can duplicate or produce inconsistent values across repeated
-calls; startup ordering is not deterministic or not idempotently
-recoverable from a crash; approval history could ever authorize
-execution; old approved arguments could change; a terminal handoff
-could become claimable; or the correction is described as exactly-once
-tool execution rather than durable approved-to-claim handoff safety.
+## 19. Updated stop conditions
 
-## 15. Formal final amendment conclusion
+Stop before implementation if: ownership still depends on PID liveness
+or an unverifiable stored token; locking is implemented as file
+existence rather than a real, held OS lock; Windows locking cannot be
+implemented and proven with real subprocess tests; equivalent database
+paths (relative/absolute/case-varied) can acquire separate locks; a
+second execution-capable process can run the `CLAIMED`-reconciliation
+pass while another is live; abnormal process death does not
+automatically release ownership; the lock is acquired inside
+`build_orchestrator()` in a way that breaks its existing test callers;
+dashboard read-only behavior would be blocked; two independent
+ownership authorities (e.g. a reintroduced database row alongside the
+OS lock) could disagree; startup recovery can run before lock
+acquisition; or any test relies only on a mocked lock API rather than a
+real subprocess.
 
-All three blockers are resolved with concrete, code-grounded designs:
-an enforced, database-backed, singleton-row process guard (justified by
-a complete inventory of every real process that touches the shared
-database); an exhaustive, twelve-point audit proving
-`latest_status_for()` is safe as a one-directional, positive-only
-reconciliation signal, with no corrected query needed; and a durable,
-idempotent, bounded interruption record reusing the existing
-`ApprovalHistoryStore`'s own established update-in-place pattern. The
-handoff correction is recommended as a three-batch, large/risky future
-phase - not implemented in this planning gate.
+## 20. Formal correction conclusion
+
+The process-exclusivity mechanism is corrected from an unverifiable
+database convention to a genuinely OS-enforced file lock, using only
+the standard library, with no new dependency. A second, independently
+discovered defect - that acquiring the lock inside `build_orchestrator()`
+would have broken an established, real restart-simulation test
+pattern used by over 100 existing tests - is resolved by acquiring the
+lock only in `main()`'s own new, narrow wrapper, leaving
+`build_orchestrator()` itself, and every test that calls it, completely
+unaffected. The `ProcessInstanceLock` database table is removed as
+redundant. The handoff correction remains a three-batch, large/risky
+future phase - not implemented in this planning gate.
