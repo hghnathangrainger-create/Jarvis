@@ -392,3 +392,237 @@ lock only in `main()`'s own new, narrow wrapper, leaving
 unaffected. The `ProcessInstanceLock` database table is removed as
 redundant. The handoff correction remains a three-batch, large/risky
 future phase - not implemented in this planning gate.
+
+## 21. Interlock Batch 1 — Implementation Evidence
+
+Batch 1 (the OS execution lock, the additive handoff-status schema, and
+store-level CAS primitives - Sections 3-15 above) is implemented,
+adding zero live wiring: no startup lock acquisition, no
+`ApprovalManager`/orchestrator lifecycle change, no startup recovery,
+and no `CLAIMED` reconciliation.
+
+### 21.1 Scheduler-boundary audit — re-confirmed by direct re-inspection
+
+`scheduler.py` was re-read in full for this batch. It remains a wholly
+separate, execution-capable process (`run_one_poll_cycle()` really does
+call `run_scheduled_web_search_summary()`, which mutates
+`ScheduleStore` via `claim_due()`'s own atomic claim and writes a real
+`InboxEntry` on success) that shares only the SQLite file with the CLI
+process - no IPC, no shared Python objects, no import of `main.py`/
+`JarvisOrchestrator`/`ApprovalManager`/`WorkflowEngine` at all
+(confirmed directly: `scheduler.py`'s own imports touch only
+`ScheduleStore`/`InboxStore`/`AIRouter`/`DuckDuckGoSearchProvider`).
+Critically, it never touches `pending_approval_state`,
+`paused_workflow_state`, `approval_history`, or `workflow_history` -
+the four tables this interlock protects - so it introduces no risk to
+*this specific* correction. Per the task's own instruction, this is
+**not** treated as a closed question merely because it avoids
+`ApprovalManager`: `scheduler.py` running concurrently with a
+lock-holding interactive CLI remains an explicit, acknowledged,
+deferred gap with respect to any *future*, broader single-writer
+guarantee - recorded here again, unchanged from Section 10, as the
+result of a fresh, direct re-audit rather than an assumption carried
+forward.
+
+`dashboard.py` was re-confirmed structurally read-only for this batch
+via `grep -rln "write\|update\|save\|delete\|approve\|resume\|execute" dashboard.py`,
+which returns only the filename match itself (the search pattern
+matching its own docstring prose), no call site - unchanged from the
+prior audit.
+
+### 21.2 OS execution lock — exact implementation
+
+- New module `runtime/process_lock.py` (package `runtime/__init__.py`
+  added alongside it): `ExecutionProcessLock` (a context manager),
+  `ExecutionLockError`, `InMemoryDatabaseLockError`,
+  `canonical_database_path()`, `lock_path_for()`. Zero third-party or
+  cross-project dependency - only `os`, `sys`, `pathlib`, and the
+  platform-conditional `fcntl` (POSIX) / `msvcrt` (Windows).
+- **Canonical identity**: `canonical_database_path()` performs
+  `database_path.expanduser().resolve()`, identical to
+  `storage/database.py`'s own `_build_sqlite_url()`, plus
+  `os.path.normcase()` on Windows (a no-op on POSIX) - proven, by direct
+  test, to make a relative and an absolute reference to the same file
+  resolve identically, and (Windows-only, platform-guarded) a
+  case-varied reference too.
+- **Sidecar location**: `lock_path_for()` derives
+  `<canonical_database_path>.jarvis.lock`, in the same directory as the
+  database file. Raises `InMemoryDatabaseLockError` for the literal
+  `":memory:"` database path - locking is honestly unsupported for a
+  non-durable, non-shared in-memory database, never silently mapped to
+  one global lock.
+- **POSIX**: `fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)` on an
+  `os.open()`'d sidecar file descriptor.
+- **Windows**: writes one control byte, seeks to offset 0, then
+  `msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)`; release seeks to the same
+  offset and calls `msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)` - the exact
+  same one-byte range for both lock and unlock, as required.
+- **API**: `acquire()`/`release()`/`__enter__`/`__exit__`/
+  `is_acquired`. Double acquisition by the same object raises
+  `ExecutionLockError`; repeated `release()` is a safe no-op (mirroring
+  `PendingApprovalStore.delete()`'s own established "no-op if already
+  gone" convention); `__exit__` always releases, including when the
+  `with` block raised. No heartbeats, PID checks, UUID rows, leases, or
+  retry loops exist anywhere in this module.
+- **Real subprocess evidence** (this repository's own development and
+  target platform is Windows; `tests/integration/
+  test_process_lock_subprocess.py` spawns
+  `_process_lock_subprocess_helper.py` as a genuine, independent
+  `subprocess.Popen` - never a mock): a second process against the
+  same database is rejected while the first holds it; a process
+  against a different database succeeds concurrently; a cleanly-released
+  lock permits immediate later acquisition; **abrupt termination**
+  (`proc.kill()`, simulating a crash) permits later acquisition,
+  proving the OS - not this module's own code - is what releases the
+  lock; equivalent relative/absolute paths (resolved against the same
+  working directory a real Jarvis process would use) collide onto one
+  sidecar. All 6 subprocess tests pass, using real `msvcrt` kernel
+  locking, not a mock.
+- **Stale-sidecar and no-leaked-descriptor evidence** (unit-level,
+  `tests/unit/test_process_lock.py`): a pre-existing, empty sidecar
+  file with no held lock never blocks acquisition; after `release()`, a
+  second, independent `ExecutionProcessLock` instance (a distinct open
+  file description, even within the same process) can acquire
+  immediately - proof no descriptor or lock is left behind, since a
+  genuinely leaked lock would have blocked this second instance too.
+- **No database/handoff mutation on acquisition failure**: proven
+  structurally, via AST-based real-identifier detection (not raw text
+  search, since this module's own docstrings legitimately name
+  `ApprovalManager`/`session_scope` when explaining what it does not
+  do) - the module's source contains no reference to
+  `session_scope`/`ApprovalManager`/`PendingApprovalStore`/
+  `create_database_engine`/`initialize_database` at all.
+
+### 21.3 Handoff-status schema — exact implementation
+
+- New `PendingApprovalHandoffStatus` enum (`approval/approval_models.py`,
+  alongside the pre-existing, untouched `ApprovalStatus`): `PENDING`,
+  `APPROVED_UNCONSUMED`, `CLAIMED`, `CONSUMED`, `CLAIM_INTERRUPTED`,
+  `DECLINED`, `EXPIRED` - a wholly separate concept from
+  `ApprovalStatus`, which keeps its exact original four values
+  (`pending`/`approved`/`declined`/`expired`), proven unchanged by a
+  dedicated regression test.
+- One additive column, `PendingApprovalState.handoff_status`
+  (`storage/models.py`): `String(24)`, `nullable=False`,
+  `default="pending"`, `server_default="pending"` - the only schema
+  change in this batch; no `ProcessInstanceLock` table and no generic
+  job/queue table were added.
+- New guarded migration `_ensure_pending_approval_handoff_status_column()`
+  (`storage/database.py`), called from `initialize_database()`
+  immediately after the pre-existing `_ensure_memory_category_column()`
+  - identical shape: inspect for the column, no-op if present, a single
+  `ALTER TABLE ... ADD COLUMN ... DEFAULT 'pending'` if not.
+- **Proof** (`tests/unit/test_pending_approval_handoff_schema.py`,
+  against a hand-built pre-Batch-1 table, not a fixture that already
+  has the column): a fresh database contains the column via
+  `create_all()` alone; migration adds it to a pre-existing database;
+  existing rows default to `"pending"` with every other column (action/
+  reason/security_tier/schema_version) untouched; migration is
+  idempotent (run three times); fresh and migrated schemas expose an
+  identical column set and identical runtime behavior; pre-existing
+  `pending_approval_state`/`paused_workflow_state`/`approval_history`
+  rows all remain independently readable after migration; no
+  `process_instance_lock` table exists.
+
+### 21.4 Store-level CAS primitives — exact implementation
+
+- `PendingApprovalStore` (`approval/pending_approval_store.py`) gains
+  exactly six named transition methods -
+  `mark_approved_unconsumed()`, `claim_for_resume()`,
+  `mark_consumed()`, `mark_claim_interrupted()`, `mark_declined()`,
+  `mark_expired()` - plus `get_handoff_status()` and
+  `list_by_handoff_status()`. Every transition routes through one
+  shared `_compare_and_set()` helper issuing a single, atomic SQL
+  `UPDATE ... WHERE request_id = ? AND handoff_status = <expected>`
+  and checking `result.rowcount == 1` - never a read-then-write pair,
+  never an in-memory lock, never a blind update.
+- **Allowed transitions** (exactly the plan's own matrix, and no
+  others - there is no generic `transition(from, to)` API, so an
+  unlisted combination is structurally unreachable, not merely
+  runtime-rejected): `PENDING -> APPROVED_UNCONSUMED`,
+  `PENDING -> DECLINED`, `PENDING -> EXPIRED`,
+  `APPROVED_UNCONSUMED -> CLAIMED`, `CLAIMED -> CONSUMED`,
+  `CLAIMED -> CLAIM_INTERRUPTED`.
+- **Rejected transitions, proven directly**
+  (`tests/unit/test_pending_approval_store_cas.py`):
+  `APPROVED_UNCONSUMED -> PENDING`, `CLAIMED -> APPROVED_UNCONSUMED`,
+  `CLAIM_INTERRUPTED -> CLAIMED`, `CONSUMED -> CLAIMED`,
+  `DECLINED -> APPROVED_UNCONSUMED`, `EXPIRED -> APPROVED_UNCONSUMED`,
+  and a same-state repeated call (e.g. a second `claim_for_resume()`)
+  all correctly return `False` with the row's own `handoff_status`
+  unchanged.
+- **Concurrency/second-claim evidence**: a second `claim_for_resume()`
+  call for the same `request_id` after a first, successful claim
+  returns `False` (`test_concurrent_or_repeated_second_claim_fails`);
+  a dedicated test manually advances a row's state between a caller's
+  `save()`/read and its CAS call, proving the CAS only ever inspects
+  the database's *current* state at the moment of its own atomic
+  `UPDATE`, never a value read earlier.
+- **Immutability**: `request_id`, `action`, `reason`, `security_tier`,
+  `tool_name`, `tool_input`, `schema_version`, and any workflow-linking
+  metadata (e.g. `workflow_id` inside `metadata_json`) are proven
+  unchanged across a full `PENDING -> APPROVED_UNCONSUMED -> CLAIMED ->
+  CONSUMED` transition sequence.
+- **No arbitrary state string accepted**:
+  `PendingApprovalHandoffStatus("not_a_real_state")` raises
+  `ValueError`, proven directly; the enum's own member set is proven
+  to be exactly the seven approved values, no more.
+- Existing store behavior: `save()`/`delete()`/`get()`/`list_all()`
+  remain present with their original signatures and behavior; `save()`
+  now explicitly writes `handoff_status="pending"` for every new row
+  (the one narrow, compatible adaptation the new column requires),
+  mirroring how `save()` already explicitly writes `schema_version=
+  SCHEMA_VERSION` rather than relying on the ORM column default alone.
+
+### 21.5 Isolation evidence — zero live wiring
+
+`tests/unit/test_interlock_batch1_isolation.py` proves, via AST-based
+identifier detection and a full repository sweep (excluding `tests/`):
+no reference to any new identifier (`ExecutionProcessLock`,
+`PendingApprovalHandoffStatus`, any of the six CAS methods, etc.)
+exists anywhere in production code outside the six files this batch
+itself adds or modifies (`runtime/__init__.py`, `runtime/process_lock.py`,
+`approval/approval_models.py`, `approval/pending_approval_store.py`,
+`storage/models.py`, `storage/database.py`); `main.py`/`ui/cli.py`
+import nothing from `runtime.process_lock`; `approval/approval_manager.py`/
+`core/orchestrator.py`/`workflow/engine.py` reference none of the new
+identifiers; `start_execution_session`/`reconcile_claimed_handoffs` (the
+Batch 2/3 deliverables) are not yet defined as callables anywhere in the
+repository; the Phase 97/98 compound-isolation boundary
+(`intelligence/compound_grounding.py`, `compound_structured_output.py`,
+`intelligence/planning.py`, `planner/plan_models.py`,
+`workflow/compound_workflow_progress_store.py`) is untouched by this
+batch.
+
+### 21.6 Focused and regression evidence
+
+- New tests: 18 (`test_process_lock.py`) + 6
+  (`test_process_lock_subprocess.py`, real subprocesses) + 9
+  (`test_pending_approval_handoff_schema.py`) + 25
+  (`test_pending_approval_store_cas.py`) + 14
+  (`test_interlock_batch1_isolation.py`) = **72 passed**.
+- Targeted regression re-run (existing approval manager/models/store,
+  workflow commands, verification gate, compound-workflow-progress
+  store, Phase 98 Batch 1 isolation, plan models, storage models,
+  database, restart end-to-end, Phase 27 adversarial/invalid-state/
+  no-restart, approval/approval-history end-to-end, dashboard end-to-end,
+  schedule enable/disable orchestrator workflows, project-state
+  update-phase orchestrator workflow, trusted-workflow foundation,
+  capability catalogue, grounding, planning, structured output,
+  Phase 97 compound isolation/grounding/structured-output): **867
+  passed**, all unmodified except the new files themselves.
+- Full suite: **5432 passed, 3 skipped, 0 failed**, identical in all
+  three required environments - exactly 72 more than the Phase 98
+  Batch 1 baseline of 5360.
+- Ruff: clean (0 findings) across every one of the 8 Python files this
+  batch touches (2 new production files, 2 modified production files,
+  1 modified production file with a guarded-migration addition, and 5
+  new test files - see the implementation commit's own Ruff evidence
+  for the exact file list and command).
+- `git diff --check`: clean.
+
+Interlock Batch 1 is closed. Batch 2 (`ApprovalManager` lifecycle,
+history consistency, claim API, startup recovery) and Batch 3
+(`main.py`/orchestrator integration, full YELLOW-workflow regression,
+closure) were not started. Phase 98 live compound Batch 2/3 remain
+blocked pending the full interlock's acceptance.

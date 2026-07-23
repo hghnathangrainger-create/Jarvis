@@ -674,6 +674,23 @@ class PendingApprovalState(Base):
             created (UTC) - used to evaluate staleness on reload, using
             the same timeout_seconds ceiling ApprovalManager already
             applies to a live pending request.
+        handoff_status: The durable execution-handoff lifecycle state
+            of this row (Approval-to-Resume Handoff Interlock, Batch 1
+            - docs/phase_98_approval_handoff_plan.md), one of
+            approval.approval_models.PendingApprovalHandoffStatus's own
+            values, stored as text. Defaults to "pending" for every row
+            - both freshly created ones and existing rows migrated by
+            storage.database's own guarded
+            _ensure_pending_approval_handoff_status_column() - so this
+            column's addition changes no existing row's meaning. A
+            wholly separate concept from this table's own `action`/
+            `reason`/`security_tier` (which describe the request being
+            approved) - see PendingApprovalHandoffStatus's own
+            docstring for why this is not the same lifecycle as
+            ApprovalStatus. No live ApprovalManager code reads or
+            writes this column in Batch 1 - only the new, narrow
+            compare-and-set primitives on PendingApprovalStore do,
+            exercised directly by this batch's own tests.
     """
 
     __tablename__ = "pending_approval_state"
@@ -694,6 +711,9 @@ class PendingApprovalState(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    handoff_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="pending", server_default="pending"
     )
 
     def __repr__(self) -> str:

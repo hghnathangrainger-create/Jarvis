@@ -187,13 +187,16 @@ def initialize_database(engine: Engine) -> None:
     After creating tables, a small, idempotent backward-compatibility step
     ensures older databases (created before the memory "category" column
     existed) gain that column with a safe default. This lets memory rows from
-    earlier phases keep working.
+    earlier phases keep working. A second, identical-in-spirit step
+    (Approval-to-Resume Handoff Interlock, Batch 1) does the same for
+    pending_approval_state.handoff_status.
 
     Args:
         engine: The engine to create the tables against.
     """
     Base.metadata.create_all(bind=engine)
     _ensure_memory_category_column(engine)
+    _ensure_pending_approval_handoff_status_column(engine)
 
 
 def _ensure_memory_category_column(engine: Engine) -> None:
@@ -225,6 +228,46 @@ def _ensure_memory_category_column(engine: Engine) -> None:
             text(
                 "ALTER TABLE episodic_memories "
                 "ADD COLUMN category VARCHAR(32) NOT NULL DEFAULT 'general'"
+            )
+        )
+
+
+def _ensure_pending_approval_handoff_status_column(engine: Engine) -> None:
+    """Add pending_approval_state.handoff_status if an old database lacks it.
+
+    Approval-to-Resume Handoff Interlock, Batch 1
+    (docs/phase_98_approval_handoff_plan.md). On a fresh database,
+    create_all already builds the column (storage.models.PendingApprovalState
+    declares it), so this does nothing. On a database created before this
+    batch, the column is missing; create_all does not alter existing
+    tables, so this step adds it via a single ALTER TABLE with a default
+    of 'pending' (approval.approval_models.PendingApprovalHandoffStatus.
+    PENDING's own value), backfilling every existing row - mirroring
+    _ensure_memory_category_column()'s own guarded, idempotent shape
+    exactly. Existing rows' other columns (action, reason, security_tier,
+    tool_name, tool_input_json, schema_version) are never touched.
+
+    Args:
+        engine: The engine whose database should be checked and, if needed,
+            updated.
+    """
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if "pending_approval_state" not in table_names:
+        return  # No table yet (unexpected here), nothing to migrate.
+
+    columns = {
+        col["name"] for col in inspector.get_columns("pending_approval_state")
+    }
+    if "handoff_status" in columns:
+        return  # Already present: fresh DB or already migrated.
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE pending_approval_state "
+                "ADD COLUMN handoff_status VARCHAR(24) NOT NULL "
+                "DEFAULT 'pending'"
             )
         )
 

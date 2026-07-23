@@ -71,6 +71,61 @@ class ApprovalStatus(Enum):
     EXPIRED = "expired"
 
 
+class PendingApprovalHandoffStatus(Enum):
+    """The durable execution-handoff lifecycle state of one
+    pending_approval_state row (Approval-to-Resume Handoff Interlock,
+    Batch 1 - docs/phase_98_approval_handoff_plan.md).
+
+    A wholly separate concept from ApprovalStatus above: ApprovalStatus
+    describes whether a *decision* was made (approved/declined/
+    expired); this enum describes whether an already-approved
+    request's *execution* has actually been handed off to, and
+    consumed by, a resuming workflow yet. Batch 1 adds this type, the
+    matching pending_approval_state.handoff_status column, and narrow
+    compare-and-set store primitives only - ApprovalManager's live
+    approve()/decline()/_decide() lifecycle does not yet read or write
+    this field; that wiring is deferred to a later, separately-accepted
+    batch.
+
+    Attributes:
+        PENDING: The request has been created and is awaiting a
+            decision. The initial, and only non-terminal-approval,
+            state - matches every row ApprovalManager.create_request()
+            persists today.
+        APPROVED_UNCONSUMED: The request has been approved but no
+            resuming workflow has yet claimed it for execution. Not
+            written by any live code in Batch 1.
+        CLAIMED: Exactly one caller has claimed this approved request
+            for execution, via a single compare-and-set transition -
+            a second, concurrent claim attempt always fails. Not
+            written by any live code in Batch 1.
+        CONSUMED: The claiming caller's execution handoff completed;
+            this is a terminal state. Ownership transfer only - this
+            never implies the underlying tool/workflow itself
+            succeeded or failed, which remains recorded independently
+            by WorkflowHistoryStore/ToolResult. Not written by any live
+            code in Batch 1.
+        CLAIM_INTERRUPTED: A claimed request whose execution outcome
+            could not be confirmed (for example, a crash between claim
+            and completion) - a terminal, manual-review state. No
+            automatic replay and no reuse of the original approval is
+            ever permitted from this state. Not written by any live
+            code in Batch 1.
+        DECLINED: The user declined the request - terminal, mirroring
+            ApprovalStatus.DECLINED.
+        EXPIRED: The request's approval window elapsed unanswered -
+            terminal, mirroring ApprovalStatus.EXPIRED.
+    """
+
+    PENDING = "pending"
+    APPROVED_UNCONSUMED = "approved_unconsumed"
+    CLAIMED = "claimed"
+    CONSUMED = "consumed"
+    CLAIM_INTERRUPTED = "claim_interrupted"
+    DECLINED = "declined"
+    EXPIRED = "expired"
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalRequest:
     """A request for the user to approve a sensitive (YELLOW) action.

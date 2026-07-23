@@ -46,9 +46,11 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
 
+from approval.approval_models import PendingApprovalHandoffStatus
 from storage.database import session_scope
 from storage.models import PendingApprovalState
 
@@ -91,6 +93,11 @@ class PendingApprovalRecord:
             and tool_input is None regardless of what was actually
             stored - the caller (ApprovalManager.reload_pending()) must
             treat a corrupt record as invalid and never resumable.
+        handoff_status: This row's durable execution-handoff lifecycle
+            state (Approval-to-Resume Handoff Interlock, Batch 1). Not
+            read or acted upon by any live code in Batch 1 - present
+            here only so callers (today: this batch's own tests) can
+            observe it.
     """
 
     id: int
@@ -105,6 +112,7 @@ class PendingApprovalRecord:
     schema_version: int
     created_at: datetime
     corrupt: bool
+    handoff_status: PendingApprovalHandoffStatus
 
 
 class PendingApprovalStore:
@@ -183,6 +191,7 @@ class PendingApprovalStore:
                     json.dumps(tool_input) if tool_input is not None else None
                 ),
                 schema_version=SCHEMA_VERSION,
+                handoff_status=PendingApprovalHandoffStatus.PENDING.value,
             )
             db.add(entry)
             db.flush()  # populate id and created_at before the scope commits
@@ -295,4 +304,223 @@ class PendingApprovalStore:
             schema_version=entry.schema_version,
             created_at=entry.created_at,
             corrupt=corrupt,
+            handoff_status=PendingApprovalHandoffStatus(entry.handoff_status),
         )
+
+    # ----- handoff-status CAS transitions (Batch 1) --------------------------
+    #
+    # Every method below performs exactly one atomic, database-level
+    # compare-and-set UPDATE ... WHERE request_id = ? AND handoff_status =
+    # <expected> - never a read-then-write pair, never an in-memory lock,
+    # never a blind update. Success requires exactly one row affected;
+    # rowcount 0 means the row is missing, already in a different state,
+    # or another caller already transitioned it - all reported uniformly
+    # as `False`, never distinguished, since distinguishing them would
+    # require exactly the read-then-write race this design avoids. No
+    # method here ever modifies request_id, action, reason, security_tier,
+    # tool_name, tool_input_json, metadata_json, schema_version, or
+    # created_at - only handoff_status changes.
+    #
+    # These six methods are the *only* transitions Batch 1 permits,
+    # matching the plan's own allowed transition matrix exactly:
+    #   PENDING -> APPROVED_UNCONSUMED, PENDING -> DECLINED,
+    #   PENDING -> EXPIRED, APPROVED_UNCONSUMED -> CLAIMED,
+    #   CLAIMED -> CONSUMED, CLAIMED -> CLAIM_INTERRUPTED.
+    # There is no generic transition(request_id, from_status, to_status)
+    # API - every other combination (a terminal state reactivating, a
+    # reversal, a skip) is structurally impossible to request through
+    # this store's public surface, not merely rejected at runtime.
+    #
+    # No live ApprovalManager code calls any of these in Batch 1 - they
+    # exist only to be exercised directly by this batch's own tests,
+    # ahead of a later, separately-accepted batch wiring them into the
+    # live approve()/resume() lifecycle.
+
+    def _compare_and_set(
+        self,
+        request_id: str,
+        *,
+        expected: PendingApprovalHandoffStatus,
+        new: PendingApprovalHandoffStatus,
+    ) -> bool:
+        """Atomically transition one row's handoff_status, iff it is
+        currently `expected`.
+
+        Args:
+            request_id: The row to transition.
+            expected: The handoff_status the row must currently have for
+                the transition to succeed.
+            new: The handoff_status to set.
+
+        Returns:
+            True if exactly one row was updated; False if no row with
+            that request_id currently has handoff_status == expected
+            (missing row, wrong current state, or already transitioned
+            by another caller).
+        """
+        with session_scope(self._session_factory) as db:
+            result = db.execute(
+                sa_update(PendingApprovalState)
+                .where(
+                    PendingApprovalState.request_id == request_id,
+                    PendingApprovalState.handoff_status == expected.value,
+                )
+                .values(handoff_status=new.value)
+            )
+            return result.rowcount == 1
+
+    def mark_approved_unconsumed(self, request_id: str) -> bool:
+        """Transition PENDING -> APPROVED_UNCONSUMED.
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if the transition succeeded; False otherwise (see
+            _compare_and_set's own docstring for why a single bool is
+            the whole story).
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.PENDING,
+            new=PendingApprovalHandoffStatus.APPROVED_UNCONSUMED,
+        )
+
+    def claim_for_resume(self, request_id: str) -> bool:
+        """Transition APPROVED_UNCONSUMED -> CLAIMED.
+
+        This is the one operation that gives a caller exclusive
+        ownership of resuming this request's execution: because the
+        underlying UPDATE is atomic and rowcount-checked, at most one
+        concurrent caller can ever observe True for the same
+        request_id - every other concurrent or later attempt observes
+        False, never a second, independent "claim."
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if this call is the one that claimed the row; False
+            otherwise.
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.APPROVED_UNCONSUMED,
+            new=PendingApprovalHandoffStatus.CLAIMED,
+        )
+
+    def mark_consumed(self, request_id: str) -> bool:
+        """Transition CLAIMED -> CONSUMED (terminal).
+
+        Ownership-transfer bookkeeping only - this never implies the
+        underlying tool/workflow itself succeeded; that remains owned
+        by WorkflowHistoryStore/ToolResult, independently.
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if the transition succeeded; False otherwise.
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.CLAIMED,
+            new=PendingApprovalHandoffStatus.CONSUMED,
+        )
+
+    def mark_claim_interrupted(self, request_id: str) -> bool:
+        """Transition CLAIMED -> CLAIM_INTERRUPTED (terminal).
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if the transition succeeded; False otherwise.
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.CLAIMED,
+            new=PendingApprovalHandoffStatus.CLAIM_INTERRUPTED,
+        )
+
+    def mark_declined(self, request_id: str) -> bool:
+        """Transition PENDING -> DECLINED (terminal).
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if the transition succeeded; False otherwise.
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.PENDING,
+            new=PendingApprovalHandoffStatus.DECLINED,
+        )
+
+    def mark_expired(self, request_id: str) -> bool:
+        """Transition PENDING -> EXPIRED (terminal).
+
+        Args:
+            request_id: The row to transition.
+
+        Returns:
+            True if the transition succeeded; False otherwise.
+        """
+        return self._compare_and_set(
+            request_id,
+            expected=PendingApprovalHandoffStatus.PENDING,
+            new=PendingApprovalHandoffStatus.EXPIRED,
+        )
+
+    def get_handoff_status(
+        self, request_id: str
+    ) -> PendingApprovalHandoffStatus | None:
+        """Return the current handoff_status of one row, or None.
+
+        Args:
+            request_id: The approval request id to look up.
+
+        Returns:
+            The row's current PendingApprovalHandoffStatus, or None if
+            no row exists for that request_id.
+        """
+        with session_scope(self._session_factory) as db:
+            entry = (
+                db.query(PendingApprovalState)
+                .filter(PendingApprovalState.request_id == request_id)
+                .one_or_none()
+            )
+            if entry is None:
+                return None
+            return PendingApprovalHandoffStatus(entry.handoff_status)
+
+    def list_by_handoff_status(
+        self, status: PendingApprovalHandoffStatus
+    ) -> list[PendingApprovalRecord]:
+        """Return every row currently in the given handoff_status,
+        oldest first.
+
+        Intended for a later, separately-accepted batch's startup
+        reconciliation pass (for example, listing every CLAIMED row to
+        check against workflow history) - not called by any live code
+        in Batch 1.
+
+        Args:
+            status: The handoff_status to filter by.
+
+        Returns:
+            A list of matching PendingApprovalRecord objects, oldest
+            created first.
+        """
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(PendingApprovalState)
+                .filter(PendingApprovalState.handoff_status == status.value)
+                .order_by(
+                    PendingApprovalState.created_at.asc(),
+                    PendingApprovalState.id.asc(),
+                )
+                .all()
+            )
+            return [self._to_record(row) for row in rows]
