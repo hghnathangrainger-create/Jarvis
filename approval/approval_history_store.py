@@ -48,6 +48,20 @@ _MAX_LIMIT = 50
 #: ever assign. Used by the dashboard's status breakdown to report an
 #: honest count for every known status, including one with zero
 #: entries, in a fixed, declared order - never sorted by count.
+#:
+#: Deliberately unchanged by the Approval-to-Resume Handoff Interlock,
+#: Batch 2 (docs/phase_98_approval_handoff_plan.md): "interrupted"
+#: (record_interruption(), below) is real and is truthfully displayed
+#: by ApprovalHistoryTool's own per-entry formatting
+#: (_format_entry() renders record.status generically, for any value) -
+#: but is deliberately kept out of this specific breakdown enumeration,
+#: which is also shared, unmodified, by JarvisBrainStatusTool,
+#: PreparePromptTool, HealthCheckTool, and the dashboard's read model
+#: (Phase 64/73/80/86/89) for their own, unrelated approval-count
+#: summaries. Extending those four consumers' own breakdown displays to
+#: a fifth status is a separate, proportionate follow-up for whichever
+#: batch/phase actually needs it - not an incidental side effect of this
+#: interlock.
 KNOWN_APPROVAL_STATUSES: tuple[str, ...] = (
     "pending",
     "approved",
@@ -232,6 +246,78 @@ class ApprovalHistoryStore:
             entry.decided_by = "timeout"
             entry.decided_at = timed_out_at
             entry.decision_reason = reason
+            db.flush()
+            return self._to_record(entry)
+
+    def record_interruption(
+        self,
+        *,
+        request_id: str,
+        interrupted_at: datetime,
+        reason: str | None = None,
+    ) -> ApprovalHistoryRecord | None:
+        """Update a history row to reflect a claimed-but-uncertain
+        execution outcome (Approval-to-Resume Handoff Interlock, Batch 2
+        - docs/phase_98_approval_handoff_plan.md).
+
+        Recorded only for a request that was already approved, whose
+        execution was claimed, and whose process ended before a
+        terminal outcome could be proven (see
+        workflow.workflow_history_store.WorkflowHistoryStore's own
+        positive-only evidence rule) - never for a request that was
+        merely declined or expired. This deliberately preserves the
+        row's existing decided_by/decided_at (who approved it, and
+        when) rather than overwriting them: the fact that it was
+        approved remains true and visible; only `status` changes, to
+        "interrupted", and `decision_reason` is updated to record the
+        bounded, honest interruption fact (including interrupted_at,
+        embedded as text, since this table has no separate column for
+        it).
+
+        Idempotent by construction: this table is one row per
+        request_id (see the class docstring), and this method is a
+        no-op returning the row unchanged if it is already
+        "interrupted" - repeated startup recovery can call this any
+        number of times for the same request_id without creating a
+        duplicate row or altering the reason a second time.
+
+        Args:
+            request_id: The id of the request whose claimed execution
+                was interrupted.
+            interrupted_at: UTC timestamp of when the interruption was
+                discovered (not when it actually happened, which is
+                unknowable) - embedded in the recorded reason text.
+            reason: Optional additional context. Never unrestricted
+                tool output, a prompt, model rationale, or a stack
+                trace - only a short, bounded, human-readable string.
+
+        Returns:
+            The updated ApprovalHistoryRecord, or None if no history row
+            exists for that request_id.
+        """
+        with session_scope(self._session_factory) as db:
+            entry = (
+                db.query(ApprovalHistoryEntry)
+                .filter(ApprovalHistoryEntry.request_id == request_id)
+                .one_or_none()
+            )
+            if entry is None:
+                return None
+            if entry.status == "interrupted":
+                return self._to_record(entry)
+
+            interrupted_note = (
+                "Execution was claimed but the process ended before a "
+                "terminal outcome could be proven "
+                f"(discovered at {interrupted_at.isoformat(timespec='seconds')}). "
+                "Automatic replay is not permitted; the original approval "
+                "is no longer reusable."
+            )
+            if reason:
+                interrupted_note += f" {reason}"
+
+            entry.status = "interrupted"
+            entry.decision_reason = interrupted_note
             db.flush()
             return self._to_record(entry)
 

@@ -26,18 +26,22 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from approval.approval_manager import ApprovalManager, ApprovalReloadReport
-from approval.pending_approval_store import PendingApprovalStore
-from config.constants import SecurityTier
-from planner.plan_models import Plan, PlanStep
-from security.security_manager import SecurityManager
-from storage.database import create_session_factory, initialize_database, session_scope
-from storage.models import PausedWorkflowState, PendingApprovalState
-from tools.base_tool import BaseTool, ToolRequest, ToolResult
-from tools.executor import ToolExecutor
-from tools.registry import ToolRegistry
-from workflow.engine import WorkflowEngine, WorkflowReloadReport
-from workflow.paused_workflow_store import PausedWorkflowStore
+from approval.approval_manager import ApprovalManager, ApprovalReloadReport  # noqa: E402
+from approval.pending_approval_store import PendingApprovalStore  # noqa: E402
+from config.constants import SecurityTier  # noqa: E402
+from planner.plan_models import Plan, PlanStep  # noqa: E402
+from security.security_manager import SecurityManager  # noqa: E402
+from storage.database import (  # noqa: E402
+    create_session_factory,
+    initialize_database,
+    session_scope,
+)
+from storage.models import PausedWorkflowState, PendingApprovalState  # noqa: E402
+from tools.base_tool import BaseTool, ToolRequest, ToolResult  # noqa: E402
+from tools.executor import ToolExecutor  # noqa: E402
+from tools.registry import ToolRegistry  # noqa: E402
+from workflow.engine import WorkflowEngine, WorkflowReloadReport  # noqa: E402
+from workflow.paused_workflow_store import PausedWorkflowStore  # noqa: E402
 
 
 class _SpyLogger:
@@ -346,13 +350,20 @@ def test_missing_linked_approval_row_entirely_fails_closed(session_factory) -> N
     registry_one, _, approvals_one, engine_one, _, _ = _build_stack(session_factory)
     result = engine_one.run(_two_step_plan())
     workflow_id = result.workflow_id
-    del registry_one, engine_one
+    request_id = result.pending_approval_request.request_id
+    del registry_one, engine_one, approvals_one
 
-    # Remove the linked pending-approval row directly, leaving the
-    # paused-workflow row pointing at a request_id that no longer exists
-    # anywhere.
-    approvals_one.approve(result.pending_approval_request.request_id)
-    del approvals_one
+    # Remove the linked pending-approval row directly at the storage
+    # layer, leaving the paused-workflow row pointing at a request_id
+    # that no longer exists anywhere - simulating a row written by an
+    # older, incompatible version, or two writes that raced and only one
+    # completed. Approval-to-Resume Handoff Interlock, Batch 2
+    # (docs/phase_98_approval_handoff_plan.md): approve()/decline() no
+    # longer delete this row themselves (it durably survives, retained
+    # under its own handoff lifecycle instead) - a genuine "never existed
+    # at all" scenario must now be constructed directly at the store,
+    # not via a decision.
+    PendingApprovalStore(session_factory).delete(request_id)
 
     registry_two, _, approvals_two, engine_two, _, yellow_two = _build_stack(
         session_factory

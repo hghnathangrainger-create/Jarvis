@@ -626,3 +626,327 @@ history consistency, claim API, startup recovery) and Batch 3
 (`main.py`/orchestrator integration, full YELLOW-workflow regression,
 closure) were not started. Phase 98 live compound Batch 2/3 remain
 blocked pending the full interlock's acceptance.
+
+## 22. Interlock Batch 2 — Implementation Evidence
+
+Batch 2 (live OS-lock wiring, the durable approval lifecycle, claim-
+before-resume, terminal `CONSUMED` transitions, and exclusive startup
+recovery) is implemented as one atomic, coherent lifecycle cut, exactly
+as required: approval retention is never activated without claim-
+before-resume; claim-before-resume is never activated without terminal
+handoff transitions; startup recovery never runs before the OS lock is
+acquired.
+
+### 22.1 Scheduler concurrency limitation — restated, not weakened
+
+Unchanged from Batch 1's own re-audit (Section 21.1): `scheduler.py`
+remains a wholly separate, execution-capable process that never
+acquires this interlock's OS lock and never will in this batch.
+Concurrent scheduler + execution-capable-CLI use of the same database
+is **explicitly unsupported** - not falsely claimed safe, and not
+silently left ambiguous. `scheduler.py`'s and `dashboard.py`'s own
+production source were re-confirmed, directly, to contain no reference
+to `runtime.process_lock`/`ExecutionProcessLock` at all
+(`tests/unit/test_main_execution_session.py`'s
+`test_scheduler_module_never_imports_the_execution_lock`/
+`test_dashboard_module_never_imports_the_execution_lock`). No scheduler
+production code was modified.
+
+### 22.2 Live OS-lock wiring — exact implementation
+
+- `main.start_execution_session()` (new): loads settings, constructs
+  `ExecutionProcessLock(settings.database_path)`, and calls
+  `lock.acquire()` **before** anything else. On `ExecutionLockError`,
+  raises a new `main.AlreadyRunningError` with a bounded, honest message
+  - nothing is initialized, migrated, or mutated. On success, calls the
+  existing, **completely unchanged** `build_orchestrator()`, then the
+  new `reconcile_claimed_handoffs(lock)`; if either raises, the lock is
+  released before the exception propagates.
+- `main.main()`: calls `start_execution_session()`; on
+  `AlreadyRunningError`, prints the message and returns (no CLI, no
+  further action). Otherwise holds the lock via `try`/`finally` across
+  `build_startup_notice()`, voice service construction, console-logging
+  configuration, and the complete `JarvisCLI.run()` interactive
+  lifetime - released on every exit path, including an unhandled
+  exception propagating out of `cli.run()`.
+- **`build_orchestrator()` itself remains untouched** - confirmed
+  directly: it does not import `runtime.process_lock`, and both
+  restart-simulation tests that call it twice in one process
+  (`test_paused_workflow_restart_end_to_end.py`,
+  `test_pending_approval_restart_end_to_end.py`) pass completely
+  unmodified.
+- **Failure behaviour, proven directly**
+  (`tests/unit/test_main_execution_session.py`): a second
+  `start_execution_session()` attempt while another lock-holder is live
+  raises `AlreadyRunningError` and creates the database file at no
+  point (`hermetic_db.exists()` is `False`); `main()` itself prints an
+  honest "already running" message and returns without raising; a
+  `build_orchestrator()` failure releases the lock (proven by a fresh
+  acquisition succeeding immediately after); an unhandled exception from
+  `JarvisCLI.run()` releases the lock via `main()`'s own `finally`.
+
+### 22.3 Approval lifecycle — exact transition behaviour
+
+- `ApprovalManager._decide()` (approve/decline) now performs the
+  authoritative durable CAS transition (`mark_approved_unconsumed()`/
+  `mark_declined()`) **first**, then the existing in-memory/audit/
+  history steps - reversing the old "delete on decide" side effect.
+  `approve()`/`decline()` **no longer delete** the durable row; it
+  survives as `APPROVED_UNCONSUMED`/`DECLINED`.
+- `_expire()` durably transitions `PENDING -> EXPIRED` the same way
+  (best-effort, since one sweep may reap several requests - a single
+  inconsistent row must never block the rest).
+- A genuine in-memory/durable disagreement at decision time (the CAS
+  unexpectedly failing) raises `ApprovalError` rather than proceeding -
+  proven by `test_approve_raises_on_durable_inconsistency`. Duplicate
+  approve/decline (approve after decline, decline after approval,
+  either after expiry, any terminal-state replacement) is rejected the
+  same way, since a second decision attempt finds the request already
+  absent from `_pending` (`get_pending()` raises `ApprovalError`) before
+  the durable CAS is even reached.
+- `reload_pending()` now iterates only
+  `list_by_handoff_status(PENDING)` (Batch 1's own primitive) instead of
+  every persisted row - an `APPROVED_UNCONSUMED`/`CLAIMED`/`CONSUMED`/
+  `CLAIM_INTERRUPTED`/`DECLINED`/`EXPIRED` row is never resurrected into
+  the in-memory pending-approval-prompt set.
+- A row invalidated on reload (unregistered tool, reclassified tier,
+  corrupt JSON, unsupported schema, stale age) is now durably marked
+  `EXPIRED` (via `mark_expired()`) instead of deleted, so its own final
+  fate remains visible via `handoff_status` too - proven by the updated
+  `test_reload_invalidates_a_row_whose_tool_is_no_longer_registered`.
+
+### 22.4 History consistency and repair
+
+- Ordering is exactly as required: authoritative CAS transition first,
+  then idempotent history recording (`_record_history_decision()`/
+  `_record_history_timeout()`, unchanged call sites, now reached only
+  after the durable transition already succeeded).
+- `main._repair_approval_history_consistency()` (new, called only from
+  `reconcile_claimed_handoffs()`): for every durable
+  `pending_approval_state` row, ensures a truthful, non-contradictory
+  `approval_history` record exists - creating one via `record_request()`
+  if entirely missing, and backfilling the missing decision
+  (`record_decision()`/`record_timeout()`, plus `record_interruption()`
+  for a `CLAIM_INTERRUPTED` row) only when the existing entry's own
+  status is still `"pending"` while the durable handoff_status shows it
+  was actually decided. An already-decided entry is never touched again
+  - proven by `test_repair_does_not_touch_an_already_decided_history_row`
+  (preserves the real `decided_by`/`decision_reason`) and
+  `test_repair_backfills_missing_decision_without_overwriting_correct_ones`
+  (repeating repair does not alter an already-repaired record).
+- `ApprovalHistoryStore.record_interruption()` (new): updates a history
+  row's `status` to `"interrupted"`, embedding `interrupted_at` and any
+  bounded reason as text in `decision_reason` - deliberately **preserves**
+  the row's original `decided_by`/`decided_at` (who approved it, and
+  when, remains visible; only the later, more specific fact is added).
+  Idempotent by construction (one row per `request_id`; a no-op if
+  already `"interrupted"`). `KNOWN_APPROVAL_STATUSES` (the dashboard/
+  brain-status/prepare-prompt breakdown enumeration) is **deliberately
+  left unchanged** - extending four unrelated consumers' own breakdown
+  displays to a fifth status is a separate, proportionate follow-up, not
+  an incidental side effect of this interlock; `ApprovalHistoryTool`'s
+  own per-entry formatting already renders any status value truthfully,
+  proven by `tests/unit/test_approval_history_interruption_display.py`.
+- History alone can never authorize execution: `claim_for_resume()`/
+  `mark_consumed()` consult only `PendingApprovalStore`'s own durable
+  `handoff_status`, never `ApprovalHistoryStore` - structurally
+  incapable of being influenced by a history repair.
+
+### 22.5 Claim-before-resume — exact API and integration
+
+- `ApprovalManager.claim_for_resume(request_id) -> bool`: delegates to
+  `PendingApprovalStore.claim_for_resume()`'s existing Batch 1 CAS
+  (`APPROVED_UNCONSUMED -> CLAIMED`); returns `True` unconditionally when
+  no `pending_store` is configured, keeping every existing in-memory-only
+  call site (100+ tests) byte-for-byte unaffected.
+  `mark_consumed()`/`mark_claim_interrupted()` mirror this exactly.
+- `core.orchestrator.JarvisOrchestrator.execute_approved()`'s
+  workflow-linked branch (`workflow_id is not None`) - the single,
+  generic, capability-agnostic gate applied identically to all four
+  `TWO_STEP_WORKFLOW` capabilities, never a capability-specific path:
+  1. Only for an approval (`decision.is_approved`) - a decline reaches
+     `resume()` exactly as before, with **no claim attempt at all**
+     (proven by `test_decline_never_claims_and_never_transitions_to_claimed`).
+  2. `claim_for_resume(decision.request_id)`; a `False` result returns
+     an honest failure response **without calling `resume()` at all**
+     (proven by `test_claim_failure_executes_nothing`).
+  3. A defensive `has_paused(workflow_id)` re-check immediately after a
+     successful claim; if the paused workflow is not found, `resume()`
+     is never called, `mark_claim_interrupted()` transitions the row,
+     and an honest failure is returned (Section 22.6).
+  4. `resume()` is called; a `WorkflowError` it raises (never expected
+     in the current single-threaded flow, since identity is already
+     guaranteed by step 3, but handled defensively) is caught only long
+     enough to mark `CLAIM_INTERRUPTED`, then **re-raised unchanged** -
+     `execute_approved()`'s pre-existing "let `WorkflowError`
+     propagate" behaviour is preserved exactly.
+  5. On any well-defined `WorkflowResult` (`COMPLETED`, `FAILED`, or a
+     new `WAITING` pause on a later step), `mark_consumed()` - proven
+     across all four terminal shapes (Section 22.6).
+- Exact request/workflow identity is never re-derived or reconstructed:
+  `resume()`'s own pre-existing Phase 28 check
+  (`decision.request_id != paused.request_id`) already enforces it;
+  claim-before-resume adds no new identity mechanism.
+
+### 22.6 Terminal `CONSUMED` behaviour — proven across every outcome
+
+`tests/integration/test_orchestrator_claim_before_resume.py` (13 tests,
+`PROJECT_STATE_UPDATE_PHASE`) proves `CONSUMED` results from: a fully
+successful workflow; an ordinary write-tool failure; a genuine
+verification mismatch; and verification-unavailable (missing verifier
+target) - all four honestly distinct outcomes, never conflated, and all
+mapping to the identical `CONSUMED` handoff transition, matching "does
+not mean success specifically." A simulated response-delivery failure
+**after** `CONSUMED` (monkeypatching
+`_translate_verified_workflow_result` to raise) proves the approval
+remains non-reusable (`claim_for_resume()` still returns `False`) and
+the real write is never repeated. `CONSUMED` cannot be claimed again in
+every case. `tests/integration/test_remaining_workflows_claim_before_resume.py`
+proves the identical claim-then-`CONSUMED` behaviour for
+`PROJECT_STATE_UPDATE_FOCUS`, `SCHEDULE_ENABLE`, and `SCHEDULE_DISABLE`.
+
+### 22.7 Missing/invalid paused workflow after claim
+
+Proven live (`test_missing_paused_workflow_after_claim_produces_claim_interrupted`,
+simulating the paused workflow vanishing in the narrow window between
+claim and the defensive re-check): claim succeeds, the workflow is then
+found missing, `resume()` is never called (`project_state_store.get() is
+None`), the row transitions to `CLAIM_INTERRUPTED`, and a further claim
+attempt fails - proving no automatic replay and no workflow
+reconstruction from model output (structurally confirmed by
+`test_no_workflow_is_recreated_from_model_output_after_interruption`,
+an AST-based proof that `execute_approved()` never references
+`select_tool`/`AIRouter`/a fresh `Plan`).
+
+### 22.8 Startup recovery — exclusive reconciliation
+
+- `main.reconcile_claimed_handoffs(lock)`: structurally requires an
+  already-acquired `ExecutionProcessLock` (raises `RuntimeError` if
+  `lock.is_acquired` is `False` - proven directly); uses its own
+  independent engine/session_factory/stores (mirroring
+  `build_startup_notice()`'s established pattern), never
+  `build_orchestrator()`'s own instances.
+- For each `CLAIMED` row: `WorkflowHistoryStore.latest_status_for()`'s
+  exact linked `workflow_id` (from the row's own `metadata`) is checked
+  for `workflow_completed`/`workflow_stopped` - positive-only evidence,
+  exactly as the plan requires. Exact terminal evidence -> `CONSUMED`
+  (proven for both `workflow_completed` and `workflow_stopped`
+  independently). No evidence, non-terminal evidence
+  (`workflow_started`/`workflow_step_started`), or another workflow's
+  own unrelated terminal evidence -> `CLAIM_INTERRUPTED` (proven
+  independently for all three cases - `test_another_workflows_history_cannot_reconcile_the_row`
+  proves exact-`workflow_id` matching specifically). Nothing is ever
+  resumed, executed, or replayed by this pass - only the two CAS
+  transitions.
+- Idempotent by construction: a `CONSUMED`/`CLAIM_INTERRUPTED` row is no
+  longer `CLAIMED`, so a repeated recovery pass never revisits it at
+  all (`list_by_handoff_status(CLAIMED)` simply no longer includes it)
+  - proven directly for both outcomes, including that a repeated
+  interruption event's own reason text is unchanged (no duplicate,
+  no alteration).
+- **Ordinary reload never mutates `CLAIMED`**: a fresh
+  `ApprovalManager.reload_pending()` call (the everyday, non-exclusive
+  path) leaves a `CLAIMED` row's `handoff_status` completely untouched -
+  proven directly.
+- `WorkflowEngine.reload_paused()`/`_try_reconstruct_paused_workflow()`
+  now treat a linked approval that is durably `APPROVED_UNCONSUMED` or
+  `CLAIMED` (not "pending" in `ApprovalManager.has_pending()`'s
+  in-memory sense any more) as a new, third outcome - `_RETAIN_WITHOUT_RESUME`
+  - neither resumed nor invalidated: the `paused_workflow_state` row
+  survives untouched, and the linked approval is never invalidated on
+  this basis alone. This closes the exact crash gap the interlock
+  targets (approve, then crash before resume) - proven by
+  `test_reload_retains_when_linked_approval_is_approved_unconsumed`
+  (renamed from, and behaviourally corrected from,
+  `test_reload_invalidates_when_linked_approval_missing`, whose old
+  expectation - `invalidated=1` - was precisely the bug this interlock
+  fixes). A genuinely missing/decided-terminally/corrupt/incompatible
+  row is still invalidated exactly as before
+  (`test_missing_linked_approval_row_entirely_fails_closed` updated to
+  construct a true "never existed" row via a direct store-level
+  `delete()`, since `approve()`/`decline()` no longer produce that
+  condition as a side effect).
+
+### 22.9 Approved-unconsumed restart behaviour — documented decision
+
+**Preferred safe behaviour is implemented, not the automatic-
+continuation fallback.** An `APPROVED_UNCONSUMED` row durably survives
+a restart (proven directly:
+`test_start_execution_session_acquires_the_lock` +
+`test_ordinary_reload_pending_does_not_mutate_claimed_rows`-style
+assertions across the new test suite), is never presented as a pending
+approval prompt, is never auto-executed, and creates no new approval.
+It remains durably discoverable (via `PendingApprovalStore.get()`/
+`list_by_handoff_status(APPROVED_UNCONSUMED)`, already present from
+Batch 1) and is claimable through the exact same `claim_for_resume()` +
+`WorkflowEngine.resume()` path the live orchestrator already uses, the
+moment a future, separately-justified explicit "continue" mechanism
+exists. Automatic startup re-execution was deliberately **not** built:
+the task's own "preferred safe behaviour" bullets (make durably
+discoverable; do not auto-execute unless existing product behaviour
+requires it; permit the established explicit resume path to claim
+them) take priority over the conditional fallback clause, and
+implementing full unattended re-execution of a previously-approved
+side-effecting write during startup - with no human watching - is a
+materially larger, separately-justified feature, not a proportionate
+part of this interlock. No new user-facing command was added.
+
+### 22.10 Backward compatibility and regression evidence
+
+- Existing migrated rows still default to `PENDING`; existing pending
+  approvals/paused workflows/approval-history records all still
+  read/display correctly (unchanged Batch 1 schema/migration).
+- Every existing YELLOW workflow (`PROJECT_STATE_UPDATE_FOCUS`,
+  `PROJECT_STATE_UPDATE_PHASE`, `SCHEDULE_ENABLE`, `SCHEDULE_DISABLE`)
+  preserves its exact tools, inputs, approvals, verification, and
+  responses - proven by the complete, unmodified regression suite for
+  each capability, plus the new claim/`CONSUMED` tests layered on top.
+  Four pre-existing tests whose own old behaviour was precisely the bug
+  this interlock fixes were updated to assert the new, strictly
+  stronger, correct behaviour (never weakened):
+  `test_approving_removes_the_durable_row` ->
+  `test_approving_transitions_the_durable_row_to_approved_unconsumed`;
+  `test_declining_removes_the_durable_row` ->
+  `test_declining_transitions_the_durable_row_to_declined`;
+  `test_expiry_removes_the_durable_row` ->
+  `test_expiry_transitions_the_durable_row_to_expired`; and
+  `test_reload_invalidates_a_row_whose_tool_is_no_longer_registered`'s
+  own final assertion (row now `EXPIRED`, not deleted). Two integration
+  tests whose own construction relied on `approve()`'s old deletion side
+  effect were corrected to construct their scenario directly at the
+  store layer instead
+  (`test_missing_linked_approval_row_entirely_fails_closed`,
+  `test_reload_invalidates_when_linked_approval_missing` -> renamed
+  `test_reload_retains_when_linked_approval_is_approved_unconsumed`).
+- `tests/unit/test_interlock_batch1_isolation.py` is retired, superseded
+  by `tests/unit/test_interlock_batch2_isolation.py`: its own premise
+  (zero live wiring anywhere) is the exact condition this batch
+  intentionally, correctly reverses for `approval_manager.py`/
+  `core/orchestrator.py`/`workflow/engine.py`/`main.py`. The new file
+  proves the wiring now exists exactly where expected, and that the
+  Phase 97/98 compound boundary remains completely untouched.
+
+### 22.11 Test and verification summary
+
+- New/updated focused tests: 20
+  (`test_main_execution_session.py`) + 15
+  (`test_approval_manager_handoff_lifecycle.py`) + 13
+  (`test_orchestrator_claim_before_resume.py`) + 3
+  (`test_remaining_workflows_claim_before_resume.py`) + 3
+  (`test_approval_history_interruption_display.py`) + 12
+  (`test_interlock_batch2_isolation.py`, replacing 14 retired) = **66
+  net new passing tests** over the Batch 1 baseline.
+- Full suite: **5484 passed, 3 skipped, 0 failed**, identical across the
+  normal environment, `AI_REASONING_ENABLED=false`, and
+  `PYTHON_DOTENV_DISABLED=1`.
+- Ruff: clean (exit 0) across every one of the 15 Python files this
+  batch touches (4 modified production files, 1 new production-adjacent
+  change set in `main.py`, 6 new test files, 1 deleted test file, 4
+  modified existing test files).
+- `git diff --check`: clean.
+
+Interlock Batch 2 is closed. Batch 3 (final full end-to-end/crash-window
+proof, three-environment closure, and the formal completion report) was
+not started. No live compound behaviour was added; Phase 98 live
+compound Batch 2/3 remain blocked pending the full interlock's
+acceptance.

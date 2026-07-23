@@ -78,7 +78,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from approval.approval_manager import ApprovalManager
-from approval.approval_models import ApprovalDecision, ApprovalError
+from approval.approval_models import (
+    ApprovalDecision,
+    ApprovalError,
+    PendingApprovalHandoffStatus,
+)
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
 from security.security_manager import SecurityManager
@@ -128,6 +132,20 @@ _PROPAGATED_FIELDS: tuple[tuple[str, str], ...] = (
     ("memory_id", "memory_id"),
     ("matched_path", "source"),
 )
+
+#: Sentinel returned by _try_reconstruct_paused_workflow() (Approval-to-
+#: Resume Handoff Interlock, Batch 2 -
+#: docs/phase_98_approval_handoff_plan.md) meaning: this paused
+#: workflow's own row must be neither invalidated/deleted nor
+#: reconstructed into self._paused right now - its linked approval is
+#: durably APPROVED_UNCONSUMED or CLAIMED (decided or already claimed,
+#: but not yet resumed/consumed), so it must survive this reload
+#: untouched, pending either the exclusive startup-recovery
+#: reconciliation pass (for CLAIMED specifically) or a future explicit
+#: claim. A distinct identity (never equal to a real _PausedWorkflow or
+#: to None) so reload_paused()'s own loop can tell all three outcomes
+#: apart unambiguously.
+_RETAIN_WITHOUT_RESUME = object()
 
 
 class _AuditLogger(Protocol):
@@ -1416,6 +1434,16 @@ class WorkflowEngine:
             paused, rejection = self._try_reconstruct_paused_workflow(
                 record, registry=registry, security=security
             )
+            # Approval-to-Resume Handoff Interlock, Batch 2: a row whose
+            # linked approval is durably APPROVED_UNCONSUMED or CLAIMED
+            # is neither "resumed" (nothing calls resume() for it here)
+            # nor "invalidated" (it must not be deleted or have its
+            # approval invalidated) - it is simply left alone, retained
+            # for the exclusive startup-recovery reconciliation pass (for
+            # CLAIMED) or a future explicit claim (for
+            # APPROVED_UNCONSUMED). Neither counter is incremented for it.
+            if paused is _RETAIN_WITHOUT_RESUME:
+                continue
             if paused is None:
                 self._invalidate_reloaded_paused_workflow(
                     record, reason=rejection or "Could not be revalidated."
@@ -1434,7 +1462,7 @@ class WorkflowEngine:
         *,
         registry: ToolRegistry,
         security: SecurityManager,
-    ) -> tuple[_PausedWorkflow | None, str | None]:
+    ) -> tuple[_PausedWorkflow | object | None, str | None]:
         """Attempt to safely reconstruct one persisted paused-workflow row.
 
         Args:
@@ -1445,8 +1473,11 @@ class WorkflowEngine:
 
         Returns:
             A tuple of (paused, None) if the row passes every check and
-            was reconstructed successfully, or (None, reason) if it must
-            fail closed.
+            was reconstructed successfully; (_RETAIN_WITHOUT_RESUME,
+            None) if its linked approval is durably APPROVED_UNCONSUMED
+            or CLAIMED (Approval-to-Resume Handoff Interlock, Batch 2) -
+            retained untouched, neither resumed nor invalidated; or
+            (None, reason) if it must fail closed.
         """
         if record.corrupt:
             return None, "Persisted state could not be parsed."
@@ -1466,6 +1497,22 @@ class WorkflowEngine:
         # main.py's own composition order guarantees reload_pending() has
         # already run on this exact `self._approvals` instance.
         if not self._approvals.has_pending(record.request_id):
+            # Approval-to-Resume Handoff Interlock, Batch 2: an approval
+            # that is no longer "pending" is not automatically
+            # unresumable any more - it may instead be durably
+            # APPROVED_UNCONSUMED (decided, not yet claimed) or CLAIMED
+            # (claimed by a now-terminated prior process, awaiting the
+            # exclusive startup-recovery reconciliation pass). Both must
+            # be retained untouched, never invalidated on this basis
+            # alone - only DECLINED/EXPIRED/CONSUMED/CLAIM_INTERRUPTED
+            # (or a missing row entirely) mean this workflow's own
+            # approval will truly never be resumed again.
+            handoff_status = self._approvals.handoff_status_for(record.request_id)
+            if handoff_status in (
+                PendingApprovalHandoffStatus.APPROVED_UNCONSUMED,
+                PendingApprovalHandoffStatus.CLAIMED,
+            ):
+                return _RETAIN_WITHOUT_RESUME, None
             return None, (
                 f"Linked approval '{record.request_id}' is not pending "
                 "(missing, already decided, or invalidated on its own "

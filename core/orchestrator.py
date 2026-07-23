@@ -98,7 +98,7 @@ from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from tools.web_search_provider import WebSearchProvider
-from workflow.engine import WorkflowEngine
+from workflow.engine import WorkflowEngine, WorkflowError
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
     build_create_and_read_plan,
@@ -729,15 +729,90 @@ class JarvisOrchestrator:
         """
         workflow_id = self._paused_workflow_id_for(response)
         if workflow_id is not None:
-            result = self._workflow_engine.resume(
-                workflow_id,
-                decision,
-                session_id=(
-                    response.approval_request.session_id
-                    if response.approval_request is not None
-                    else None
-                ),
-            )
+            # Approval-to-Resume Handoff Interlock, Batch 2
+            # (docs/phase_98_approval_handoff_plan.md): claim-before-resume.
+            # Only for an approval (never a decline - see the Decline
+            # lifecycle's own "no claim" requirement; resume() already
+            # handles a declined decision safely with no side effect via
+            # its own internal _stop() path). Applies identically to
+            # every TWO_STEP_WORKFLOW capability (today
+            # PROJECT_STATE_UPDATE_FOCUS, PROJECT_STATE_UPDATE_PHASE,
+            # SCHEDULE_ENABLE, SCHEDULE_DISABLE) - there is no
+            # capability-specific branch here, only this one, generic
+            # gate applied to every workflow-linked resume.
+            if decision.is_approved:
+                claimed = self._approvals.claim_for_resume(decision.request_id)
+                if not claimed:
+                    return JarvisResponse(
+                        success=False,
+                        message=(
+                            "This approval could not be claimed for "
+                            "execution - it may already be claimed, "
+                            "consumed, or no longer approved."
+                        ),
+                        plan=response.plan,
+                    )
+                if not self._workflow_engine.has_paused(workflow_id):
+                    # Claimed, but the paused workflow it should resume is
+                    # missing - execute nothing, and durably mark this
+                    # claim as uncertain rather than ever silently
+                    # discarding or replaying it.
+                    self._approvals.mark_claim_interrupted(
+                        decision.request_id,
+                        reason=(
+                            "Paused workflow was not found immediately "
+                            "after claim."
+                        ),
+                    )
+                    return JarvisResponse(
+                        success=False,
+                        message=(
+                            "This approval was claimed, but its paused "
+                            "workflow could not be found; it will not be "
+                            "retried automatically."
+                        ),
+                        plan=response.plan,
+                    )
+
+            try:
+                result = self._workflow_engine.resume(
+                    workflow_id,
+                    decision,
+                    session_id=(
+                        response.approval_request.session_id
+                        if response.approval_request is not None
+                        else None
+                    ),
+                )
+            except WorkflowError:
+                # Never expected once has_paused() has already been
+                # confirmed True immediately above, in this engine's own
+                # single-threaded, synchronous call flow - but if
+                # resume()'s own identity check ever disagrees, the claim
+                # must not be left silently stuck at CLAIMED forever, and
+                # the pre-existing "let WorkflowError propagate" behaviour
+                # for this genuine-misuse exception is preserved exactly
+                # (re-raised, never swallowed).
+                if decision.is_approved:
+                    self._approvals.mark_claim_interrupted(
+                        decision.request_id,
+                        reason=(
+                            "resume() raised after claim; execution "
+                            "ownership could not be confirmed."
+                        ),
+                    )
+                raise
+
+            if decision.is_approved:
+                # A real, well-defined WorkflowResult was returned
+                # (COMPLETED, FAILED, or a new WAITING pause on a later
+                # step) - this claim's own execution ownership has been
+                # used and concluded, regardless of which of those three
+                # shapes it took. CONSUMED never means success
+                # specifically; the workflow result/history remains the
+                # sole source of truth for what actually happened.
+                self._approvals.mark_consumed(decision.request_id)
+
             # Phase 90, Batch 3; generalized Phase 94, Batch 2: each real
             # verified-workflow shape is recognised purely structurally
             # (no new persisted marker, per Section 24.C.12) - never

@@ -32,6 +32,14 @@ Responsibilities:
       it is called in a single process. Uses the already-validated
       settings.log_level (Phase 46) - no new setting.
     - Start the terminal CLI.
+    - Acquire the OS-enforced execution-process lock and run startup
+      recovery (Approval-to-Resume Handoff Interlock, Batch 2 -
+      docs/phase_98_approval_handoff_plan.md), via start_execution_session()
+      and reconcile_claimed_handoffs() - both called only from main(),
+      never from build_orchestrator() itself, so build_orchestrator()'s
+      own 100+ existing test callers (including the two restart-
+      simulation tests that call it twice in one process) remain
+      completely unaffected.
 
 Does NOT:
     - Call the Claude API unless AI_REASONING_ENABLED=true (Phase 7, Batch 2).
@@ -55,6 +63,9 @@ module free of wiring concerns and easy to test in isolation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
 from ai.prompt_builder import PromptBuilder, audit_suspicious_injection
 from ai.providers.claude import ClaudeProvider
 from ai.reasoning_engine import AIReasoningEngine
@@ -62,6 +73,7 @@ from ai.response_validator import ResponseValidator
 from ai.router import AIRouter
 from approval.approval_history_store import ApprovalHistoryStore
 from approval.approval_manager import ApprovalManager
+from approval.approval_models import PendingApprovalHandoffStatus
 from approval.pending_approval_store import PendingApprovalStore
 from config.settings import load_settings
 from core.command_router import CommandRouter
@@ -77,6 +89,7 @@ from observability.logging_setup import configure_console_logging
 from planner.planner import Planner
 from project_state.project_state_store import ProjectStateStore
 from quarantine.quarantine_store import QuarantineStore
+from runtime.process_lock import ExecutionLockError, ExecutionProcessLock
 from security.audit_log import AuditLog
 from security.security_manager import SecurityManager
 from storage.database import (
@@ -591,26 +604,376 @@ def build_voice_input_service() -> VoiceInputService:
     return VoiceInputService(provider=provider, enabled=settings.voice_input_enabled)
 
 
-def main() -> None:
-    """Build the system and start the interactive CLI."""
-    orchestrator = build_orchestrator()
-    startup_notice = build_startup_notice()
-    voice_output, speak_responses = build_voice_output_service()
-    voice_input = build_voice_input_service()
-    # Phase 54, Batch 1: console logging is configured here, directly in
-    # the real process entry point - never inside build_orchestrator(),
-    # so the many existing tests that call build_orchestrator() directly
-    # are never affected. Idempotent - see configure_console_logging()'s
-    # own docstring.
-    configure_console_logging(load_settings())
-    cli = JarvisCLI(
-        orchestrator,
-        startup_notice=startup_notice,
-        voice_output=voice_output,
-        speak_responses=speak_responses,
-        voice_input=voice_input,
+class AlreadyRunningError(Exception):
+    """Raised when another execution-capable Jarvis process already holds
+    the OS execution lock for this exact database (Approval-to-Resume
+    Handoff Interlock, Batch 2 - docs/phase_98_approval_handoff_plan.md).
+
+    Deliberately a plain, bounded exception with no recovery/retry logic
+    of its own - the caller (main()) catches this and prints a single,
+    honest message; nothing is initialized, migrated, or mutated before
+    this is raised.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSummary:
+    """A small, honest summary of what reconcile_claimed_handoffs() did.
+
+    Attributes:
+        history_repaired: Number of pending_approval_state rows whose
+            approval_history record was missing or still "pending" and
+            was backfilled to match the row's own durable handoff_status.
+        claimed_consumed: Number of inherited CLAIMED rows for which
+            positive terminal workflow-history evidence was found and
+            which were transitioned to CONSUMED.
+        claimed_interrupted: Number of inherited CLAIMED rows for which
+            no such evidence was found (or could not be proven) and
+            which were transitioned to CLAIM_INTERRUPTED.
+    """
+
+    history_repaired: int
+    claimed_consumed: int
+    claimed_interrupted: int
+
+
+def start_execution_session() -> tuple[JarvisOrchestrator, ExecutionProcessLock]:
+    """Acquire the OS execution lock, then build and recover the system.
+
+    Approval-to-Resume Handoff Interlock, Batch 2. This is the sole
+    entry point that acquires runtime.process_lock.ExecutionProcessLock -
+    called only by main(), never by build_orchestrator() itself (see
+    build_orchestrator()'s own docstring for why: over 100 existing
+    tests, including two that call it twice in one process to simulate a
+    restart, depend on it remaining lock-free and side-effect-bounded to
+    exactly what it already does).
+
+    Exact order: (1) load enough configuration to identify the database;
+    (2) resolve its canonical path and acquire the lock (fails closed,
+    before anything else); (3)/(4)/(5) call the existing, unchanged
+    build_orchestrator() - database init/migration, every store, the
+    orchestrator itself, and its own existing reload_pending()/
+    reload_paused() calls (which only ever populate still-PENDING
+    approvals and their linked paused workflows - see
+    ApprovalManager.reload_pending()'s and WorkflowEngine.reload_paused()'s
+    own Batch 2 changes); (6)-(8) call reconcile_claimed_handoffs() -
+    approval-history consistency repair, inherited-CLAIMED reconciliation,
+    and interruption-event backfill, all using their own independent
+    engine/session_factory (mirroring build_startup_notice()'s own
+    established pattern), operating only on rows build_orchestrator()'s
+    own reload already deliberately left untouched (CLAIMED and the four
+    terminal handoff states), so there is no ordering conflict between
+    the two; (9) no separate in-memory rebuild step is needed - it
+    already happened as part of (3)-(5), and reconciliation never touches
+    any row already reflected in the live ApprovalManager/WorkflowEngine
+    instances' own in-memory state.
+
+    Returns:
+        A tuple of (orchestrator, lock) - the caller (main()) must hold
+        `lock` for the remainder of the process's lifetime and release it
+        via a try/finally or context manager on every exit path.
+
+    Raises:
+        AlreadyRunningError: If another process already holds the
+            execution lock for this exact database. Nothing is
+            initialized, migrated, or mutated before this is raised.
+    """
+    settings = load_settings()
+    lock = ExecutionProcessLock(settings.database_path)
+    try:
+        lock.acquire()
+    except ExecutionLockError as exc:
+        raise AlreadyRunningError(
+            "Jarvis appears to already be running against this database "
+            f"({settings.database_path}). Only one execution-capable "
+            "instance may run at a time."
+        ) from exc
+
+    try:
+        orchestrator = build_orchestrator()
+        reconcile_claimed_handoffs(lock)
+    except Exception:
+        lock.release()
+        raise
+
+    return orchestrator, lock
+
+
+def reconcile_claimed_handoffs(lock: ExecutionProcessLock) -> ReconciliationSummary:
+    """Run exclusive startup recovery: repair approval-history
+    consistency, then reconcile every inherited CLAIMED handoff row.
+
+    Approval-to-Resume Handoff Interlock, Batch 2. `lock` is a required
+    parameter structurally requiring an already-acquired
+    ExecutionProcessLock - it is impossible to call this function without
+    one, making "recovery cannot run before lock acquisition" a
+    structural, not merely conventional, guarantee. This is exactly why
+    calling it is safe: the lock proves no other execution-capable CLI
+    process is live for this database, so every inherited CLAIMED row
+    found here genuinely belongs to a prior, now-terminated process -
+    never a live, competing claimant.
+
+    Uses its own independent engine/session_factory/stores (mirroring
+    build_startup_notice()'s own established pattern) rather than reusing
+    build_orchestrator()'s - both point at the same real SQLite file, so
+    every write here is immediately visible to it, but this function
+    never needs build_orchestrator()'s own return type to change to reach
+    them.
+
+    Never resumes, executes, or replays anything: every row is either
+    left alone (already terminal, or genuinely still pending/approved-
+    unconsumed) or transitioned to CONSUMED/CLAIM_INTERRUPTED via
+    PendingApprovalStore's own compare-and-set primitives - the same
+    ones ApprovalManager already uses for the live path.
+
+    Args:
+        lock: The already-acquired ExecutionProcessLock for this exact
+            database.
+
+    Returns:
+        A ReconciliationSummary of what was repaired/reconciled.
+
+    Raises:
+        RuntimeError: If `lock` is not currently held - startup recovery
+            must never run before lock acquisition.
+    """
+    if not lock.is_acquired:
+        raise RuntimeError(
+            "reconcile_claimed_handoffs() requires an already-acquired "
+            "ExecutionProcessLock - startup recovery must never run "
+            "before the execution lock is held."
+        )
+
+    settings = load_settings()
+    engine = create_database_engine(settings)
+    initialize_database(engine)  # idempotent; already done by build_orchestrator()
+    session_factory = create_session_factory(engine)
+
+    pending_store = PendingApprovalStore(session_factory)
+    history_store = ApprovalHistoryStore(session_factory)
+    workflow_history = WorkflowHistoryStore(session_factory)
+
+    history_repaired = _repair_approval_history_consistency(
+        pending_store, history_store
     )
-    cli.run()
+    claimed_consumed, claimed_interrupted = _reconcile_claimed_rows(
+        pending_store, history_store, workflow_history
+    )
+    return ReconciliationSummary(
+        history_repaired=history_repaired,
+        claimed_consumed=claimed_consumed,
+        claimed_interrupted=claimed_interrupted,
+    )
+
+
+def _expected_history_status(handoff_status: PendingApprovalHandoffStatus) -> str:
+    """Return the approval_history `status` a durable handoff_status
+    implies, for the sole purpose of detecting a missing/stale backfill.
+
+    Args:
+        handoff_status: The durable, authoritative handoff state.
+
+    Returns:
+        "pending" for PENDING; "approved" for every state that can only
+        be reached by first being approved (APPROVED_UNCONSUMED, CLAIMED,
+        CONSUMED, CLAIM_INTERRUPTED); "declined" for DECLINED; "expired"
+        for EXPIRED.
+    """
+    if handoff_status is PendingApprovalHandoffStatus.PENDING:
+        return "pending"
+    if handoff_status is PendingApprovalHandoffStatus.DECLINED:
+        return "declined"
+    if handoff_status is PendingApprovalHandoffStatus.EXPIRED:
+        return "expired"
+    return "approved"
+
+
+def _repair_approval_history_consistency(
+    pending_store: PendingApprovalStore, history_store: ApprovalHistoryStore
+) -> int:
+    """Ensure a truthful, non-contradictory approval_history record
+    exists for every durable pending_approval_state row.
+
+    For each row: if no history entry exists at all, one is created
+    (record_request(), status "pending"). If the history entry's own
+    status is still "pending" but the durable handoff_status shows the
+    request was actually decided, the missing decision is backfilled
+    (record_decision()/record_timeout(), and additionally
+    record_interruption() for a durably CLAIM_INTERRUPTED row) - honestly
+    attributed to "system_repair" at the current moment, since the
+    original decider/timestamp is not independently recoverable. An
+    already-decided history entry (status "approved"/"declined"/
+    "expired"/"interrupted") is never touched again - repair only ever
+    fills a genuine gap, never overwrites a real record contradictorily.
+
+    Args:
+        pending_store: The durable pending-approval store to inspect.
+        history_store: The durable approval-history store to repair.
+
+    Returns:
+        The number of rows whose history was created or backfilled.
+    """
+    repaired = 0
+    now = datetime.now(timezone.utc)
+
+    for record in pending_store.list_all():
+        existing = history_store.get(record.request_id)
+        if existing is None:
+            history_store.record_request(
+                request_id=record.request_id,
+                action=record.action,
+                reason=record.reason,
+                security_tier=record.security_tier,
+                session_id=record.session_id,
+            )
+            existing_status = "pending"
+            repaired += 1
+        else:
+            existing_status = existing.status
+
+        expected = _expected_history_status(record.handoff_status)
+        if expected == "pending" or existing_status != "pending":
+            continue
+
+        repair_reason = "Backfilled by startup consistency repair."
+        if expected == "approved":
+            history_store.record_decision(
+                request_id=record.request_id,
+                approved=True,
+                decided_by="system_repair",
+                decided_at=now,
+                reason=repair_reason,
+            )
+            if record.handoff_status is PendingApprovalHandoffStatus.CLAIM_INTERRUPTED:
+                history_store.record_interruption(
+                    request_id=record.request_id,
+                    interrupted_at=now,
+                    reason=repair_reason,
+                )
+        elif expected == "declined":
+            history_store.record_decision(
+                request_id=record.request_id,
+                approved=False,
+                decided_by="system_repair",
+                decided_at=now,
+                reason=repair_reason,
+            )
+        else:  # "expired"
+            history_store.record_timeout(
+                request_id=record.request_id,
+                timed_out_at=now,
+                reason=repair_reason,
+            )
+        repaired += 1
+
+    return repaired
+
+
+def _reconcile_claimed_rows(
+    pending_store: PendingApprovalStore,
+    history_store: ApprovalHistoryStore,
+    workflow_history: WorkflowHistoryStore,
+) -> tuple[int, int]:
+    """Reconcile every inherited CLAIMED handoff row using positive-only
+    workflow-history evidence.
+
+    For each CLAIMED row: its linked workflow_id (from the row's own
+    metadata, set only by WorkflowEngine at pause time) is looked up via
+    WorkflowHistoryStore.latest_status_for() - the same positive-only
+    evidence rule already established (docs/phase_98_implementation_plan.md
+    Section 12): a "workflow_completed"/"workflow_stopped" entry is
+    reliable positive proof; absence proves nothing and is never read as
+    "did not execute". A row with exact terminal evidence is CAS'd to
+    CONSUMED; one without is CAS'd to CLAIM_INTERRUPTED and one bounded,
+    idempotent interruption event is recorded. Nothing here ever resumes,
+    executes, or replays anything - only these two CAS transitions.
+
+    Args:
+        pending_store: The durable pending-approval store to reconcile.
+        history_store: The durable approval-history store to record an
+            interruption event in, when needed.
+        workflow_history: The durable workflow-history store to consult
+            for terminal evidence.
+
+    Returns:
+        A tuple of (consumed_count, interrupted_count).
+    """
+    consumed = 0
+    interrupted = 0
+    now = datetime.now(timezone.utc)
+
+    for record in pending_store.list_by_handoff_status(
+        PendingApprovalHandoffStatus.CLAIMED
+    ):
+        workflow_id = record.metadata.get("workflow_id")
+        has_terminal_evidence = False
+        if workflow_id:
+            latest = workflow_history.latest_status_for(workflow_id)
+            if latest is not None and latest.status in (
+                "workflow_completed",
+                "workflow_stopped",
+            ):
+                has_terminal_evidence = True
+
+        if has_terminal_evidence:
+            if pending_store.mark_consumed(record.request_id):
+                consumed += 1
+        else:
+            if pending_store.mark_claim_interrupted(record.request_id):
+                history_store.record_interruption(
+                    request_id=record.request_id,
+                    interrupted_at=now,
+                    reason=(
+                        "No confirmed terminal workflow outcome was found "
+                        "during exclusive startup recovery."
+                    ),
+                )
+                interrupted += 1
+
+    return consumed, interrupted
+
+
+def main() -> None:
+    """Acquire the execution lock, build and recover the system, and
+    start the interactive CLI.
+
+    Approval-to-Resume Handoff Interlock, Batch 2: if another process
+    already holds the execution lock for this database,
+    start_execution_session() raises AlreadyRunningError before
+    anything is initialized, migrated, or mutated - this is reported
+    here as a single, bounded, honest message, and the process exits
+    without starting the CLI. Otherwise, the lock is held via try/finally
+    across the complete interactive CLI lifetime - database
+    initialization, recovery, every approval decision, claim, workflow
+    resume, and tool execution - and released on every exit path,
+    including an unhandled exception propagating out of cli.run().
+    """
+    try:
+        orchestrator, lock = start_execution_session()
+    except AlreadyRunningError as exc:
+        print(str(exc))
+        return
+
+    try:
+        startup_notice = build_startup_notice()
+        voice_output, speak_responses = build_voice_output_service()
+        voice_input = build_voice_input_service()
+        # Phase 54, Batch 1: console logging is configured here, directly in
+        # the real process entry point - never inside build_orchestrator(),
+        # so the many existing tests that call build_orchestrator() directly
+        # are never affected. Idempotent - see configure_console_logging()'s
+        # own docstring.
+        configure_console_logging(load_settings())
+        cli = JarvisCLI(
+            orchestrator,
+            startup_notice=startup_notice,
+            voice_output=voice_output,
+            speak_responses=speak_responses,
+            voice_input=voice_input,
+        )
+        cli.run()
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

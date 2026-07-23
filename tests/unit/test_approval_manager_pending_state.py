@@ -8,12 +8,15 @@ These use a real in-memory SQLite database via PendingApprovalStore (not
 a fake), because the central claim under test - that a pending approval
 genuinely survives a fresh ApprovalManager instance bound to the same
 database - can only be proven with real storage. Tests here prove:
-persistence on create, removal on decide/decline/expire, reload into a
-brand-new manager instance, fail-closed revalidation (unregistered tool,
-reclassified tier, corrupt JSON, stale age), that approve/decline still
-work normally after reload, that no tool executes merely because state
-was reloaded, and that a manager with no pending_store configured is
-completely unaffected (byte-for-byte pre-Phase-27 behaviour).
+persistence on create, durable handoff-lifecycle transition on
+decide/decline/expire (Approval-to-Resume Handoff Interlock, Batch 2 -
+docs/phase_98_approval_handoff_plan.md: the row is retained, not
+deleted), reload into a brand-new manager instance, fail-closed
+revalidation (unregistered tool, reclassified tier, corrupt JSON, stale
+age), that approve/decline still work normally after reload, that no
+tool executes merely because state was reloaded, and that a manager
+with no pending_store configured is completely unaffected (byte-for-byte
+pre-Phase-27 behaviour).
 
 Run with:
     pytest tests/unit/test_approval_manager_pending_state.py
@@ -27,14 +30,14 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from approval.approval_manager import ApprovalManager, ApprovalReloadReport
-from approval.approval_models import ApprovalError
-from approval.pending_approval_store import PendingApprovalStore
-from config.constants import SecurityTier
-from security.security_manager import SecurityManager
-from storage.database import create_session_factory, initialize_database
-from tools.base_tool import BaseTool, ToolRequest, ToolResult
-from tools.registry import ToolRegistry
+from approval.approval_manager import ApprovalManager, ApprovalReloadReport  # noqa: E402
+from approval.approval_models import PendingApprovalHandoffStatus  # noqa: E402
+from approval.pending_approval_store import PendingApprovalStore  # noqa: E402
+from config.constants import SecurityTier  # noqa: E402
+from security.security_manager import SecurityManager  # noqa: E402
+from storage.database import create_session_factory, initialize_database  # noqa: E402
+from tools.base_tool import BaseTool, ToolRequest, ToolResult  # noqa: E402
+from tools.registry import ToolRegistry  # noqa: E402
 
 
 class _FixedActionTool(BaseTool):
@@ -147,10 +150,19 @@ def test_get_pending_tool_state_returns_none_for_unknown_id(
     assert manager.get_pending_tool_state("no-such-id") is None
 
 
-# --- removal on decide / decline / expire ------------------------------------
+# --- durable handoff transition on decide / decline / expire ----------------
+#
+# Approval-to-Resume Handoff Interlock, Batch 2
+# (docs/phase_98_approval_handoff_plan.md): a decided request's durable
+# row is no longer deleted - it survives, transitioned to its own
+# handoff-lifecycle state, so an approved-but-not-yet-consumed request
+# can survive a crash instead of being silently discarded. These three
+# tests were originally named/written around immediate row deletion;
+# they now assert the new, correct, equally strict behaviour instead of
+# being weakened or removed.
 
 
-def test_approving_removes_the_durable_row(
+def test_approving_transitions_the_durable_row_to_approved_unconsumed(
     pending_store: PendingApprovalStore,
 ) -> None:
     manager = ApprovalManager(pending_store=pending_store)
@@ -162,10 +174,17 @@ def test_approving_removes_the_durable_row(
         tool_input={"source": "a.txt", "destination": "b.txt"},
     )
     manager.approve(request.request_id)
-    assert pending_store.get(request.request_id) is None
+
+    record = pending_store.get(request.request_id)
+    assert record is not None
+    assert record.handoff_status == PendingApprovalHandoffStatus.APPROVED_UNCONSUMED
+    # Every other field survives untouched - only handoff_status changed.
+    assert record.action == "copy file"
+    assert record.tool_name == "file_copy"
+    assert record.tool_input == {"source": "a.txt", "destination": "b.txt"}
 
 
-def test_declining_removes_the_durable_row(
+def test_declining_transitions_the_durable_row_to_declined(
     pending_store: PendingApprovalStore,
 ) -> None:
     manager = ApprovalManager(pending_store=pending_store)
@@ -177,16 +196,19 @@ def test_declining_removes_the_durable_row(
         tool_input={"source": "a.txt", "destination": "b.txt"},
     )
     manager.decline(request.request_id)
-    assert pending_store.get(request.request_id) is None
+
+    record = pending_store.get(request.request_id)
+    assert record is not None
+    assert record.handoff_status == PendingApprovalHandoffStatus.DECLINED
 
 
 def test_get_pending_tool_state_still_available_immediately_after_approval(
     pending_store: PendingApprovalStore,
 ) -> None:
-    """The durable row is gone, but the in-memory tool state a caller
-    needs to actually run the tool is still available right after
-    approval - mirroring _decisions's own unbounded-for-the-session
-    lifetime."""
+    """The durable row is now APPROVED_UNCONSUMED (not deleted), and the
+    in-memory tool state a caller needs to actually run the tool is
+    still available right after approval too - mirroring _decisions's
+    own unbounded-for-the-session lifetime."""
     manager = ApprovalManager(pending_store=pending_store)
     request = manager.create_request(
         "copy file",
@@ -203,7 +225,7 @@ def test_get_pending_tool_state_still_available_immediately_after_approval(
     assert state.tool_input == {"source": "a.txt", "destination": "b.txt"}
 
 
-def test_expiry_removes_the_durable_row(
+def test_expiry_transitions_the_durable_row_to_expired(
     pending_store: PendingApprovalStore,
 ) -> None:
     clock_time = {"now": datetime(2030, 1, 1, tzinfo=timezone.utc)}
@@ -224,7 +246,9 @@ def test_expiry_removes_the_durable_row(
     clock_time["now"] = clock_time["now"] + timedelta(seconds=61)
     manager.list_pending()  # triggers the sweep
 
-    assert pending_store.get(request.request_id) is None
+    record = pending_store.get(request.request_id)
+    assert record is not None
+    assert record.handoff_status == PendingApprovalHandoffStatus.EXPIRED
 
 
 # --- reload: happy path -------------------------------------------------------
@@ -349,7 +373,12 @@ def test_reload_invalidates_a_row_whose_tool_is_no_longer_registered(
 
     assert report == ApprovalReloadReport(resumed=0, invalidated=1)
     assert manager_two.has_pending(request.request_id) is False
-    assert PendingApprovalStore(session_factory).get(request.request_id) is None
+    # Approval-to-Resume Handoff Interlock, Batch 2: invalidation on
+    # reload durably marks the row EXPIRED (retained, visible via
+    # handoff_status too) rather than deleting it.
+    record = PendingApprovalStore(session_factory).get(request.request_id)
+    assert record is not None
+    assert record.handoff_status == PendingApprovalHandoffStatus.EXPIRED
 
 
 def test_reload_invalidates_a_row_that_no_longer_classifies_yellow(

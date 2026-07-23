@@ -28,19 +28,19 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
-from approval.approval_history_store import ApprovalHistoryStore
-from approval.approval_manager import ApprovalManager
-from approval.pending_approval_store import PendingApprovalStore
-from config.constants import SecurityTier, StepStatus
-from planner.plan_models import Plan, PlanStep
-from security.security_manager import SecurityManager
-from storage.database import create_session_factory, initialize_database
-from tools.base_tool import BaseTool, ToolRequest, ToolResult
-from tools.executor import ToolExecutor
-from tools.registry import ToolRegistry
-from workflow.engine import WorkflowEngine, WorkflowReloadReport
-from workflow.paused_workflow_store import PausedWorkflowStore
-from workflow.workflow_history_store import WorkflowHistoryStore
+from approval.approval_history_store import ApprovalHistoryStore  # noqa: E402
+from approval.approval_manager import ApprovalManager  # noqa: E402
+from approval.pending_approval_store import PendingApprovalStore  # noqa: E402
+from config.constants import SecurityTier, StepStatus  # noqa: E402
+from planner.plan_models import Plan, PlanStep  # noqa: E402
+from security.security_manager import SecurityManager  # noqa: E402
+from storage.database import create_session_factory, initialize_database  # noqa: E402
+from tools.base_tool import BaseTool, ToolRequest, ToolResult  # noqa: E402
+from tools.executor import ToolExecutor  # noqa: E402
+from tools.registry import ToolRegistry  # noqa: E402
+from workflow.engine import WorkflowEngine, WorkflowReloadReport  # noqa: E402
+from workflow.paused_workflow_store import PausedWorkflowStore  # noqa: E402
+from workflow.workflow_history_store import WorkflowHistoryStore  # noqa: E402
 
 
 class _GreenTool(BaseTool):
@@ -365,17 +365,23 @@ def test_reload_invalidates_unsupported_schema_version(session_factory) -> None:
     assert engine_two.has_paused(workflow_id) is False
 
 
-def test_reload_invalidates_when_linked_approval_missing(session_factory) -> None:
-    """If the linked pending-approval row itself never survives its own
-    reload (e.g. already decided, expired, or simply absent), the paused
-    workflow must fail closed even though its own plan/state is fine."""
+def test_reload_retains_when_linked_approval_is_approved_unconsumed(
+    session_factory,
+) -> None:
+    """Approval-to-Resume Handoff Interlock, Batch 2
+    (docs/phase_98_approval_handoff_plan.md): a crash after the approval
+    was already answered but before the workflow could actually resume
+    is exactly the gap this interlock closes. The linked approval's
+    durable row is no longer deleted on decision - it survives as
+    APPROVED_UNCONSUMED - so the paused workflow must now be retained
+    (neither resumed nor invalidated) rather than failing closed."""
     registry_one, _, approvals_one, engine_one, _, _ = _build_stack(session_factory)
     result = engine_one.run(_two_step_plan())
     workflow_id = result.workflow_id
     request_id = result.pending_approval_request.request_id
-    # Decide the approval directly in "process one" so the pending row is
-    # removed - simulating a crash after the approval was already
-    # answered but before the workflow could actually resume.
+    # Decide the approval directly in "process one", simulating a crash
+    # after the approval was already answered but before the workflow
+    # could actually resume.
     approvals_one.approve(request_id)
     del registry_one, engine_one, approvals_one
 
@@ -385,9 +391,22 @@ def test_reload_invalidates_when_linked_approval_missing(session_factory) -> Non
     approvals_two.reload_pending(registry=registry_two)  # nothing to reload
     report = engine_two.reload_paused(registry=registry_two)
 
-    assert report == WorkflowReloadReport(resumed=0, invalidated=1)
+    # Neither resumed (nothing calls resume() here) nor invalidated (the
+    # row is retained, untouched, for the exclusive startup-recovery
+    # reconciliation pass or a future explicit claim).
+    assert report == WorkflowReloadReport(resumed=0, invalidated=0)
     assert engine_two.has_paused(workflow_id) is False
     assert yellow_two.calls == []
+
+    from approval.approval_models import PendingApprovalHandoffStatus
+
+    assert (
+        approvals_two.handoff_status_for(request_id)
+        == PendingApprovalHandoffStatus.APPROVED_UNCONSUMED
+    )
+    from workflow.paused_workflow_store import PausedWorkflowStore
+
+    assert PausedWorkflowStore(session_factory).get(workflow_id) is not None
 
 
 def test_reload_invalidates_out_of_range_waiting_step_index(session_factory) -> None:

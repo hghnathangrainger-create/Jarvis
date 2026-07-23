@@ -45,6 +45,7 @@ from approval.approval_models import (
     ApprovalError,
     ApprovalRequest,
     ApprovalStatus,
+    PendingApprovalHandoffStatus,
 )
 from approval.pending_approval_store import SCHEMA_VERSION, PendingApprovalRecord
 from config.constants import EventOutcome, SecurityTier
@@ -144,6 +145,23 @@ class _ApprovalHistoryRecorder(Protocol):
         """
         ...
 
+    def record_interruption(
+        self,
+        *,
+        request_id: str,
+        interrupted_at: datetime,
+        reason: str | None = ...,
+    ) -> object:
+        """Record that a claimed request's execution outcome could not be
+        proven complete (Approval-to-Resume Handoff Interlock, Batch 2).
+
+        Deliberately separate from record_decision/record_timeout: this
+        is neither a fresh decision nor an unanswered approval window -
+        it describes an already-approved request whose execution
+        ownership was claimed and then could not be confirmed complete.
+        """
+        ...
+
 
 class _PendingApprovalStateStore(Protocol):
     """The minimal pending-approval-state interface ApprovalManager depends on.
@@ -181,6 +199,42 @@ class _PendingApprovalStateStore(Protocol):
 
     def list_all(self) -> list[PendingApprovalRecord]:
         """Return every currently persisted pending-approval row."""
+        ...
+
+    def list_by_handoff_status(
+        self, status: PendingApprovalHandoffStatus
+    ) -> list[PendingApprovalRecord]:
+        """Return every row currently in the given handoff_status."""
+        ...
+
+    def get_handoff_status(
+        self, request_id: str
+    ) -> PendingApprovalHandoffStatus | None:
+        """Return one row's current handoff_status, or None if absent."""
+        ...
+
+    def mark_approved_unconsumed(self, request_id: str) -> bool:
+        """CAS transition PENDING -> APPROVED_UNCONSUMED."""
+        ...
+
+    def mark_declined(self, request_id: str) -> bool:
+        """CAS transition PENDING -> DECLINED."""
+        ...
+
+    def mark_expired(self, request_id: str) -> bool:
+        """CAS transition PENDING -> EXPIRED."""
+        ...
+
+    def claim_for_resume(self, request_id: str) -> bool:
+        """CAS transition APPROVED_UNCONSUMED -> CLAIMED."""
+        ...
+
+    def mark_consumed(self, request_id: str) -> bool:
+        """CAS transition CLAIMED -> CONSUMED."""
+        ...
+
+    def mark_claim_interrupted(self, request_id: str) -> bool:
+        """CAS transition CLAIMED -> CLAIM_INTERRUPTED."""
         ...
 
 
@@ -571,12 +625,20 @@ class ApprovalManager:
         decision = request.decide(
             approved=approved, decided_by=decided_by, reason=reason
         )
+        # Approval-to-Resume Handoff Interlock, Batch 2
+        # (docs/phase_98_approval_handoff_plan.md): the authoritative durable
+        # CAS transition happens first - before any in-memory state changes
+        # or history is recorded - so a failure here (an internal
+        # inconsistency between in-memory and durable state; never expected
+        # in normal single-decider operation) never leaves a
+        # partially-recorded, contradictory decision behind.
+        self._transition_pending_state_on_decision(request_id, approved=approved)
+
         del self._pending[request_id]
         self._decisions[request_id] = decision
 
         self._audit(request, decision)
         self._record_history_decision(decision)
-        self._remove_pending_state(request_id)
         return decision
 
     def _audit(
@@ -726,7 +788,7 @@ class ApprovalManager:
         """
         self._audit_timeout(request, expired_at=expired_at)
         self._record_history_timeout(request, expired_at=expired_at)
-        self._remove_pending_state(request.request_id)
+        self._transition_pending_state_on_expiry(request.request_id)
 
     def _audit_timeout(
         self, request: ApprovalRequest, *, expired_at: datetime
@@ -885,21 +947,194 @@ class ApprovalManager:
             tool_input=dict(tool_input) if tool_input is not None else None,
         )
 
-    def _remove_pending_state(self, request_id: str) -> None:
-        """Remove this request's durable pending-execution-state row, if a
-        pending_store is configured.
+    # ----- durable handoff-status transitions (Interlock, Batch 2) ----------
+    #
+    # Approval-to-Resume Handoff Interlock, Batch 2
+    # (docs/phase_98_approval_handoff_plan.md): the durable
+    # pending_approval_state row is no longer deleted the moment a
+    # request is decided - it is transitioned, via PendingApprovalStore's
+    # own database-level compare-and-set primitives (Batch 1), through a
+    # separate handoff lifecycle (PendingApprovalHandoffStatus) that
+    # survives a crash between "decided" and "actually resumed/executed".
+    # Every method below is a no-op (or a safe, harmless default) when no
+    # pending_store is configured, exactly like every other
+    # pending_store-dependent method in this class - behaviour is
+    # unchanged for any caller that never configured one.
 
-        Only the durable row is removed here - self._tool_state (in
-        memory) is deliberately retained for the life of this manager
-        instance; see its own docstring on the class for why.
+    def _transition_pending_state_on_decision(
+        self, request_id: str, *, approved: bool
+    ) -> None:
+        """Durably transition PENDING -> APPROVED_UNCONSUMED (approved) or
+        PENDING -> DECLINED (declined), if a pending_store is configured.
 
         Args:
-            request_id: The identifier of the request that was just
-                decided or expired.
+            request_id: The request being decided.
+            approved: True for an approval, False for a decline.
+
+        Raises:
+            ApprovalError: If a pending_store is configured but the
+                durable row was not in the expected PENDING state at the
+                moment of transition - an internal inconsistency between
+                this manager's own in-memory _pending set and the
+                durable handoff state, never expected in normal
+                single-decider operation. Raised here (rather than
+                silently proceeding) so a decision can never be recorded
+                as authoritative in memory, audited, or written to
+                history while its own durable counterpart disagrees.
         """
         if self._pending_store is None:
             return
-        self._pending_store.delete(request_id)
+        ok = (
+            self._pending_store.mark_approved_unconsumed(request_id)
+            if approved
+            else self._pending_store.mark_declined(request_id)
+        )
+        if not ok:
+            raise ApprovalError(
+                f"Durable handoff state for request '{request_id}' was not "
+                "in the expected PENDING state at decision time. This "
+                "indicates an internal inconsistency between in-memory and "
+                "durable approval state, and the decision was not recorded."
+            )
+
+    def _transition_pending_state_on_expiry(self, request_id: str) -> None:
+        """Durably transition PENDING -> EXPIRED, if a pending_store is
+        configured.
+
+        Deliberately best-effort (unlike
+        _transition_pending_state_on_decision): _sweep_expired() may
+        reap several requests in one pass, and one already-inconsistent
+        row must never prevent every other genuinely expired request in
+        the same sweep from being reaped.
+
+        Args:
+            request_id: The request whose approval window elapsed.
+        """
+        if self._pending_store is None:
+            return
+        self._pending_store.mark_expired(request_id)
+
+    def claim_for_resume(self, request_id: str) -> bool:
+        """Atomically claim an approved-but-unconsumed request's
+        execution, transitioning APPROVED_UNCONSUMED -> CLAIMED.
+
+        Returns True unconditionally when no pending_store is
+        configured - there is no durable handoff state to race against,
+        so every caller behaves exactly as it did before this feature
+        existed (this is what keeps every existing in-memory-only test
+        and call site working unchanged).
+
+        Args:
+            request_id: The approval request whose execution is about to
+                be resumed.
+
+        Returns:
+            True if this call is the one that claimed the row (or no
+            pending_store is configured); False if it is not currently
+            APPROVED_UNCONSUMED (missing, still pending, already
+            claimed/consumed/interrupted/declined/expired).
+        """
+        if self._pending_store is None:
+            return True
+        return self._pending_store.claim_for_resume(request_id)
+
+    def mark_consumed(self, request_id: str) -> bool:
+        """Atomically transition CLAIMED -> CONSUMED once a claimed
+        request's execution has reached a known terminal result.
+
+        Ownership-transfer bookkeeping only - this never implies the
+        underlying tool/workflow itself succeeded; that remains owned by
+        WorkflowHistoryStore/ToolResult, independently. No approval
+        history entry is written for this transition: CONSUMED is not a
+        new decision, only a record that the already-approved
+        execution's ownership was used.
+
+        Args:
+            request_id: The request whose claimed execution concluded.
+
+        Returns:
+            True if the transition succeeded (or no pending_store is
+            configured); False otherwise.
+        """
+        if self._pending_store is None:
+            return True
+        return self._pending_store.mark_consumed(request_id)
+
+    def mark_claim_interrupted(
+        self, request_id: str, *, reason: str | None = None
+    ) -> bool:
+        """Atomically transition CLAIMED -> CLAIM_INTERRUPTED, and record
+        one bounded, idempotent interruption event in durable approval
+        history, if configured.
+
+        Used both by live execution (a claim succeeded but its paused
+        workflow could not be found or resumed) and by startup
+        reconciliation (an inherited CLAIMED row with no proven terminal
+        workflow-history outcome). Never resumes, replays, or recreates
+        anything itself - this only records that execution ownership was
+        claimed and then could not be confirmed complete.
+
+        Args:
+            request_id: The request whose claimed execution could not be
+                confirmed.
+            reason: Optional short, bounded, human-readable context
+                (never unrestricted tool output, a prompt, model
+                rationale, or a stack trace).
+
+        Returns:
+            True if the transition succeeded (or no pending_store is
+            configured); False otherwise.
+        """
+        if self._pending_store is None:
+            return True
+        ok = self._pending_store.mark_claim_interrupted(request_id)
+        if ok:
+            self._record_history_interruption(request_id, reason=reason)
+        return ok
+
+    def handoff_status_for(
+        self, request_id: str
+    ) -> PendingApprovalHandoffStatus | None:
+        """Return one request's current durable handoff_status, or None.
+
+        Returns None both when no pending_store is configured and when
+        no row exists for request_id - callers that need to distinguish
+        those two cases must check self._pending_store's own presence
+        separately; every current caller (WorkflowEngine.reload_paused())
+        treats both identically ("nothing extra is known").
+
+        Args:
+            request_id: The approval request id to look up.
+
+        Returns:
+            The durable PendingApprovalHandoffStatus, or None.
+        """
+        if self._pending_store is None:
+            return None
+        return self._pending_store.get_handoff_status(request_id)
+
+    def _record_history_interruption(
+        self, request_id: str, *, reason: str | None
+    ) -> None:
+        """Durably record a claim-interruption event, if a history_store
+        is configured.
+
+        When no history_store is configured, this is a no-op, matching
+        how every other history-recording method in this class behaves
+        without one.
+
+        Args:
+            request_id: The request whose claimed execution was
+                interrupted.
+            reason: Optional short, bounded, human-readable context.
+        """
+        if self._history is None:
+            return
+        self._history.record_interruption(
+            request_id=request_id,
+            interrupted_at=self._clock(),
+            reason=reason,
+        )
 
     def reload_pending(
         self,
@@ -968,7 +1203,19 @@ class ApprovalManager:
         resumed = 0
         invalidated = 0
 
-        for record in self._pending_store.list_all():
+        # Approval-to-Resume Handoff Interlock, Batch 2: only a row still
+        # genuinely PENDING (never decided) is a candidate for the
+        # in-memory approval-prompt set at all. A row already durably
+        # APPROVED_UNCONSUMED/CLAIMED/CONSUMED/CLAIM_INTERRUPTED/DECLINED/
+        # EXPIRED must never be resurrected here as if it were newly
+        # pending again - each of those states is handled by its own,
+        # separate mechanism (WorkflowEngine.reload_paused()'s own
+        # retention for APPROVED_UNCONSUMED/CLAIMED; the exclusive
+        # startup-recovery reconciliation pass for CLAIMED specifically;
+        # nothing further for the four terminal states).
+        for record in self._pending_store.list_by_handoff_status(
+            PendingApprovalHandoffStatus.PENDING
+        ):
             rejection = self._reload_rejection_reason(
                 record, registry=registry, security=security, now=now
             )
@@ -1166,7 +1413,14 @@ class ApprovalManager:
             now: The current moment, from this manager's own clock.
         """
         if self._pending_store is not None:
-            self._pending_store.delete(request_id)
+            # Approval-to-Resume Handoff Interlock, Batch 2: a row that
+            # fails reload revalidation can never be decided or resumed -
+            # durably marking it EXPIRED (rather than deleting it) keeps
+            # its own final fate visible via handoff_status too, mirroring
+            # how it was already durably visible via approval_history.
+            # Best-effort: if the row is not genuinely PENDING for some
+            # other reason, there is nothing more to do here.
+            self._pending_store.mark_expired(request_id)
         self._emit_audit_event(
             outcome=EventOutcome.TIMEOUT,
             detail=(
