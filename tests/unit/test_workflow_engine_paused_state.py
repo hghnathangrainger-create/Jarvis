@@ -365,16 +365,20 @@ def test_reload_invalidates_unsupported_schema_version(session_factory) -> None:
     assert engine_two.has_paused(workflow_id) is False
 
 
-def test_reload_retains_when_linked_approval_is_approved_unconsumed(
+def test_reload_reconstructs_when_linked_approval_is_approved_unconsumed(
     session_factory,
 ) -> None:
-    """Approval-to-Resume Handoff Interlock, Batch 2
+    """Approval-to-Resume Handoff Interlock, Batch 2/3
     (docs/phase_98_approval_handoff_plan.md): a crash after the approval
     was already answered but before the workflow could actually resume
     is exactly the gap this interlock closes. The linked approval's
     durable row is no longer deleted on decision - it survives as
-    APPROVED_UNCONSUMED - so the paused workflow must now be retained
-    (neither resumed nor invalidated) rather than failing closed."""
+    APPROVED_UNCONSUMED - so the paused workflow is now reconstructed
+    into memory (counted as "resumed", i.e. available again, exactly
+    like an ordinary still-pending reload) so that Batch 3's startup
+    continuation (main.continue_approved_unconsumed_workflows()) can
+    claim and resume it through the exact trusted path - never
+    invalidated, and never silently left unreachable."""
     registry_one, _, approvals_one, engine_one, _, _ = _build_stack(session_factory)
     result = engine_one.run(_two_step_plan())
     workflow_id = result.workflow_id
@@ -391,12 +395,11 @@ def test_reload_retains_when_linked_approval_is_approved_unconsumed(
     approvals_two.reload_pending(registry=registry_two)  # nothing to reload
     report = engine_two.reload_paused(registry=registry_two)
 
-    # Neither resumed (nothing calls resume() here) nor invalidated (the
-    # row is retained, untouched, for the exclusive startup-recovery
-    # reconciliation pass or a future explicit claim).
-    assert report == WorkflowReloadReport(resumed=0, invalidated=0)
-    assert engine_two.has_paused(workflow_id) is False
-    assert yellow_two.calls == []
+    # Reconstructed into memory, exactly like an ordinary still-pending
+    # reload - available for claim-before-resume continuation.
+    assert report == WorkflowReloadReport(resumed=1, invalidated=0)
+    assert engine_two.has_paused(workflow_id) is True
+    assert yellow_two.calls == []  # reconstruction alone never executes anything
 
     from approval.approval_models import PendingApprovalHandoffStatus
 

@@ -162,6 +162,16 @@ class _ApprovalHistoryRecorder(Protocol):
         """
         ...
 
+    def get(self, request_id: str) -> object:
+        """Return the durable history record for one request_id, or None
+        (Approval-to-Resume Handoff Interlock, Batch 3). Used only to
+        honestly reconstruct who/when a request was approved when
+        continuing an APPROVED_UNCONSUMED workflow after restart - never
+        to decide anything, execute anything, or fabricate a value AI
+        output could influence.
+        """
+        ...
+
 
 class _PendingApprovalStateStore(Protocol):
     """The minimal pending-approval-state interface ApprovalManager depends on.
@@ -235,6 +245,10 @@ class _PendingApprovalStateStore(Protocol):
 
     def mark_claim_interrupted(self, request_id: str) -> bool:
         """CAS transition CLAIMED -> CLAIM_INTERRUPTED."""
+        ...
+
+    def get(self, request_id: str) -> PendingApprovalRecord | None:
+        """Return a single pending-state row by its request id."""
         ...
 
 
@@ -1112,6 +1126,100 @@ class ApprovalManager:
         if self._pending_store is None:
             return None
         return self._pending_store.get_handoff_status(request_id)
+
+    def list_approved_unconsumed(self) -> list[PendingApprovalRecord]:
+        """Return every durably APPROVED_UNCONSUMED row, oldest first
+        (Approval-to-Resume Handoff Interlock, Batch 3 -
+        docs/phase_98_approval_handoff_plan.md).
+
+        Used only by startup continuation
+        (main.continue_approved_unconsumed_workflows()) to determine
+        which approved-but-not-yet-consumed requests may be continued
+        through the trusted claim-before-resume path, and in what order.
+        Ordering is inherited unchanged from
+        PendingApprovalStore.list_by_handoff_status()'s own existing,
+        deterministic "oldest created_at, then lowest id" ordering - a
+        stable, repository-supported field, never inferred from a
+        capability name.
+
+        Returns:
+            A list of PendingApprovalRecord objects, oldest first, or an
+            empty list if no pending_store is configured.
+        """
+        if self._pending_store is None:
+            return []
+        return self._pending_store.list_by_handoff_status(
+            PendingApprovalHandoffStatus.APPROVED_UNCONSUMED
+        )
+
+    def get_pending_record(self, request_id: str) -> PendingApprovalRecord | None:
+        """Return the durable pending-approval row for one request_id, or
+        None (Approval-to-Resume Handoff Interlock, Batch 3).
+
+        A thin, read-only delegation to the durable store - never
+        decides, executes, or mutates anything. Used by startup
+        continuation to read a durably APPROVED_UNCONSUMED row's own
+        `metadata` (for its linked `workflow_id`) without depending on
+        the store directly.
+
+        Args:
+            request_id: The approval request id to look up.
+
+        Returns:
+            The matching PendingApprovalRecord, or None if no
+            pending_store is configured or no row exists.
+        """
+        if self._pending_store is None:
+            return None
+        return self._pending_store.get(request_id)
+
+    def build_resume_decision(self, request_id: str) -> ApprovalDecision | None:
+        """Reconstruct the exact, already-recorded ApprovalDecision for a
+        durably APPROVED_UNCONSUMED request (Approval-to-Resume Handoff
+        Interlock, Batch 3), for startup continuation only.
+
+        Never fabricates a decision: returns None unless the request's
+        current durable handoff_status is exactly APPROVED_UNCONSUMED.
+        `decided_by`/`decided_at`/`reason` are read from the durable,
+        already-written ApprovalHistoryStore record (the same one the
+        original live approve() call itself wrote) when a history_store
+        is configured and that record exists and is itself "approved" -
+        never re-derived, guessed, or influenced by model output. When
+        no history record is available (no history_store configured, or
+        an unrepaired gap), a bounded, honest fallback is used instead:
+        decided_by="unknown", decided_at=now - never a fabricated real
+        person's name or a guessed original timestamp.
+
+        Args:
+            request_id: The approval request id to reconstruct a
+                decision for.
+
+        Returns:
+            An ApprovalDecision with `approved=True`, or None if this
+            request is not (or no longer) durably APPROVED_UNCONSUMED.
+        """
+        if self.handoff_status_for(request_id) is not (
+            PendingApprovalHandoffStatus.APPROVED_UNCONSUMED
+        ):
+            return None
+
+        decided_by = "unknown"
+        reason: str | None = None
+        decided_at = self._clock()
+        if self._history is not None:
+            entry = self._history.get(request_id)
+            if entry is not None and getattr(entry, "status", None) == "approved":
+                decided_by = getattr(entry, "decided_by", None) or "unknown"
+                reason = getattr(entry, "decision_reason", None)
+                decided_at = getattr(entry, "decided_at", decided_at) or decided_at
+
+        return ApprovalDecision(
+            request_id=request_id,
+            approved=True,
+            decided_by=decided_by,
+            reason=reason,
+            decided_at=decided_at,
+        )
 
     def _record_history_interruption(
         self, request_id: str, *, reason: str | None

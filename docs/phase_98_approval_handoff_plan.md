@@ -950,3 +950,266 @@ proof, three-environment closure, and the formal completion report) was
 not started. No live compound behaviour was added; Phase 98 live
 compound Batch 2/3 remain blocked pending the full interlock's
 acceptance.
+
+## 23. Interlock Batch 3 — Restart Continuation, Crash Proof and Formal Closure
+
+Batch 3 performs the mandatory audit and correction of `APPROVED_UNCONSUMED`
+restart actionability, completes the crash-window proof, verifies
+production claim enforcement, and formally closes the interlock. Full
+findings, corrections, and evidence are recorded in
+`docs/phase_98_approval_handoff_completion_report.md` - this section
+summarises the two corrections made to already-accepted Batch 1/2 code
+and the resulting final architecture.
+
+### 23.1 Mandatory audit: `APPROVED_UNCONSUMED` had no reachable path
+
+Direct inspection of `core/orchestrator.py`, `ui/cli.py`, and
+`core/command_router.py` confirmed: `ApprovalManager.claim_for_resume()`
+is called from exactly one production call site
+(`JarvisOrchestrator.execute_approved()`'s workflow-linked branch), and
+`execute_approved()` is reachable only with a live, in-memory
+`JarvisResponse` carrying `approval_request.metadata["workflow_id"]` -
+an object that exists only within the same process that created the
+approval. No CLI command, no `CommandRouter` grammar entry, and no
+startup code called this path for a request restored after a restart.
+**Outcome B (narrow automatic startup continuation) is implemented**,
+exactly as the task anticipated for this finding.
+
+### 23.2 Two pre-existing defects discovered and corrected
+
+Implementing continuation surfaced two genuine bugs in the already-
+accepted Batch 2 code, both fixed as part of this batch's own atomic
+cut (never silently left in place):
+
+1. **`WorkflowEngine.reload_paused()` never reconstructed
+   `APPROVED_UNCONSUMED` workflows into memory** - Batch 2's own
+   `_RETAIN_WITHOUT_RESUME` sentinel applied to *both*
+   `APPROVED_UNCONSUMED` and `CLAIMED`, but only `CLAIMED` should ever
+   be retained-without-reconstruction (its reconciliation is a
+   database-only CAS, never a `resume()` call); `APPROVED_UNCONSUMED`
+   must be fully reconstructed into `self._paused`, exactly like an
+   ordinary still-pending reload, so continuation has something to
+   claim and resume. Corrected in `_try_reconstruct_paused_workflow()`;
+   proven by `test_reload_reconstructs_when_linked_approval_is_approved_unconsumed`
+   (renamed from, and behaviourally corrected from, Batch 2's own
+   `test_reload_retains_when_linked_approval_is_approved_unconsumed`).
+2. **`WorkflowEngine._reap_stale_paused()` would delete a workflow
+   mid-claim** - the same reconstructed workflow's linked approval
+   moves from `APPROVED_UNCONSUMED` to `CLAIMED` the instant
+   `claim_for_resume()` succeeds; a second `has_paused()` call
+   immediately afterward (both in the live path and in continuation)
+   re-runs `_reap_stale_paused()`, which - checking only
+   `APPROVED_UNCONSUMED` - would treat the now-`CLAIMED` row as stale
+   and durably delete its `paused_workflow_state` row a heartbeat
+   before `resume()` itself ran. This gap was invisible in the live
+   path only because the *same* `ApprovalManager` instance that just
+   approved the request already holds its decision in memory
+   (`get_decision()` succeeds, short-circuiting the check) - a freshly
+   restarted instance's `_decisions` is empty, so it fell through to
+   the durable-status check and was incorrectly reaped. Fixed by also
+   excluding `CLAIMED` in `_reap_stale_paused()`; found and proven by a
+   failing, then passing,
+   `tests/integration/test_yellow_workflow_restart_continuation.py`.
+
+Neither defect was reachable or observable in Batch 2's own accepted
+test suite (both require a *second*, freshly-restarted
+`ApprovalManager`/`WorkflowEngine` instance pair reconstructing an
+already-`APPROVED_UNCONSUMED` row - exactly the scenario Batch 2's own
+tests intentionally stopped short of exercising, since live wiring for
+it did not exist yet). Both are now covered by dedicated regression
+tests preventing recurrence.
+
+### 23.3 Startup continuation — exact implementation
+
+- `ApprovalManager.list_approved_unconsumed()`: delegates to
+  `PendingApprovalStore.list_by_handoff_status(APPROVED_UNCONSUMED)`'s
+  existing, deterministic oldest-created-first ordering - an existing,
+  repository-supported durable field, never inferred from a capability
+  name.
+- `ApprovalManager.build_resume_decision(request_id)`: returns `None`
+  unless the row's current durable `handoff_status` is exactly
+  `APPROVED_UNCONSUMED`; otherwise reconstructs the exact original
+  `ApprovalDecision` from the durable `ApprovalHistoryStore` record
+  (never fabricated, never model-influenced) - `decided_by`/
+  `decided_at`/`reason` from history when available, or a bounded,
+  honest `"unknown"`/current-time fallback when not.
+- `ApprovalManager.get_pending_record(request_id)`: a thin, read-only
+  delegation to the durable store, used to read the row's own
+  `metadata["workflow_id"]`.
+- `JarvisOrchestrator._claim_and_resume_workflow()` (extracted from
+  Batch 2's `execute_approved()`, unchanged in behaviour except widening
+  its own exception handling from `WorkflowError` to `Exception` - see
+  Section 23.3): the single, shared claim/interrupt/consume
+  implementation now used by both the live approval path and
+  continuation.
+- `JarvisOrchestrator.resume_approved_unconsumed_workflow(request_id)`:
+  returns `None` (a bounded, honest "nothing to do," never raising for
+  this reason) unless the request is identifiably workflow-linked,
+  durably `APPROVED_UNCONSUMED`, and its exact paused workflow is
+  currently reconstructed and available - reachable only from
+  `main.continue_approved_unconsumed_workflows()`, never from any live
+  command, AI output, or user-facing path.
+- `main.continue_approved_unconsumed_workflows(orchestrator)`: iterates
+  every `APPROVED_UNCONSUMED` row in deterministic order; each row's
+  claim/resume is fully independent (its own `request_id`/`workflow_id`,
+  its own dict entry in `WorkflowEngine._paused`) and any per-row
+  failure is caught and isolated so every remaining row is still
+  attempted - never silently swallowed, since the outcome is always
+  read back from the row's own durable `handoff_status`
+  (`APPROVED_UNCONSUMED` if nothing could be attempted;
+  `CLAIM_INTERRUPTED` if claimed but not confirmed complete; `CONSUMED`
+  if a real terminal result was reached) and returned in a
+  `ContinuationSummary`.
+
+### 23.4 Exception-handling widening (`WorkflowError` -> `Exception`)
+
+`_claim_and_resume_workflow()`'s post-claim `resume()` call now catches
+`Exception` broadly (previously only `WorkflowError`), so *any*
+unexpected failure after a successful claim - not only the narrow
+identity-mismatch case - durably marks `CLAIM_INTERRUPTED` before
+re-raising. The exception still always propagates unchanged (never
+swallowed) - only the durable handoff bookkeeping is added. This closes
+a residual gap Batch 2's own narrower `except WorkflowError` left open:
+without it, a genuine infrastructure failure inside `resume()`/
+`ToolExecutor` after a successful claim would leave the row stuck at
+`CLAIMED` with no record of why, recoverable only by the *next*
+restart's own `reconcile_claimed_handoffs()` - now it is recorded
+immediately.
+
+### 23.5 Startup ordering (final, proven)
+
+1. Load configuration to identify the database.
+2. Resolve the canonical database path.
+3. Acquire the OS execution lock.
+4. Initialize/migrate the database.
+5. Build stores, `ApprovalManager`, and orchestrator (`build_orchestrator()`,
+   unchanged) - its own `reload_pending()`/`reload_paused()` calls
+   already populate PENDING approvals and reconstruct both still-pending
+   *and* `APPROVED_UNCONSUMED` paused workflows (Section 23.2's own
+   correction).
+6. Repair authoritative handoff/history consistency
+   (`reconcile_claimed_handoffs()`, part 1).
+7. Reconcile inherited `CLAIMED` rows (`reconcile_claimed_handoffs()`,
+   part 2).
+8. Backfill bounded interruption events (part of the same call).
+9. No separate "rebuild PENDING views" step is needed - already done in
+   step 5, and reconciliation only ever touches `CLAIMED` rows, which
+   step 5 deliberately leaves untouched.
+10. `continue_approved_unconsumed_workflows()` - claims and resumes
+    every `APPROVED_UNCONSUMED` workflow through the identical trusted
+    path live execution uses.
+11. Enter the interactive input loop (`cli.run()`).
+
+Proven directly: `main.start_execution_session()` performs steps 1-10
+in this exact order before returning; `main()` only then constructs
+`JarvisCLI` and calls `cli.run()`.
+
+### 23.6 Failure behaviour during startup continuation
+
+- **Failure before claim** (e.g. a store-lookup infrastructure failure):
+  proven by `test_failure_before_claim_leaves_row_approved_unconsumed` -
+  the row remains `APPROVED_UNCONSUMED`, no claim is consumed, and the
+  exception propagates honestly (never silently swallowed by
+  `resume_approved_unconsumed_workflow()` itself; only
+  `continue_approved_unconsumed_workflows()`'s own outer per-row loop
+  isolates it, reading the true outcome back from durable state).
+- **Claim succeeds but paused workflow missing/invalid**: zero tool
+  execution, `CLAIMED -> CLAIM_INTERRUPTED`, one bounded interruption
+  event, old approval non-reusable - proven live
+  (`test_missing_paused_workflow_after_claim_produces_claim_interrupted`,
+  Batch 2) and via startup reconciliation
+  (`test_missing_terminal_history_produces_claim_interrupted`, Batch 2).
+- **Known terminal success/failure**: `CLAIMED -> CONSUMED` either way;
+  the workflow result/history remains the sole source of success vs.
+  failure - proven across all four terminal shapes
+  (`tests/integration/test_orchestrator_claim_before_resume.py`).
+- **Process crashes after claim**: exact terminal history reconciles to
+  `CONSUMED`; otherwise `CLAIM_INTERRUPTED`; no automatic replay -
+  proven by Batch 2's own CLAIMED-reconciliation suite, re-confirmed
+  unchanged this batch.
+- **One approved workflow fails during continuation**: startup
+  *continues* processing every remaining, independent
+  `APPROVED_UNCONSUMED` row - the smallest, most repository-consistent
+  choice, matching this codebase's own established "one bad row must
+  never block every other valid row" convention
+  (`reload_pending()`/`reload_paused()`) - proven by
+  `test_one_workflows_failure_cannot_corrupt_another`.
+
+### 23.7 Multiple `APPROVED_UNCONSUMED` workflows
+
+More than one such row can exist simultaneously (nothing prevents two
+independent capabilities from each being approved-but-unconsumed at
+restart). Processed in `PendingApprovalStore`'s own existing,
+deterministic `created_at` (then `id`) ascending order - never inferred
+from a capability name. Each is claimed, resumed, and reaches its own
+terminal state fully independently (its own `request_id`/`workflow_id`,
+its own dictionary entry) - proven by
+`test_multiple_approved_unconsumed_workflows_continue_independently`
+(one `PROJECT_STATE_UPDATE_PHASE` and one `SCHEDULE_ENABLE` approval,
+both continued to `CONSUMED`, in the proven deterministic order) and
+`test_one_workflows_failure_cannot_corrupt_another` (one workflow force-
+failed, the other still reaches `CONSUMED` untouched).
+
+### 23.8 Production claim enforcement (Mandatory issue 2)
+
+`main.build_orchestrator()` is the *only* production construction of
+`JarvisOrchestrator`/`ApprovalManager`, and it always supplies the real,
+durable `PendingApprovalStore` - proven structurally (AST-based:
+every `ApprovalManager(...)` call in `main.py` supplies `pending_store=`)
+and behaviourally (`orchestrator.approvals.claim_for_resume()` on an
+unknown id returns `False`, never the no-store bypass's unconditional
+`True`). `JarvisOrchestrator.__init__`'s own pre-existing
+`approval_manager or ApprovalManager()` convenience default (documented,
+test-only) is deliberately left in place - it is provably unreachable
+from `main.build_orchestrator()`'s own real production wiring, and
+removing test compatibility was not required. Neither `dashboard.py`
+nor `scheduler.py` imports `ApprovalManager`/`JarvisOrchestrator`/
+`WorkflowEngine` at all (AST-proven) - the scheduler does not use this
+approval-resume path, and the dashboard cannot execute approval
+workflows.
+
+### 23.9 Scheduler and dashboard boundaries (reconfirmed)
+
+Unchanged from Batch 1/2: concurrent scheduler and execution-capable
+CLI use of the same database remains **explicitly unsupported** - the
+interlock guarantees only approval/workflow handoff ownership, never
+whole-database single-writer safety; scheduler safety is a separate,
+deferred, future trust-boundary problem; no scheduler code was changed
+in any interlock batch. The dashboard remains structurally read-only
+(cannot approve/claim/resume/mutate handoff state/execute tools) and
+its own read access remains fully functional while the CLI holds the
+sidecar lock, proven directly
+(`test_dashboard_style_read_access_remains_functional_while_lock_held`)
+- the lock is a separate file from the database itself.
+
+### 23.10 Terminal retention
+
+`CONSUMED` and `CLAIM_INTERRUPTED` rows are retained **indefinitely** -
+neither is ever deleted by any code in this interlock. No cleanup
+command exists or was added. This is a deliberate, honestly-documented
+choice, not an oversight: deleting a completed row would either make an
+already-consumed approval's own durable evidence unverifiable, or (far
+worse) free its `request_id` for potential reuse/confusion. Retention
+growth is unbounded by design in this interlock; a future, separately-
+scoped phase may add bounded retention/archival if ever needed.
+
+### 23.11 Test and verification summary
+
+- New/updated tests this batch: 10
+  (`test_production_approval_wiring.py`) + 5
+  (`test_yellow_workflow_restart_continuation.py`) + 8
+  (`test_crash_window_proof.py`) + 1 corrected
+  (`test_workflow_engine_paused_state.py`, renamed and re-asserted) =
+  **23 net new passing tests**.
+- Full suite: **5507 passed, 3 skipped, 0 failed**, identical across the
+  normal environment, `AI_REASONING_ENABLED=false`, and
+  `PYTHON_DOTENV_DISABLED=1`.
+- Full-interlock Ruff scope (every `.py` file touched across all three
+  batches, `git diff --name-only 6c9e404..HEAD -- '*.py'`): clean.
+- `git diff --check`: clean.
+
+**Interlock formally closed.** `docs/phase_98_approval_handoff_completion_report.md`
+is the authoritative closure record. Phase 98 itself (live compound
+selection/execution) remains open and blocked pending a fresh, separate
+instruction - this interlock's closure unblocks Phase 98 live compound
+Batch 2 to begin planning, but does not itself authorize it.

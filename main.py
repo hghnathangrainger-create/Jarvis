@@ -666,7 +666,14 @@ def start_execution_session() -> tuple[JarvisOrchestrator, ExecutionProcessLock]
     the two; (9) no separate in-memory rebuild step is needed - it
     already happened as part of (3)-(5), and reconciliation never touches
     any row already reflected in the live ApprovalManager/WorkflowEngine
-    instances' own in-memory state.
+    instances' own in-memory state; (10)
+    continue_approved_unconsumed_workflows() (Batch 3) - continues each
+    durably APPROVED_UNCONSUMED workflow (reconstructed into the live
+    WorkflowEngine's own in-memory state by build_orchestrator()'s own
+    reload_paused() call, per Batch 3's own reload_paused()/
+    _reap_stale_paused() corrections) through the exact same trusted
+    claim-before-resume path live execution already uses - never a new
+    approval, never a new model call, never a new workflow.
 
     Returns:
         A tuple of (orchestrator, lock) - the caller (main()) must hold
@@ -692,6 +699,7 @@ def start_execution_session() -> tuple[JarvisOrchestrator, ExecutionProcessLock]
     try:
         orchestrator = build_orchestrator()
         reconcile_claimed_handoffs(lock)
+        continue_approved_unconsumed_workflows(orchestrator)
     except Exception:
         lock.release()
         raise
@@ -931,6 +939,117 @@ def _reconcile_claimed_rows(
                 interrupted += 1
 
     return consumed, interrupted
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationSummary:
+    """A small, honest summary of what
+    continue_approved_unconsumed_workflows() did (Approval-to-Resume
+    Handoff Interlock, Batch 3 - docs/phase_98_approval_handoff_plan.md).
+
+    Attributes:
+        continued: Number of APPROVED_UNCONSUMED workflows that were
+            claimed, resumed, and reached a known terminal result
+            (CONSUMED) - regardless of whether that result was itself a
+            tool success or failure; CONSUMED never means success
+            specifically.
+        interrupted: Number that were claimed but could not be resumed
+            to a known terminal result (paused workflow missing/invalid,
+            or an unexpected failure after claim) and are now
+            CLAIM_INTERRUPTED.
+        left_pending: Number that could not even be identified as a
+            continuable, workflow-linked, durably APPROVED_UNCONSUMED
+            request with a real available paused workflow (no claim was
+            ever attempted for these) - they remain durably
+            APPROVED_UNCONSUMED, untouched, for a future startup attempt.
+    """
+
+    continued: int
+    interrupted: int
+    left_pending: int
+
+
+def continue_approved_unconsumed_workflows(
+    orchestrator: JarvisOrchestrator,
+) -> ContinuationSummary:
+    """Continue every durably APPROVED_UNCONSUMED workflow through the
+    exact trusted claim-before-resume path (Approval-to-Resume Handoff
+    Interlock, Batch 3 - docs/phase_98_approval_handoff_plan.md).
+
+    This is the mandatory correction the Batch 3 audit requires: durable
+    discoverability of an APPROVED_UNCONSUMED row alone is insufficient,
+    since no existing production path (no CLI command, no CommandRouter
+    grammar, no AI-reachable dispatch) ever calls
+    ApprovalManager.claim_for_resume() for a request restored after a
+    restart - JarvisOrchestrator.execute_approved() is only ever reached
+    with a live, in-memory JarvisResponse from the exact same process
+    that created the approval. Outcome B (narrow automatic startup
+    continuation) is implemented here.
+
+    Processes every APPROVED_UNCONSUMED row in
+    ApprovalManager.list_approved_unconsumed()'s own deterministic,
+    creation-time order (oldest first - an existing, repository-supported
+    durable field; never inferred from a capability name). Each row is
+    claimed and resumed independently, through
+    JarvisOrchestrator.resume_approved_unconsumed_workflow(): no new
+    approval is ever created (claim_for_resume() only ever transitions
+    an already-APPROVED_UNCONSUMED row), no AI/model call is made, no
+    parser or grounding call is made, and the exact persisted approved
+    tool_input is the only input ever used (read from the paused
+    workflow's own already-reconstructed, already-revalidated
+    resolved_tool_input - the identical value the live approval path
+    would have used). Only a real, already-paused, already-reloaded
+    workflow can ever be continued - nothing is ever reconstructed from
+    scratch or from model output.
+
+    Whether one particular row fails (for any reason, at any point) can
+    never corrupt, block, or change the identity of any other - each
+    row's own claim/resume/terminal-transition is entirely independent,
+    and a per-row failure is always isolated (caught here) so processing
+    always continues to every remaining row, matching this codebase's
+    own established "one bad row must never block every other valid
+    row" convention (reload_pending()/reload_paused()). Startup itself
+    is never aborted by a continuation failure - only reported via the
+    returned summary and via each row's own durable handoff_status
+    (APPROVED_UNCONSUMED if nothing could be attempted at all; CLAIM_
+    INTERRUPTED if claimed but not confirmed complete; CONSUMED if a
+    real terminal result was reached) - never silently swallowed.
+
+    Never continues a PENDING, DECLINED, EXPIRED, CLAIMED, CONSUMED, or
+    CLAIM_INTERRUPTED row - only APPROVED_UNCONSUMED rows are ever
+    listed by list_approved_unconsumed() in the first place.
+
+    Args:
+        orchestrator: The fully built, already-recovered orchestrator
+            (from build_orchestrator(), after reconcile_claimed_handoffs()
+            has already run on the same database).
+
+    Returns:
+        A ContinuationSummary of how many rows were continued to a
+        terminal result, interrupted, or left untouched.
+    """
+    continued = 0
+    interrupted = 0
+    left_pending = 0
+    approvals = orchestrator.approvals
+
+    for record in approvals.list_approved_unconsumed():
+        try:
+            orchestrator.resume_approved_unconsumed_workflow(record.request_id)
+        except Exception:  # noqa: BLE001 - isolated per-row; outcome read from durable state below
+            pass
+
+        status = approvals.handoff_status_for(record.request_id)
+        if status is PendingApprovalHandoffStatus.CONSUMED:
+            continued += 1
+        elif status is PendingApprovalHandoffStatus.CLAIM_INTERRUPTED:
+            interrupted += 1
+        else:
+            left_pending += 1
+
+    return ContinuationSummary(
+        continued=continued, interrupted=interrupted, left_pending=left_pending
+    )
 
 
 def main() -> None:

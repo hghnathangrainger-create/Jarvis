@@ -384,6 +384,37 @@ class WorkflowEngine:
         creates an ApprovalDecision"). This never fabricates a decision or
         executes anything - it only forgets a paused workflow whose
         approval window is genuinely gone.
+
+        A second careful distinction (Approval-to-Resume Handoff
+        Interlock, Batch 3 - docs/phase_98_approval_handoff_plan.md): a
+        workflow reconstructed by reload_paused() whose linked approval
+        is durably APPROVED_UNCONSUMED was decided by a *different*
+        ApprovalManager instance (the one that ran before a restart) -
+        this instance's own in-memory _decisions never has it, so
+        get_decision() correctly raises ApprovalError even though the
+        approval is genuinely, durably decided. Without checking durable
+        handoff_status too, this method would incorrectly reap - and
+        durably delete the paused_workflow_state row for - every
+        APPROVED_UNCONSUMED workflow the moment anything calls
+        has_paused() on it, before startup continuation
+        (main.continue_approved_unconsumed_workflows()) ever gets a
+        chance to claim and resume it.
+
+        A third careful distinction (Batch 3): CLAIMED must be protected
+        here too, not only APPROVED_UNCONSUMED. Both
+        JarvisOrchestrator._claim_and_resume_workflow() (the live path)
+        and resume_approved_unconsumed_workflow() (startup continuation)
+        call has_paused() a *second* time immediately after a successful
+        claim_for_resume() - by that moment the durable handoff_status
+        has already advanced from APPROVED_UNCONSUMED to CLAIMED. The
+        live path never observed this gap only because the *same*
+        ApprovalManager instance that just approved the request already
+        holds its decision in memory (get_decision() succeeds), never
+        reaching this durable-handoff-status check at all; a freshly
+        restarted instance's in-memory _decisions is empty, so without
+        also excluding CLAIMED here, the still-in-progress claim would
+        be reaped - deleting the paused_workflow_state row - a heartbeat
+        before resume() itself even runs.
         """
         stale_ids = []
         for workflow_id, paused in self._paused.items():
@@ -391,8 +422,15 @@ class WorkflowEngine:
                 continue
             try:
                 self._approvals.get_decision(paused.request_id)
+                continue
             except ApprovalError:
-                stale_ids.append(workflow_id)
+                pass
+            if self._approvals.handoff_status_for(paused.request_id) in (
+                PendingApprovalHandoffStatus.APPROVED_UNCONSUMED,
+                PendingApprovalHandoffStatus.CLAIMED,
+            ):
+                continue
+            stale_ids.append(workflow_id)
         for workflow_id in stale_ids:
             del self._paused[workflow_id]
             self._remove_paused_state(workflow_id)
@@ -1497,27 +1535,46 @@ class WorkflowEngine:
         # main.py's own composition order guarantees reload_pending() has
         # already run on this exact `self._approvals` instance.
         if not self._approvals.has_pending(record.request_id):
-            # Approval-to-Resume Handoff Interlock, Batch 2: an approval
-            # that is no longer "pending" is not automatically
+            # Approval-to-Resume Handoff Interlock, Batch 2/3: an
+            # approval that is no longer "pending" is not automatically
             # unresumable any more - it may instead be durably
-            # APPROVED_UNCONSUMED (decided, not yet claimed) or CLAIMED
-            # (claimed by a now-terminated prior process, awaiting the
-            # exclusive startup-recovery reconciliation pass). Both must
-            # be retained untouched, never invalidated on this basis
-            # alone - only DECLINED/EXPIRED/CONSUMED/CLAIM_INTERRUPTED
-            # (or a missing row entirely) mean this workflow's own
-            # approval will truly never be resumed again.
+            # APPROVED_UNCONSUMED (decided, not yet claimed/consumed) or
+            # CLAIMED (claimed by a now-terminated prior process,
+            # awaiting the exclusive startup-recovery reconciliation
+            # pass).
+            #
+            # CLAIMED is retained untouched, neither reconstructed here
+            # nor invalidated - CLAIMED reconciliation is a database-only
+            # CAS operation (main.reconcile_claimed_handoffs()), never a
+            # WorkflowEngine.resume() call, so there is nothing for this
+            # engine to do with it.
+            #
+            # APPROVED_UNCONSUMED (Batch 3 -
+            # docs/phase_98_approval_handoff_plan.md): unlike CLAIMED,
+            # this workflow genuinely needs to be reconstructed into
+            # self._paused - it is the exact durable state startup
+            # continuation (main.continue_approved_unconsumed_workflows())
+            # must claim and resume through the same trusted
+            # claim-before-resume path live execution already uses.
+            # Falls through to the identical reconstruction/revalidation
+            # logic below (tool still registered, action still
+            # classifies YELLOW, plan/outcomes reconstructable) - the
+            # only difference from the ordinary "still pending" path is
+            # that the linked approval is already durably decided,
+            # which is why has_pending() alone cannot recognise it.
+            #
+            # Only DECLINED/EXPIRED/CONSUMED/CLAIM_INTERRUPTED (or a
+            # missing row entirely) mean this workflow's own approval
+            # will truly never be resumed again.
             handoff_status = self._approvals.handoff_status_for(record.request_id)
-            if handoff_status in (
-                PendingApprovalHandoffStatus.APPROVED_UNCONSUMED,
-                PendingApprovalHandoffStatus.CLAIMED,
-            ):
+            if handoff_status is PendingApprovalHandoffStatus.CLAIMED:
                 return _RETAIN_WITHOUT_RESUME, None
-            return None, (
-                f"Linked approval '{record.request_id}' is not pending "
-                "(missing, already decided, or invalidated on its own "
-                "reload)."
-            )
+            if handoff_status is not PendingApprovalHandoffStatus.APPROVED_UNCONSUMED:
+                return None, (
+                    f"Linked approval '{record.request_id}' is not pending "
+                    "(missing, already decided, or invalidated on its own "
+                    "reload)."
+                )
 
         try:
             steps = tuple(
