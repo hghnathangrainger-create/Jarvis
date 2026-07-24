@@ -5,670 +5,642 @@
 Planning-only. No production code or tests are changed by this
 document. Phase 98 remains open; nothing here is an implementation.
 
+## 0. Amendment summary (supersedes the design in commit `aa92241`)
+
+The original version of this document (committed at `aa92241`)
+proposed persisting `CompoundWorkflowProgress` transitions as "one
+CAS-guarded batch immediately after `resume()` returns." That design
+is **corrected** here: a synchronous function can still be
+interrupted (process kill, OOM, power loss) after any individual
+durable write it performs, including mid-`resume()`, so deferring
+every progress transition to a single post-hoc batch left every
+inter-step crash window unrecorded. This amendment:
+
+- selects **Option A** (a narrow, trusted, optional per-step
+  lifecycle observer on `WorkflowEngine`, attached only to `resume()`
+  calls for the one recognized compound plan) so each checkpoint is
+  written durably at the exact moment it becomes true, not
+  reconstructed afterward (Sections 10–12);
+- reorders startup recovery so a **compound-aware CLAIMED
+  reconciliation pass** runs before the existing generic CLAIMED
+  fallback, using `CompoundWorkflowProgress` as trusted step-level
+  evidence the generic pass cannot see (Sections 13–14);
+- defines a narrow `resume_claimed_compound_workflow()` recovery path
+  that can safely continue from a durable read-only step (verify or
+  show) but **never** re-invokes the write step (Section 14);
+- strengthens progress-row creation: a **synchronous** creation
+  failure now actively invalidates the just-created approval/pause
+  pair before returning (never lazily backfilled), while a **hard
+  crash** in the same narrow window is repaired-or-isolated at startup,
+  before any approval becomes visible (Section 15);
+- adds a trusted, server-side approval-time re-validation gate that
+  does not depend on the earlier creation attempt having succeeded
+  (Section 16);
+- defines a complete, 14-point trusted compound recognizer fingerprint,
+  replacing the earlier "3 steps + tool names" shape check (Section 17);
+- reassesses `CompoundWorkflowProgressStore`'s API: exactly **one**
+  new primitive is required (`mark_step_1_failed`), down from the
+  earlier three-primitive estimate for the store itself, but the
+  engine now needs four small, additive changes instead of one
+  (Section 18);
+- retains **Outcome B**, with a corrected, more precisely specified
+  Batch 2 scope (Section 20).
+
+Sections 1–9, 13 (cross-store authority, restated), 16–18 (renumbered
+below), and 21–26 of the `aa92241` version are otherwise unchanged and
+reproduced here for a single coherent document.
+
 ## 1. Current baseline
 
-- Branch `phase-4-ai-reasoning-and-write-actions`, HEAD `5f0b43c`.
+- Branch `phase-4-ai-reasoning-and-write-actions`, HEAD `aa92241`.
 - Full suite: 5507 passed, 3 skipped, 0 failed, identical under the
   normal environment, `AI_REASONING_ENABLED=false`, and
   `PYTHON_DOTENV_DISABLED=1`.
-- `git diff --check` clean at HEAD.
 
 ## 2. Accepted Phase 97 foundation
 
-`intelligence/compound_structured_output.py` and
-`intelligence/compound_grounding.py` (closed at `e9365b3`) implement,
-in complete isolation, exactly one compound template:
-`PROJECT_STATE_UPDATE_PHASE` → `PROJECT_STATE_SHOW`, connector
-`" and then "`, structured shape `{"decision": "execute_sequence",
-"steps": [...]}` with exactly two steps. Neither module is imported by
-any live runtime module today (verified by `test_compound_isolation.py`,
-which still passes at HEAD). Both are reused **unchanged** by this
-plan; no correction to either is required.
+Unchanged from `aa92241` — `intelligence/compound_structured_output.py`
+and `intelligence/compound_grounding.py` (closed at `e9365b3`) remain
+isolated and reused unmodified.
 
 ## 3. Accepted Phase 98 Batch 1 foundation
 
-Accepted at `7feea73`/`fc879c1`:
-
-- `PlanStep.requires_verified_predecessor` /
-  `verification_field_name` / `verification_expected_value`
-  (`planner/plan_models.py`), enforced generically by
-  `WorkflowEngine._verification_gate_failure_reason()`
-  (`workflow/engine.py`). Confirmed by inspection: this gate is a
-  no-op for every existing plan (default `False`), position-agnostic
-  (it only ever looks at "the immediately preceding outcome"), and
-  already distinguishes VERIFIED / FAILED-mismatch / UNAVAILABLE.
-- `CompoundWorkflowProgressStore` / `reconcile_phase_update()`
-  (`workflow/compound_workflow_progress_store.py`) — a durable,
-  CAS-protected progress table and a pure reconciliation function for
-  exactly the one template above. Not imported by any live module
-  today.
+Unchanged from `aa92241` — `PlanStep.requires_verified_predecessor`
+and its companion fields (`planner/plan_models.py`,
+`workflow/engine.py`'s `_verification_gate_failure_reason()`), and
+`CompoundWorkflowProgressStore`/`reconcile_phase_update()`
+(`workflow/compound_workflow_progress_store.py`), both reused with the
+one additive method identified in Section 18.
 
 ## 4. Closed handoff interlock
 
-Formally closed at `5f0b43c` (foundations `b38559c`, `0122bae`). It
-provides: an OS-held execution lock; durable
-`PENDING → APPROVED_UNCONSUMED → CLAIMED → CONSUMED` /
-`CLAIMED → CLAIM_INTERRUPTED` transitions, all CAS; automatic startup
-continuation of `APPROVED_UNCONSUMED` workflows
-(`main.continue_approved_unconsumed_workflows()` →
-`JarvisOrchestrator.resume_approved_unconsumed_workflow()` → the
-shared `_claim_and_resume_workflow()`); and real restart proofs for
-all four current YELLOW workflows. This plan reuses every one of these
-mechanisms unchanged and confirms (Section 11) that they already
-generalize to a three-step plan with no interlock-side change.
+Unchanged from `aa92241`. This amendment adds one new ordering
+requirement inside it (Section 14) but changes no existing interlock
+guarantee for non-compound workflows.
 
 ## 5. Exact target request
 
-`PROJECT_STATE_UPDATE_PHASE` → internal trusted phase verification →
-`PROJECT_STATE_SHOW`, exposed to the model as the existing Phase 97
-two-capability structured decision, with the verifier inserted by
-trusted code as a third, model-invisible step. One YELLOW approval
-covers only the write; the verifier and the final read are trusted
-GREEN internal steps requiring no further approval.
+Unchanged: `PROJECT_STATE_UPDATE_PHASE` → internal trusted phase
+verification → `PROJECT_STATE_SHOW`, one YELLOW approval, verifier and
+final read trusted/GREEN.
 
-## 6. Live-selection design (discriminator peek)
+## 6–9. Live-selection, grounding, trusted plan, approval semantics
 
-**New function** (Batch 2): `peek_compound_decision(raw_text: str) ->
-bool` in `intelligence/compound_structured_output.py`, reusing the
-*exact same* imports that module already has
-(`_live_strip_single_outer_fence`, `_live_reject_duplicate_keys`) so
-the peek can never see a different JSON shape than either parser that
-acts on its answer. Contract:
+Unchanged from `aa92241` (discriminator peek, unchanged Phase 97
+grounding, the three-step plan, one-approval-for-free from the
+engine's own per-step tier check, the approval-text extension subject
+to a live YELLOW-preflight check). Not reproduced verbatim here; see
+Sections 6–9 of the prior version for exact wording — this amendment
+does not alter any of them.
 
-- Strip the one permitted outer fence, parse as a duplicate-key-safe
-  JSON object.
-- Return `True` only if the parse succeeds, the result is a JSON
-  object, and its `"decision"` key is present and exactly equal to the
-  string `"execute_sequence"`.
-- Return `False` for every other case: malformed JSON, a non-object,
-  a missing key, any other decision value — never raises.
+## 10. Why synchronous `resume()` does not remove crash windows
 
-**Call site** (Batch 2): a new `select_tool_or_sequence()` wrapper in
-`intelligence/planning.py`, inserted immediately after
-`router.route()` returns `response.text` and before either parser is
-invoked:
+`WorkflowEngine.resume()` and the `_run_from()` loop it delegates to
+execute steps 1→2→3 within one Python call, but that call still
+performs multiple, separate, independently-interruptible durable
+writes in sequence: the pre-execution read, the write tool's own
+database commit, the verify tool's read, the show tool's read, and
+(in the corrected design) a `CompoundWorkflowProgress` CAS write after
+each. A process kill, OOM, or power loss can land *between* any two of
+these — "one synchronous function" describes Python's call stack, not
+an atomic transaction spanning `ProjectStateStore` and
+`CompoundWorkflowProgress` (two independent stores). Deferring every
+progress transition to a single post-`resume()` batch meant every one
+of those interruption points left **no durable trace at all** in
+`CompoundWorkflowProgress` — the row would still show the state it had
+before `resume()` was ever called, indistinguishable from "never
+attempted." This is corrected below.
+
+## 11. Selected checkpoint architecture — Option A: trusted step observer
+
+**Selected over Option B** (injecting `CompoundWorkflowProgressStore`
+directly into `WorkflowEngine`) because Option A keeps the engine
+itself capability-ignorant — it only calls two small, generic,
+already-existing-in-spirit hooks (mirroring how
+`_verification_gate_failure_reason()` already returns an
+optional-stop-reason shape) — while all ProjectState/compound domain
+knowledge stays in a concrete observer object built and attached only
+by trusted orchestrator code, for the one recognized plan. **Option C**
+(durable step-by-step engine pausing) is rejected: it would require a
+new approval-like or job-queue-like pause between GREEN steps, which
+the task explicitly forbids ("Do not create new approvals between
+GREEN steps"), and Phase 15's engine has no such primitive today.
+**Option D** is rejected — Option A is a small, additive, fully
+backward-compatible change (see Section 18), not a disproportionate
+one.
+
+**New Protocol** (`workflow/engine.py`):
 
 ```
-if peek_compound_decision(response.text):
-    # commit to the compound path — no fallback, ever
-    return _select_compound_tool_sequence(response.text, ...)
-return select_tool(...)   # existing function, byte-for-byte unchanged
+class _CompoundStepObserver(Protocol):
+    def before_step(self, workflow_id: str, step_index: int) -> str | None: ...
+    def after_step(self, workflow_id: str, step_index: int, tool_result: ToolResult) -> str | None: ...
 ```
 
-- `peek_compound_decision` returning `True` **commits** the call to
-  `intelligence.compound_structured_output.parse_compound_tool_selection()`
-  and `intelligence.compound_grounding.ground_compound_decision()`. If
-  either raises/refuses, the outcome is a new
-  `PlanningOutcomeKind.INVALID_OUTPUT`-equivalent (or a new
-  `UNGROUNDED_COMPOUND_SELECTION` kind) — **never** a retry through
-  `parse_tool_selection()`. This is the literal, structural
-  "no-fallback" guarantee the task requires: once the discriminator
-  peek is `True`, the existing single-decision parser is never called
-  for that response at all.
-- `peek_compound_decision` returning `False` routes unconditionally to
-  the existing `select_tool()` body, completely unchanged — including
-  for every malformed/unsupported/execute response that exists today.
-  Every existing single-decision test therefore continues to exercise
-  the exact same code path it always has; `peek_compound_decision`
-  only ever adds one cheap, side-effect-free JSON inspection before
-  it.
+- `before_step` is called at the top of each step iteration, before
+  `_resolve_tool_input`/the verification gate/`self._executor.execute()`.
+  A non-`None` return is treated exactly like
+  `_verification_gate_failure_reason()`'s existing non-`None` return:
+  the step is never invoked; `_stop()` runs immediately with a
+  synthetic `ToolResult(success=False, error=<the returned reason>)`.
+- `after_step` is called from the **one, already-shared** place every
+  step outcome already flows through: inside `_stop()` (covering
+  decline, ordinary tool failure, blocked, and verification-gate
+  failure — all four already funnel through this single existing
+  method) and inside the loop's own "step succeeded, continue" branch,
+  and inside the WAITING-pause branch (where the observer must itself
+  recognize `tool_result.requires_confirmation is True` and do
+  nothing, since nothing has executed yet). A non-`None` return from
+  the success branch is treated as a checkpoint failure: WorkflowEngine
+  converts it into a `_stop()` call with a synthetic failed
+  `ToolResult` explaining that the tool itself may have succeeded but
+  its durable checkpoint could not be recorded — **never** silently
+  advancing to the next step without a confirmed checkpoint.
+- **Attachment is deliberately narrow:** `run()` and `resume()` each
+  gain a new, optional, keyword-only `step_observer: _CompoundStepObserver
+  | None = None` parameter (and `_run_from()` gains the same,
+  threaded through internally when `resume()` calls it for the
+  remaining steps). Every existing call site passes nothing and is
+  unaffected. **The observer is attached only to `resume()` calls, never
+  to the initial `run()` call** — this template's step 1 is
+  unconditionally YELLOW, so `run()` only ever produces the first
+  pause without executing anything; attaching the observer there would
+  risk capturing a pre-execution baseline before the real execution
+  attempt (which may happen long after `run()`, if approval is
+  delayed), which is not the correct baseline.
+- The concrete `_CompoundProgressObserver` implementation (new,
+  `core/orchestrator.py` or a small new module) owns the domain logic
+  per Section 12 and holds references to `CompoundWorkflowProgressStore`
+  and `ToolExecutor` (for its own extra `project_state_verify` read
+  before Step 1 — never a raw store read, keeping every read audited).
 
-No new step count, capability pair, connector, or ordering is
-accepted — `parse_compound_tool_selection()`'s existing exactly-two,
-exactly-`execute_sequence`, no-duplicate-capability rules are reused
-unmodified, and `ground_compound_decision()`'s existing one-entry
-allowlist, connector, and positional-pair equality are reused
-unmodified (Section 7).
+## 12. Exact checkpoint code points
 
-## 7. Grounding contract
+1. **Before Step 1 tool invocation** — `before_step(workflow_id, 0)`,
+   called from `resume()`'s own inline handling of the waiting step
+   (before its `self._executor.execute(...)` call). The observer
+   performs one extra, audited `project_state_verify` read via
+   `ToolExecutor`, then calls
+   `record_pre_execution_observation(workflow_id, phase_value=...,
+   last_updated=...)` — this single existing store call already
+   atomically sets `step_1_status → IN_PROGRESS`, satisfying "mark
+   Step 1 active" in the same write. A raised/failed call returns a
+   bounded reason string, stopping before the write tool is ever
+   invoked.
+2. **Immediately after Step 1 returns success** —
+   `after_step(workflow_id, 0, tool_result)` with `tool_result.success
+   is True`, called from the loop's success-continuation branch
+   (before it proceeds to step index 1) → `mark_step_1_completed()`.
+3. **Immediately after Step 1 returns ordinary failure (or decline)** —
+   `after_step(workflow_id, 0, tool_result)` with `tool_result.success
+   is False`, called from inside `_stop()` (the one shared method
+   decline/failure/blocked/gate-failure all already flow through) →
+   the new `mark_step_1_failed()` (Section 18). `_stop()`'s own
+   existing STOP-only policy already prevents advancing to Step 2 —
+   the observer only needs to persist the terminal state, not enforce
+   the stop.
+4. **Before Step 2** — `before_step(workflow_id, 1)` → `start_step_2()`.
+5. **Immediately after verification** — `after_step(workflow_id, 1,
+   tool_result)` (the verify tool's own result), called from the same
+   success-continuation branch as (2), **before** the loop advances to
+   index 2 (and therefore before WorkflowEngine's own, separate,
+   unchanged `_verification_gate_failure_reason()` check for Step 3
+   ever runs). The observer computes `VerificationOutcome` by comparing
+   `tool_result.metadata["phase"]` against Step 3's own trusted
+   `verification_expected_value` (read directly off the Plan the
+   observer was constructed with) → `mark_step_2_completed(outcome=...)`,
+   whose existing implementation already atomically sets
+   `overall_status → FAILED` for a non-VERIFIED outcome. This means the
+   engine's own independent gate check (unchanged) and the persisted
+   progress row always agree by construction — no separate write is
+   needed when the gate subsequently stops Step 3.
+6. **Before Step 3** — `before_step(workflow_id, 2)`, reached only if
+   the engine's own gate already passed (i.e. verification_outcome was
+   VERIFIED, already durably persisted in step 5 above) →
+   `start_step_3()`.
+7. **Immediately after Step 3 succeeds or fails** —
+   `after_step(workflow_id, 2, tool_result)` → `mark_step_3_completed()`
+   or `mark_step_3_failed()`, both of which already atomically set
+   `overall_status` too (confirmed unchanged from Batch 1).
+8. **Before returning the final WorkflowResult** — satisfied by
+   construction: whichever of steps 2–7 above is the last one that ran
+   is, by Python's own sequential execution, always called before the
+   loop/`resume()` returns its `WorkflowResult` — no additional,
+   separate "flush" write is required.
 
-Reused **unchanged**: `intelligence.compound_grounding.ground_compound_decision()`.
-Confirmed by re-reading its source this session: exact connector
-`" and then "`; first clause must uniquely ground
-`PROJECT_STATE_UPDATE_PHASE` (action token `update`, domain token
-`phase`) with its value exactly attributable via the `" to "` marker;
-second clause must uniquely ground `PROJECT_STATE_SHOW` with no
-attributable argument; negation detected request-wide before any
-other check; the one-entry `_ALLOWED_COMPOUND_TEMPLATES` tuple (an
-ordered tuple of an ordered tuple) makes a reversed pair, a third
-capability, a repeated capability, or an alternate connector
-structurally unrepresentable, not merely rejected by a runtime check.
-Zero code change to this module.
+## 13. Checkpoint failure semantics
 
-## 8. Trusted plan
+For every checkpoint call (`before_step`/`after_step`), on a CAS
+conflict, a missing row, a wrong template, a wrong request/workflow
+identity, or a database error:
 
-**New function** (Batch 2), mirroring
-`_build_write_and_verify_workflow_plan()`:
-`_build_phase_update_verify_show_workflow_plan()` in
-`intelligence/planning.py`. Exact three `PlanStep`s:
+- **fail closed** — the call returns a bounded, honest reason string
+  (never raises past the observer boundary into engine internals in a
+  way that could be misread as a tool failure);
+- the engine **never advances to the next step** without a confirmed
+  checkpoint — a `before_step` failure stops before the tool call; an
+  `after_step` failure after a successful tool call stops via the same
+  `_stop()` path, with an error distinguishing "the tool may have
+  succeeded, but its checkpoint could not be recorded" from an
+  ordinary tool failure;
+- **no completed write is repeated automatically** — a checkpoint
+  failure never causes a retry of the same step within the same call;
+- the approval handoff is **left at `CLAIMED`** (the claim already
+  happened before `resume()` was invoked, per the existing, unchanged
+  interlock) — startup reconciliation (Section 14) is the only path
+  that ever resolves it further, never an in-process retry;
+- a database-level error (as opposed to an ordinary CAS rejection) is
+  surfaced honestly to the caller of `resume()` — propagated, not
+  swallowed, mirroring the existing `_claim_and_resume_workflow()`
+  contract that a genuine infrastructure failure after claim marks
+  `CLAIM_INTERRUPTED` before re-raising.
 
-1. **Write** — `tool_name="project_state_update"`,
-   `tool_input={"field": "phase", "value": <grounded phase value>}`,
-   preflighted YELLOW (identical preflight call already used for the
-   two-step case).
-2. **Verify** (trusted, model-invisible) — `tool_name="project_state_verify"`
-   (the same `PROJECT_STATE_VERIFY_FOCUS` catalog entry already paired
-   with `PROJECT_STATE_UPDATE_PHASE`), preflighted GREEN. Reused
-   without change.
-3. **Show** — `tool_name="project_state_show"`, preflighted GREEN,
-   `requires_verified_predecessor=True`,
-   `verification_field_name="phase"`,
-   `verification_expected_value=<the same grounded phase value as
-   step 1>` — a trusted, plan-construction-time literal, never
-   re-read from model output a second time.
+## 14. Compound-aware CLAIMED recovery before generic fallback
 
-No `PlanStep`/`Plan` change is required: both already support an
-arbitrary step count (`WorkflowEngine._validate_executable_plan()`
-only requires sequential 1..N numbering), and the paused-workflow JSON
-schema already round-trips `requires_verified_predecessor` /
-`verification_field_name` / `verification_expected_value` for every
-step (confirmed in `WorkflowEngine._plan_step_to_dict()` /
-`_try_reconstruct_paused_workflow()`) at `SCHEMA_VERSION = 1` — no
-version bump needed.
+**Mandatory ordering** inside `main.reconcile_claimed_handoffs()`:
+history repair (unchanged) → **new:**
+`_reconcile_claimed_compound_workflows()` → existing
+`_reconcile_claimed_rows()` (generic fallback, unchanged in its own
+logic, but now only ever sees whatever the compound-aware pass did not
+already resolve, since resolved rows have already transitioned out of
+`CLAIMED`).
 
-## 9. Approval semantics
+**`_reconcile_claimed_compound_workflows(pending_store, paused_store,
+progress_store, workflow_history)`** — new, `main.py`. For each row
+from `pending_store.list_by_handoff_status(CLAIMED)`:
 
-`WorkflowEngine.run()`'s existing per-step tier check
-(`tool_result.requires_confirmation`) only ever pauses on a YELLOW
-step; steps 2 and 3 are GREEN and structurally cannot trigger
-`ApprovalManager.create_request()`. **One approval is therefore
-already guaranteed by the existing, unmodified engine — no new
-approval-count logic is needed.**
+1. Read `paused_store.get(workflow_id)` directly (bypassing
+   `WorkflowEngine._paused`, since CLAIMED rows are deliberately never
+   reconstructed into it — see `_RETAIN_WITHOUT_RESUME`). If missing/
+   corrupt, or its `plan_steps` do not match the 14-point fingerprint
+   (Section 17) applied to the raw persisted dicts: leave the row for
+   the generic pass, unchanged.
+2. If it matches: fetch `progress_store.get(workflow_id)`. If missing,
+   or `template_id`/`request_id`/`workflow_id`/`approved_phase_value`
+   do not all agree with the paused plan and the approval row: leave
+   for the generic pass (an unrecognizable-or-invalid compound-like
+   plan is explicitly required to fall through, never guessed at).
+3. Otherwise, call the new **`resume_claimed_compound_workflow(...)`**
+   (below) to classify/continue it. Rows it resolves to `CONSUMED` or
+   `CLAIM_INTERRUPTED` are, by definition, no longer `CLAIMED` — the
+   subsequent generic pass's own unchanged query naturally never sees
+   them again. No exclusion list is needed.
 
-The one open requirement the task adds beyond today's four workflows:
-the approval text must name the conditional final show, without
-implying it is guaranteed. This is satisfied by giving the compound
-template's own step-1 `PlanStep.action` string (constructed only by
-the new plan-builder above, never model-supplied) an extended,
-trusted, honest description, e.g. *"update the manually-maintained
-project state's phase to '<value>', then show the resulting project
-state only if verification confirms the update"*. Batch 2 must confirm
-this extended text still preflight-classifies as exactly YELLOW
-through the live `SecurityManager` (the same exact-tier-match check
-`_preflight_capability()` already performs); if it does not, the
-extended disclosure is carried in the `ApprovalRequest.reason` field
-instead (which is display-only and never used for classification),
-leaving `action` unchanged.
+**`resume_claimed_compound_workflow(record, progress, ...)`** — new,
+narrow, `core/orchestrator.py`. Accepts only a row that already passed
+the fingerprint + identity checks above. Reconstructs the Plan via a
+new, additive `WorkflowEngine.reconstruct_claimed_compound_plan(record)`
+method (exposing the *same* tool-registration + tier-reclassification
+revalidation `_try_reconstruct_paused_workflow()` already performs
+internally, as a second, public entry point usable for an inherited
+`CLAIMED` row it does not otherwise touch). If revalidation fails:
+`mark_claim_interrupted()` (existing, unchanged) — fail closed, never a
+silent skip. Otherwise, dispatches on the progress row's own state
+exactly per the crash-state matrix in Section 15 — it **never**
+re-invokes Step 1's write tool under any circumstance; it only ever
+(re)runs Steps 2/3 (both read-only) when the matrix says that is safe,
+and otherwise marks `CLAIM_INTERRUPTED`. This is the one, narrow,
+template-specific recovery path the task requires — not a general
+"resume any claimed workflow" mechanism (it refuses anything that does
+not pass the fingerprint check).
 
-Decline/expiry perform zero steps for free (`resume()`'s existing
-`_stop()` path never calls `step.tool_name` for a declined decision).
-Approved arguments (the grounded phase value baked into
-`tool_input`/`verification_expected_value`) are immutable through
-restart via the existing paused-workflow persistence, unchanged.
+## 15. Exact crash-state matrix
 
-Schema check requested by the task: **no schema change is required**
-for `pending_approval_state` or `paused_workflow_state` — both already
-support this shape today (Section 8).
+- **No progress row:** do not execute; do not infer state. Before
+  claim, this is handled by Section 16's creation/repair contract.
+  After claim, a missing/unrecognizable row → `CLAIM_INTERRUPTED`
+  (Section 14, step 2 above).
+- **Progress exists; `step_1_status = PENDING`:** the pre-execution
+  observation/active-marking checkpoint (Section 12, item 1) was never
+  committed. Because that checkpoint is the *first* thing `resume()`'s
+  observer does, before the write tool is ever invoked, this state is
+  safe by construction: the write tool provably never ran. Step 1 may
+  safely (re)begin — this is not "repeating a completed write," since
+  nothing completed.
+- **`step_1_status = IN_PROGRESS`:** the write may or may not have
+  occurred. Run `reconcile_phase_update()` (Batch 1, unchanged) using
+  the row's own durable `pre_execution_phase_value`/
+  `pre_execution_last_updated` against a **fresh** `project_state_verify`
+  read:
+  - `POSTCONDITION_NOT_SATISFIED` → the write demonstrably did not take
+    effect — a definite, negative, terminal fact. `mark_step_1_failed()`
+    → handoff `CONSUMED` (a known terminal result; never implies
+    success).
+  - `POSTCONDITION_SATISFIED_STATE_CHANGED` (real evidence of a write:
+    a differing pre-state now matching, or a changed timestamp) →
+    `mark_step_1_completed()` (backfilling the missing checkpoint from
+    strong evidence) → continue to Step 2 evaluation below.
+  - `POSTCONDITION_SATISFIED_EXECUTION_UNCONFIRMED` (already matched,
+    no further evidence) → genuinely ambiguous; per the task's own
+    instruction this must lead to terminal reconciliation/manual
+    review, never continuation → `mark_needs_reconciliation()` (for
+    operator visibility, never blocking) → handoff `CLAIM_INTERRUPTED`.
+  - Never claims exactly-once execution in any branch.
+- **`step_1_status = COMPLETED`:** the write is not repeated;
+  proceed to Step 2.
+- **`step_2_status = IN_PROGRESS`, or `step_1_status = COMPLETED` and
+  `step_2_status = PENDING`:** verification is read-only and safe to
+  (re)run. Call `start_step_2()` if still PENDING, re-run the verifier
+  tool fresh, compute the outcome, `mark_step_2_completed(outcome=...)`.
+  VERIFIED → continue to Step 3; FAILED/UNAVAILABLE → handoff
+  `CONSUMED` (overall already FAILED, per the store's own atomic
+  side-effect — a known, non-success terminal result).
+- **`step_2_status = COMPLETED`, outcome VERIFIED,
+  `step_3_status in (PENDING, IN_PROGRESS)`:** the final read is
+  read-only and safe to (re)run. `start_step_3()` if PENDING, re-run
+  `project_state_show` fresh (its output is never persisted),
+  `mark_step_3_completed()` → handoff `CONSUMED` — this time a genuine
+  success.
+- **`step_3_status = COMPLETED` (`overall_status = COMPLETED`):**
+  nothing to (re)run; `mark_consumed()` if the handoff has not already
+  reached it. Response reconstruction, if ever needed, uses the
+  progress row's own bounded state plus a fresh, always-safe
+  `project_state_show` read — never a repeated mutation.
+- VERIFIED is never fabricated from a bare ProjectState-value
+  comparison outside the verifier tool's own real call, in any branch.
 
-## 10. Progress-row creation contract
+## 16. Progress creation and approval-gating contract
 
-**Real constraint found by inspection:** `WorkflowEngine.run()`
-self-generates `workflow_id` (`uuid.uuid4()`) and
-`ApprovalManager.create_request()` self-generates `request_id`,
-*inside* the same already-proven, unmodified pause path. Neither
-identity exists before `run()` returns. The task's own "preferred safe
-ordering" (progress row before pause) is therefore not achievable
-without a materially larger change (threading pre-generated ids through
-`WorkflowEngine.run()` and `ApprovalManager.create_request()`), which
-is disproportionate to this one template and not adopted.
+**Synchronous creation failure** (a catchable Python exception right
+after `run()` returns `WAITING`): the compound-specific orchestrator
+wrapper catches it and, in the same call, before returning anything to
+the caller:
 
-**Selected contract — create-after-pause, self-healing-before-resume:**
+1. Calls the existing, public `ApprovalManager.invalidate_pending(
+   request_id, reason="compound workflow progress could not be
+   established")` — terminally isolating the approval using an
+   already-existing bounded API (no new API needed for this).
+2. Calls the existing, public `PausedWorkflowStore.delete(workflow_id)`
+   to remove the paused state.
+3. Returns an honest failure `JarvisResponse` — **never** an approval
+   prompt. The user never sees an actionable approval whose progress
+   foundation is missing.
 
-1. Parse/ground/build the trusted plan (Sections 6–8; pure, no
-   durable writes).
-2. Call `workflow_engine.run(plan, session_id=...)`. This durably
-   creates `pending_approval_state` (PENDING) and
-   `paused_workflow_state`, exactly as today, unchanged.
-3. If `result.overall_status is WAITING`: immediately call
-   `CompoundWorkflowProgressStore.create(workflow_id=result.workflow_id,
-   template_id=ALLOWED_TEMPLATE_ID,
-   request_id=result.pending_approval_request.request_id,
-   approved_phase_value=<grounded value>)`.
-4. **Idempotent backfill, not a hard precondition:** at every future
-   touch point that is about to resume a compound-shaped workflow
-   (live approval *and* startup continuation, both funnelling through
-   `_claim_and_resume_workflow()`), first call a new recognizer
-   (Section 11) and `CompoundWorkflowProgressStore.get(workflow_id)`.
-   If `None`, create the row on the spot from the already-durable,
-   already-reconstructed paused `Plan`'s own step-1
-   `tool_input["value"]` — no re-parsing, re-grounding, or model call.
+**Hard crash** in the narrow window between the pause durably
+committing and progress-row creation completing (unrecoverable
+in-process, so no catch-block can run): detected at startup, as a new
+responsibility folded into `main.reconcile_claimed_handoffs()` (running
+before the interactive loop, after history repair, alongside the
+CLAIMED passes — before any approval could actually be surfaced to the
+user in practice): for each **PENDING** row that is workflow-linked
+and whose paused plan matches the 14-point fingerprint (Section 17)
+but has no matching `CompoundWorkflowProgress` row:
 
-This is deliberately **not** a claim that step 2/3's identities are
-durable before the approval is exposed to the user in any I/O sense —
-they are durable microseconds after `run()` returns and before the CLI
-ever prints the prompt, which is the practical guarantee available
-without a distributed transaction across two independent SQLite
-sessions (which this plan does not claim, per instruction).
+- **Repair:** if the workflow/request identities and the approved
+  phase value can be reconstructed unambiguously from the paused
+  plan's own already-durable step-1 `tool_input`, idempotently create
+  the missing row now, before the approval is treated as showable.
+- **Terminal isolation:** if anything is ambiguous or the paused plan
+  itself is corrupt, apply the same two existing bounded APIs as the
+  synchronous case above (`invalidate_pending` + `delete`) — approval
+  is never permitted while progress is missing.
 
-**Authoritative record / repair / failure ordering / cleanup /
-restart detection (explicitly, since atomicity is not claimed):**
-`pending_approval_state` + `paused_workflow_state` remain authoritative
-for "does this workflow exist and may it be resumed" — `CompoundWorkflowProgress`
-is authoritative only for internal step-checkpoint/reconciliation
-state, **never** for whether a workflow may be approved or resumed
-(WorkflowEngine's own verification gate, Section 8, is independently
-sufficient for that). A crash between step 2 and step 3 above leaves a
-valid, ordinarily-resumable YELLOW workflow with a missing progress
-row, self-healed on first touch (step 4). A declined/expired request's
-progress row (if created at all) is terminated via the same
-`mark_step_1_failed()` transition used for an ordinary write failure
-(Section 12) — reused, not a fourth status. No new cleanup command is
-added; a stale, never-reconciled row is retained indefinitely, exactly
-mirroring the interlock's own accepted terminal-retention stance.
+This is a **strengthening** over the `aa92241` version's "lazy
+backfill at next touch," which is retracted for the ordinary,
+catchable-exception case; lazy repair is now reserved only for the
+narrower true-crash window this section describes.
 
-## 11. Step-transition mapping
+## 17. Approval-time enforcement and the trusted recognizer
 
-**Recognition** (new, Batch 2): `_matching_compound_workflow_template()`
-in `core/orchestrator.py`, mirroring `_matching_two_step_write_capability()`
-structurally: `len(steps) == 3`, `steps[0].tool_name == "project_state_update"`
-with `tool_input["field"] == "phase"`, `steps[1].tool_name ==
-"project_state_verify"`, `steps[2].tool_name == "project_state_show"`
-with `requires_verified_predecessor is True` and
-`verification_field_name == "phase"`. This is independent of
-`CompoundWorkflowProgress` row presence (Section 10) — recognition and
-response translation never depend on the progress row existing.
+**Approval-time check** (new, small, orchestrator-level; does not
+depend on the earlier creation attempt): before the orchestrator's own
+call to `ApprovalManager.approve(request_id)` for a workflow-linked
+request whose paused plan matches the fingerprint, re-fetch
+`CompoundWorkflowProgressStore.get(workflow_id)` and require, freshly,
+at this exact moment: `template_id == ALLOWED_TEMPLATE_ID`,
+`request_id` matches, `workflow_id` matches, and
+`approved_phase_value` equals the paused plan's own step-1
+`tool_input["value"]`. Any mismatch refuses to call `approve()` at
+all, reporting an honest failure. Batch 2 must identify the exact
+existing call site(s) that invoke `ApprovalManager.approve()` today
+(not verified line-by-line in this planning session) and insert this
+gate there, or in a new wrapper all such call sites use for a
+workflow-linked, fingerprint-matching request.
 
-**New engine accessor** (Batch 2, additive, read-only):
-`WorkflowEngine.peek_paused_plan(workflow_id) -> Plan | None`, exposing
-`self._paused[workflow_id].plan` if present — mirrors `has_paused()`'s
-existing narrow read-only pattern. Needed because
-`_claim_and_resume_workflow()` does not otherwise have access to the
-workflow's own internal Plan before calling `resume()`.
+**Trusted compound recognizer — 14-point fingerprint**
+(`_matching_compound_workflow_template()`, `core/orchestrator.py`,
+replacing the earlier 3-steps-plus-tool-names shape check):
 
-**Pre-execution observation** (new, capability-agnostic hook inside
-`_claim_and_resume_workflow()`, gated by the recognizer): captured via
-one additional, real, **audited** `self._executor.execute("project_state_verify",
-{}, session_id=...)` call — not a raw store read — immediately before
-`resume()`. This requires one small additive change to
-`tools/builtin/project_state_verify_tool.py`: add
-`metadata["last_updated_at"] = record.last_updated if record else None`
-(the raw `datetime`, alongside the existing formatted string) —
-non-breaking, since metadata is a free-form dict nothing today depends
-on the absence of. Recorded via
-`CompoundWorkflowProgressStore.record_pre_execution_observation()`
-only when `step_1_status is PENDING` (idempotent: also covers a prior
-crash before observation was recorded).
+1. Exactly three steps.
+2. Step 1 `tool_name == "project_state_update"`.
+3. Step 1 `tool_input["field"] == "phase"`.
+4. Step 1 `tool_input["value"]` is a non-empty, bounded string.
+5. Step 2 `tool_name == "project_state_verify"`.
+6. Step 2 is the same verifier Step 3 will check against (identity
+   consistency, not a separate value).
+7. Step 3's `verification_expected_value == Step 1's tool_input["value"]`.
+8. Step 3 `tool_name == "project_state_show"`.
+9. Step 3 `tool_input == {}` (no model-controlled input).
+10. Step 3 `requires_verified_predecessor is True`.
+11. Step 3 `verification_field_name == "phase"`.
+12. Each step's stored `tier` matches its capability's
+    `CAPABILITY_CATALOG` `max_execution_tier` exactly (YELLOW, GREEN,
+    GREEN) — reusing the same exact-match reclassification discipline
+    `_try_reconstruct_paused_workflow()` already applies to the
+    waiting step, generalized here to all three persisted steps.
+13. The linked `CompoundWorkflowProgress.template_id == ALLOWED_TEMPLATE_ID`.
+14. The linked progress row's `workflow_id`/`request_id` match the
+    approval/paused-workflow records exactly.
 
-**Because `WorkflowEngine.resume()` executes steps 1→2→3 in one
-uninterrupted synchronous call** (no callback hook between internal
-steps, and Batch 1's own module docstring deliberately keeps
-`CompoundWorkflowProgressStore` unimported by any live runtime module
-until this batch), the per-step completion transitions below are
-**observability/audit checkpoints applied as one ordered batch
-immediately after `resume()` returns**, not live inter-step
-checkpoints — see Section 12 for why this does not weaken crash
-safety.
+Any single mismatch → treat as unrecognized: execute nothing further
+through the compound path, never fall back to a generic "compound
+interpreter" (none exists), and become an honest
+invalid/`CLAIM_INTERRUPTED`/refused state as appropriate to the
+context (construction time vs. restart time).
 
-- **Step 1 succeeds:** `step_outcomes[0].status is COMPLETED` →
-  `mark_step_1_completed(workflow_id)`.
-- **Step 1 ordinary failure (or a decline):** →
-  **new, additive store method** `mark_step_1_failed(workflow_id)`
-  (CAS `IN_PROGRESS → FAILED`, `overall_status → FAILED`; mirrors the
-  existing `mark_step_3_failed()` shape exactly). Reused for decline,
-  since both mean "the write never happened and never will for this
-  request." Do not continue to `start_step_2`/`start_step_3`.
-- **Step 2 begins/finishes:** `start_step_2()` then
-  `mark_step_2_completed(workflow_id, verification_outcome=...)` — the
-  real `VerificationOutcome` from `verify_project_state_field()`,
-  mapped 1:1 onto `CompoundVerificationOutcome` (already the same
-  three-member vocabulary). A non-VERIFIED outcome already, atomically,
-  sets `overall_status → FAILED` inside this one existing store method
-  — step 3 can never legally be started afterward.
-- **Step 3 begins/finishes:** `start_step_3()` only legal once
-  `step_2_verification_outcome == VERIFIED` (already enforced by the
-  store's own CAS precondition); `mark_step_3_completed()` on success,
-  `mark_step_3_failed()` on failure. Show output itself is never
-  persisted — only the fixed status transition.
-- **Each transition is individually CAS-guarded**; if a prior crashed
-  attempt already applied part of the batch, a later, redundant call
-  raises `CompoundWorkflowProgressError`, which the wrapper catches
-  and ignores (never fatal, never blocks the real response — see
-  Section 12).
+## 18. Cross-store authority and reassessed progress-store primitives
 
-## 12. Crash windows
+**Cross-store authority** (unchanged from `aa92241` §13, restated with
+one addition): `PendingApprovalStore` — approval/claim lifecycle.
+`PausedWorkflowStore` — the exact approved plan and inputs.
+`CompoundWorkflowProgress` — step-level compound recovery only, never
+gating whether a workflow may be approved or resumed on its own (the
+engine's verification gate and the fingerprint check are independently
+sufficient for that). `WorkflowHistoryStore` — positive terminal
+evidence only, never a substitute for step-level progress.
+`ProjectState` — the observable durable postcondition only, never
+proof of execution by itself. `VerificationResult` — Step 3
+eligibility only. **New:** for the exact compound workflow, execution
+may proceed only when the paused plan and the progress row agree on
+template/request/workflow identity and approved phase value (Section
+17, points 13–14); a mismatch fails closed at every touch point
+(construction, approval, claim, and restart reconciliation alike).
 
-Twelve windows as specified. Several of the literal restart scenarios
-the task describes (8, 9, 10) do not correspond to independently
-reachable crash points in the current architecture, because
-`resume()` executes steps 1→2→3 without an external checkpoint
-between them; this is stated plainly below rather than inventing a
-checkpoint that does not exist.
+**Existing `CompoundWorkflowProgressStore` methods** (all reused
+unchanged): `create`, `get`, `list_all`,
+`record_pre_execution_observation`, `mark_step_1_completed`,
+`start_step_2`, `mark_step_2_completed`, `start_step_3`,
+`mark_step_3_completed`, `mark_step_3_failed`,
+`mark_needs_reconciliation`.
 
-1. **Before progress row creation** (i.e. before `run()` is even
-   called): no durable write of any kind has happened — no approval,
-   no paused workflow, no progress row, no execution. Trivially true.
-2. **Approval/pause created, progress-row creation fails:** see
-   Section 10's selected contract — self-healed at first future touch
-   point; never blocks resume; no duplicate row (creation is always a
-   get-then-create at a single-execution-lock-holding process, per the
-   existing interlock's own OS-lock exclusivity guarantee).
-3. **Approval/pause created, process exits before user approves:**
-   identical to every existing YELLOW workflow today — normal PENDING
-   behaviour, no execution, decline/expiry unaffected. A leftover
-   all-PENDING progress row (if created) is inert.
-4. **Approval granted before claim:** the existing, already-proven
-   `APPROVED_UNCONSUMED` restart continuation — `continue_approved_unconsumed_workflows()`
-   → `resume_approved_unconsumed_workflow()` → `_claim_and_resume_workflow()`
-   — retains the exact plan/inputs, requires no new approval, claims
-   once. Unchanged by this plan; only the new compound hook rides
-   inside the same call.
-5. **Claim succeeds before pre-execution observation:** the claim CAS
-   (`APPROVED_UNCONSUMED → CLAIMED`) happens first (existing, unchanged
-   code); a crash before observation leaves the row CLAIMED with no
-   confirmed terminal workflow-history evidence — the existing,
-   capability-agnostic `_reconcile_claimed_rows()` already resolves
-   this generically to `CLAIM_INTERRUPTED` on next startup. No new
-   logic required; the progress row (if present) is left at
-   `step_1_status=PENDING`, consistent, not contradictory.
-6. **Pre-execution observation recorded before Step 1:** same CLAIMED
-   → CLAIM_INTERRUPTED resolution as Window 5. Restart never
-   automatically retries the write (explicitly excluded). A future,
-   separately-approved manual-review path could call
-   `reconcile_phase_update()` with the now-durable
-   `pre_execution_phase_value`/`pre_execution_last_updated` against a
-   fresh read, to inform a human decision — never automatic.
-7. **Step 1 tool succeeds but completion checkpoint is absent — the
-   key reconciliation case:** this is exactly Batch 1's Contract A.
-   `reconcile_phase_update()` is reused **completely unchanged**: its
-   three-member `ReconciliationConfidence` already distinguishes
-   pre-state-differed-now-matches
-   (`POSTCONDITION_SATISFIED_STATE_CHANGED`), pre-state-already-matched
-   with a changed `last_updated`
-   (`POSTCONDITION_SATISFIED_STATE_CHANGED`), and
-   pre-state-already-matched with no further evidence
-   (`POSTCONDITION_SATISFIED_EXECUTION_UNCONFIRMED`, never claimed as
-   executed) — never fabricating VERIFIED from the ProjectState value
-   alone. The row resolves to `CLAIM_INTERRUPTED` via the same
-   generic interlock mechanism as Windows 5/6; `reconcile_phase_update()`
-   is available as a diagnostic for a human/future tool, never invoked
-   to auto-decide anything.
-8. **Step 1 completed before Step 2:** does not arise as an
-   independent restart point in the live path (steps 1→2 run in one
-   `resume()` call with no pause between them); the only crash that
-   can land here resolves identically to Window 7 (CLAIM_INTERRUPTED,
-   no automatic replay).
-9. **Verification finishes but progress checkpoint is absent:** same
-   reasoning as Window 8 — no independent pause point exists between
-   step 2 and the post-hoc batch write. Resolves to CLAIM_INTERRUPTED.
-   Per-step `workflow_step_completed`-shaped history entries do exist
-   in real time (`_record_history()` runs inside the step loop), but
-   the existing interlock deliberately treats only
-   `workflow_completed`/`workflow_stopped` as positive terminal proof
-   — this plan does not weaken that. VERIFIED is never fabricated from
-   the ProjectState value alone.
-10. **VERIFIED persisted before Step 3:** does not arise as an
-    independent restart point today for the same reason as 8/9 — steps
-    2→3 run in the same `resume()` call. Resolves to
-    CLAIM_INTERRUPTED, not an automatic verification-only resume of
-    step 3 alone (no such narrower resume path exists or is added).
-11. **Step 3 returns output before completion checkpoint:** if
-    `resume()` has already returned COMPLETED, `mark_consumed()` has
-    already run (in `_claim_and_resume_workflow()`, before the
-    compound post-hoc batch) — a crash after that point means the
-    approval is already `CONSUMED` and will never be revisited by
-    `continue_approved_unconsumed_workflows()`. The progress row may be
-    left at `step_3_status=IN_PROGRESS` permanently (a disclosed,
-    accepted artifact, exactly mirroring the interlock's own indefinite
-    terminal-retention stance). Since step 3 is read-only, an operator
-    can always safely re-run an ordinary "show project state" — never
-    a re-execution of the compound workflow.
-12. **Compound terminal result before response delivery:** identical
-    to the already-closed interlock's own Window F/G guarantees, reused
-    unchanged: `mark_consumed()` already happened, the approval can
-    never be reused, and any reconstructed response would use only
-    bounded durable state (`WorkflowHistoryStore`'s terminal record)
-    plus an always-safe fresh `project_state_show` — never a
-    mutation.
+**Reassessed: exactly one new store method is required:**
+`mark_step_1_failed(workflow_id)` — CAS `step_1_status: IN_PROGRESS →
+FAILED`, `overall_status → FAILED`, mirroring `mark_step_3_failed()`'s
+existing shape exactly. Reused for both an ordinary write-tool failure
+and a user decline (both mean "the write never happened and never
+will for this request"). No `mark_overall_failed()` is added — every
+terminal path already sets `overall_status` atomically as a side
+effect of one of the existing/one-new per-step methods; a generic,
+arbitrary status-setter is deliberately not created.
 
-## 13. Reconciliation authority
+**Reassessed engine-level additions (four, all small and additive,
+all backward-compatible defaults):**
 
-- `PendingApprovalStore`: sole authority for approval/claim lifecycle
-  (PENDING/APPROVED_UNCONSUMED/CLAIMED/CONSUMED/CLAIM_INTERRUPTED/DECLINED/EXPIRED).
-- `PausedWorkflowStore`: sole authority for the exact trusted plan and
-  approved inputs.
-- `CompoundWorkflowProgress`: authority for compound step-checkpoint
-  state only — never for whether the workflow may be approved or
-  resumed (Section 10).
-- `WorkflowHistoryStore`: audit-oriented, positive-only terminal
-  evidence (`workflow_completed`/`workflow_stopped`); step-level
-  entries exist but are never treated as proof of overall completion,
-  and can never reconstruct step-level restart progress on their own.
-- `ProjectState` durable store: the current observable postcondition
-  only — matching the approved value is never, by itself, proof the
-  update tool executed (Section 12, Window 7).
-- `ToolExecutor` result: live execution result only, for the one call
-  that produced it.
-- `VerificationResult`: the verification-gate decision only, for the
-  one step that produced it.
+1. `_CompoundStepObserver` Protocol + `step_observer` parameter on
+   `resume()`/`_run_from()` (Section 11).
+2. `peek_paused_plan(workflow_id) -> Plan | None` — read-only accessor
+   exposing `self._paused[workflow_id].plan`, needed so
+   `_claim_and_resume_workflow()` can recognize the fingerprint (for a
+   **live**, not-yet-claimed-by-a-dead-process workflow) before
+   deciding whether to pass a `step_observer` into `resume()`.
+3. `reconstruct_claimed_compound_plan(record) -> tuple[Plan | None,
+   str | None]` — exposes the existing internal
+   revalidation logic as a second, public entry point for an
+   **inherited CLAIMED** row (Section 14), which `reload_paused()`
+   deliberately never loads into `_paused`.
+4. One additive metadata key on `ProjectStateVerifyTool.run()`'s
+   result: `metadata["last_updated_at"] = record.last_updated if
+   record else None` (the raw `datetime`, alongside the existing
+   formatted string) — needed because the pre-execution observation
+   (Section 12, item 1) requires a real `datetime`, and the tool
+   today only returns a formatted string.
 
-## 14. Interlock restart integration
+## 19. Response delivery and terminal ordering
 
-1. Acquire execution lock. 2. Initialize/migrate stores (no schema
-change needed — Section 9). 3. Build stores/orchestrator (`build_orchestrator()`,
-unchanged). 4. Repair approval/history consistency (unchanged). 5.
-Reconcile inherited CLAIMED handoffs (unchanged, capability-agnostic —
-Section 12, Windows 5–9). 6. Continue APPROVED_UNCONSUMED workflows
-(`continue_approved_unconsumed_workflows()`, unchanged entry point).
-7. Inside it, `resume_approved_unconsumed_workflow()` locates the
-paused compound plan via the existing `workflow_id` metadata
-mechanism — unchanged. 8. `_claim_and_resume_workflow()`'s new
-recognizer (Section 11) identifies the compound shape from the
-peeked `Plan` and self-heals/locates the `CompoundWorkflowProgress`
-row by the trusted `workflow_id` (Section 10) — never by parsing
-anything model-supplied. 9. Claims once (existing CAS, unchanged). 10.
-Executes only through the existing `resume()` — never a new
-interpreter; steps 1–3 run to their natural stopping point. 11.
-Updates progress monotonically via the CAS-guarded batch (Section 11).
-12. Produces the final bounded response via the new compound
-translator (Section 15).
+1. Persist the final step checkpoint (Section 12, items 2/3/5/7 —
+   already durable the instant the relevant step finished, per
+   construction).
+2. Overall compound terminal state is already persisted atomically as
+   part of (1) — no separate write.
+3. `resume()` returns the terminal `WorkflowResult`.
+4. `_claim_and_resume_workflow()`'s existing, unchanged
+   `mark_consumed()` call runs (handoff `CLAIMED → CONSUMED`).
+5. The user response is delivered.
 
-**Confirmed:** `resume_approved_unconsumed_workflow()` is already
-completely capability-agnostic and needs **zero change** — the only
-new logic lives inside `_claim_and_resume_workflow()`, selected purely
-from trusted, persisted plan shape (Section 11), never model output.
-No general workflow interpreter is added.
+If delivery fails after step 4: no mutation is rerun, the approval is
+never reopened, and the compound workflow is never repeated — identical
+to the already-closed interlock's own Window F/G guarantees. If the
+workflow is later found recovered after Step 3 completed but before
+this ordering finished (Section 15, `step_3_status = COMPLETED`
+branch): progress is used as step-level evidence, terminal bookkeeping
+completes without repeating the write, and a fresh, always-safe
+`project_state_show` read is used only if a response must be
+reconstructed.
 
-## 15. Response semantics
+## 20. Revised architecture outcome and batch scope
 
-New `_compound_update_phase_and_show_result_to_response()` in
-`core/orchestrator.py`, dispatched from `_translate_verified_workflow_result()`
-via the Section 11 recognizer (added as one more entry alongside the
-existing `response_builders` table — a data addition, not a growing
-`if`/`elif` chain, matching the codebase's own established convention):
+**Outcome B retained.** The additions above (one store method, four
+small engine changes, one tool metadata key, and several
+orchestrator-level functions — recognizer, two startup passes, the
+narrow claimed-recovery entry point, the concrete observer, the
+approval-time gate) are each individually small, additive, and
+independently testable; none requires a disproportionate redesign of
+`Plan`/`PlanStep`/`WorkflowEngine`'s fundamental execution model.
+Batch 2's scope has grown from the `aa92241` estimate (which
+understated the engine-level work) but remains reasonably bounded
+within one batch — **Outcome C is not selected.**
 
-- **Full success:** step 1 COMPLETED, step 2 outcome VERIFIED, step 3
-  COMPLETED → names the update, states verification succeeded, and
-  returns the real, current `project_state_show` output (never an AI
-  paraphrase).
-- **Update failure:** step 1 not COMPLETED → reports failure; no
-  verification or show ever claimed to have run.
-- **Verification mismatch (FAILED):** reports the update's durable
-  postcondition was not confirmed; step 3 never runs (engine gate,
-  Section 8).
-- **Verification unavailable (UNAVAILABLE):** reports verification
-  could not complete; step 3 never runs.
-- **Final show failure:** step 1 COMPLETED, step 2 VERIFIED, step 3
-  not COMPLETED → reports the update was verified but the final read
-  failed; never claims the whole sequence succeeded.
-- **Interrupted/reconciliation-required:** (reached only via the
-  `CLAIM_INTERRUPTED` path, never inside a single `resume()` call)
-  reports honestly that the outcome could not be safely proven and
-  that automatic replay was prohibited — no raw tool output, prompts,
-  reasoning, or stack traces, exactly matching the existing
-  `CLAIM_INTERRUPTED` visibility contract.
+**Revised Batch 2 scope** (all dormant — no live user trigger):
 
-## 16. Existing-behaviour preservation
+1. `peek_compound_decision()` — written, unit-tested, not wired.
+2. Trusted compound plan builder + recognizer
+   (`_matching_compound_workflow_template()`, 14-point fingerprint).
+3. `mark_step_1_failed()` on `CompoundWorkflowProgressStore`.
+4. `_CompoundStepObserver` Protocol, `step_observer` parameter on
+   `resume()`/`_run_from()`, `peek_paused_plan()`,
+   `reconstruct_claimed_compound_plan()` on `WorkflowEngine`.
+5. `metadata["last_updated_at"]` on `ProjectStateVerifyTool`.
+6. Progress creation/gating contract (Section 16), approval-time
+   enforcement (Section 17), compound-aware CLAIMED reconciliation
+   pass and `resume_claimed_compound_workflow()` (Section 14), all
+   built and exercised by direct construction in tests — not reachable
+   from any live AI/CommandRouter path.
+7. Compound response translator.
+8. Full dormant restart/crash-window tests covering every state in
+   Section 15.
 
-- Every single-capability AI decision: unaffected structurally,
-  because `peek_compound_decision()` returning `False` routes to the
-  byte-for-byte unchanged `select_tool()` body (Section 6) — proven by
-  construction, not merely by running the existing suite.
-- `PROJECT_STATE_UPDATE_FOCUS`/`PROJECT_STATE_UPDATE_PHASE`/`SCHEDULE_ENABLE`/`SCHEDULE_DISABLE`:
-  `_matches_two_step_workflow_shape()` already requires `len(steps) ==
-  2`; a 3-step compound plan structurally cannot match any
-  `TWO_STEP_WORKFLOW` capability's shape, so no existing recognizer or
-  response translator is disturbed.
-- Advisory `ask jarvis:`, deterministic commands, approval decline/expiry,
-  handoff restart continuation, `ToolExecutor`, `SecurityManager`,
-  verification, `project_state_show`, Phase 97's isolated modules
-  (still unimported by any live module until Batch 2 explicitly wires
-  `peek_compound_decision`), and Phase 98 Batch 1's foundations: all
-  reused unchanged, per each section above.
+**Revised Batch 3 scope** (unchanged from `aa92241`): live
+discriminator routing wire-up, live grounding, the approval-text
+extension (preflight-verified), full end-to-end + restart activation
+tests, help/user-guide exposure, closure documentation.
 
-## 17. Security boundaries
+## 21. Required tests
 
-No arbitrary multi-tool plans, no second compound template, no
-model-selected verification/tier, no multiple approvals, no automatic
-reapproval, no retries/replanning/rollback/compensation, no browser or
-computer control, no arbitrary/automatic memory writes, no scheduler
-integration, no background workers, no general workflow scripting. The
-one compound sequence remains fixed, trusted, and catalog/template-driven.
-
-## 18. Architecture options assessed
-
-- **Outcome A** (Batch 2 complete live engine, hidden from docs;
-  Batch 3 exposure/closure): rejected — the amount of new integration
-  surface found by this audit (a new store method, a new tool metadata
-  key, a new engine accessor, a new orchestrator recognizer/hook/
-  translator, restart integration, reconciliation) is large enough
-  that shipping it all live in one batch, even hidden from
-  documentation, risks a half-proven path being reachable before
-  restart/crash-window testing is complete.
-- **Outcome B — selected.** Batch 2 builds the complete internal
-  compound execution/restart/reconciliation lifecycle with **no live
-  AI discriminator routing** (i.e. `peek_compound_decision()` and its
-  call site are *not* wired into `select_tool()` yet) — no user can
-  trigger it. Batch 3 activates live routing, adds the approval-text
-  extension, full end-to-end + restart tests, help/docs, and closure.
-  Matches the task's own guidance: "prefer this when partial
-  user-facing activation would be unsafe."
-- **Outcome C** (additional foundation required): not selected. This
-  audit found the existing foundation (Plan/PlanStep, WorkflowEngine's
-  N-step + verification-gate support, the paused-workflow schema,
-  `CompoundWorkflowProgressStore`) already structurally sufficient.
-  Only three small, additive primitives are needed (Section 19) — none
-  rises to "a fresh, separately-approved foundation phase."
-- **Outcome D** (defer): not selected — no disproportionate redesign
-  was found to be required.
-
-## 19. Selected outcome and Batch 2 scope
-
-**Outcome B.** Batch 2 adds, all dormant (no live routing):
-
-1. `peek_compound_decision()` (`intelligence/compound_structured_output.py`)
-   — written and unit-tested, but **not called** from `planning.py` yet.
-2. `_build_phase_update_verify_show_workflow_plan()` and
-   `_select_compound_tool_sequence()` (`intelligence/planning.py`) —
-   built and tested directly, not reachable from `select_tool()`'s own
-   entry point yet.
-3. `mark_step_1_failed()` — new, additive method on
-   `CompoundWorkflowProgressStore` (`workflow/compound_workflow_progress_store.py`).
-4. `peek_paused_plan()` — new, additive, read-only accessor on
-   `WorkflowEngine` (`workflow/engine.py`).
-5. `metadata["last_updated_at"]` — new, additive key on
-   `ProjectStateVerifyTool.run()`'s returned metadata
-   (`tools/builtin/project_state_verify_tool.py`).
-6. `_matching_compound_workflow_template()`, the pre-execution
-   observation hook and post-hoc progress batch inside
-   `_claim_and_resume_workflow()`, and
-   `_compound_update_phase_and_show_result_to_response()`
-   (`core/orchestrator.py`) — built and tested by directly constructing
-   a compound `Plan`/`WorkflowResult` in tests, without going through
-   any live AI/CommandRouter path.
-7. Full restart/crash-window tests for the dormant path (Section 12),
-   reusing the existing real-database test conventions.
-
-## 20. Batch 3 scope
-
-1. Wire `peek_compound_decision()` into `select_tool()`'s entry point
-   (or a new `select_tool_or_sequence()` replacing it as the one real
-   call site in `core/orchestrator.py`'s `_handle_ask_jarvis_to_request()`).
-2. Add the approval-text extension (Section 9), verified against the
-   live `SecurityManager`.
-3. Full end-to-end tests: live discriminator routing, live grounding,
-   live approval → claim → resume → verify → show, on a real, durable
-   database.
-4. Help/user-guide exposure.
-5. `docs/phase_98_approval_handoff_plan.md`-style closure documentation
-   for Batch 2+3 together (not a Phase 98 completion report — Phase 98
-   remains open pending Nathan's own review of whether further
-   compound templates are wanted).
-
-## 21. Required tests (mapped to the task's 75-item list)
-
-Grouped by batch; every numbered item from the task's list is covered
-by name, not reproduced item-by-item here to avoid duplicating the
-task's own enumeration. **Batch 2** covers items 1–3 (decision
-selection contract, unit-level, direct calls — not yet reachable
-live), 9–22 (grounding/plan-shape unit tests), 27–66 (persistence,
-execution, verification, progress/crash-recovery, and interlock
-integration — all real-database, restart-based, mirroring
-`test_yellow_workflow_restart_continuation.py`'s own established
-pattern), and 74–75 (full-suite + Ruff, run at the end of Batch 2 to
-prove zero regression while still dormant). **Batch 3** covers items
-4–8 (live-routing-specific: fallback/malformed-input behaviour once
-actually wired), 23–26 (approval-text and one-approval end-to-end,
-live), 68–73 (full regression sweep including the four existing YELLOW
-workflows and the closed interlock suite), and a repeat of 74–75 at
-Batch 3's own close.
+In addition to the `aa92241` test mapping (still applicable), Batch 2
+must add tests for the 46 items in the task's own list, organized as:
+per-step checkpoint timing (1–10), compound startup reconciliation
+(11–20), progress creation and approval gating (21–27), crash recovery
+(28–40), and regressions (41–46) — each named precisely in the task
+prompt and not reproduced verbatim here to avoid duplicating that
+enumeration; every one is achievable with the design in Sections
+11–19 above.
 
 ## 22. Acceptance criteria
 
-- Zero change to any existing single-capability AI test's outcome.
-- The three additive primitives (Section 19, items 3–5) ship with
-  their own direct unit tests before any orchestrator wiring depends
-  on them.
-- Every crash window in Section 12 has a real, durable-database test
-  proving its stated resolution (mostly: resolves to the existing,
-  unchanged `CLAIM_INTERRUPTED` mechanism).
-- `reconcile_phase_update()` is exercised with real pre/post
-  observations from the new hook, not just Batch 1's own synthetic
-  values.
-- Ruff clean across the full Git-derived diff scope at the close of
-  each batch.
+Implementation-ready only if the amended plan specifies (all
+satisfied above): durable checkpoints inside the step lifecycle, not a
+post-resume-only design; compound recovery before generic CLAIMED
+fallback; a safe inherited-CLAIMED continuation path that never
+re-invokes the write; exact trusted plan/progress recognition (14
+points); progress existence enforced before approval, both for a
+catchable failure and a hard crash; approval-time progress validation
+independent of the creation attempt; fail-closed checkpoint errors;
+exact crash-state restart behaviour for every progress state; and an
+honest, retained Batch 2/3 split.
 
 ## 23. Risks and mitigations
 
-- **Risk:** the approval-text extension (Section 9) reclassifies away
-  from YELLOW. **Mitigation:** preflight-verify before adopting it;
-  fall back to the existing wording with the fuller disclosure only in
-  `reason`.
-- **Risk:** `peek_compound_decision()` and `parse_tool_selection()`
-  drift in what counts as valid JSON/fence-stripping over time.
-  **Mitigation:** both are built from the same imported helpers by
-  construction (Section 6); a structural test should assert this
-  import relationship, mirroring the existing isolation tests.
-- **Risk:** a future second compound template is added carelessly,
-  reusing `_matching_compound_workflow_template()`'s five-field check
-  ambiguously. **Mitigation:** explicitly out of scope (Section 17);
-  any second template requires its own fresh planning gate.
+- **Risk:** the observer's `after_step` veto path (checkpoint failure
+  after a successful tool call) is easy to get subtly wrong inside
+  `_stop()`, e.g. mis-attributing the error as an ordinary tool
+  failure. **Mitigation:** a dedicated, distinctly-worded synthetic
+  `ToolResult.error` and a structural test asserting the two failure
+  shapes remain distinguishable in `WorkflowHistoryStore`'s own
+  recorded detail.
+- **Risk:** `reconstruct_claimed_compound_plan()` duplicates
+  `_try_reconstruct_paused_workflow()`'s logic and drifts over time.
+  **Mitigation:** implement it as a thin wrapper delegating to the
+  same private helper, not a second copy.
+- **Risk:** the 14-point fingerprint becomes a maintenance burden if a
+  second compound template is ever added. **Mitigation:** explicitly
+  out of scope (unchanged from `aa92241` §17); a second template
+  requires its own fresh planning gate and its own fingerprint.
+- **Risk:** the new startup passes (Sections 14, 16) add real latency
+  to every restart. **Mitigation:** both are bounded by the number of
+  CLAIMED/PENDING rows, identical in cost class to the existing,
+  already-accepted generic passes.
 
 ## 24. Stop conditions
 
-Unchanged from the task's own list; restated as directly applicable
-given this audit's findings: stop if any existing single-capability
-test's behaviour changes; if a second claimant can ever execute; if a
-completed/consumed compound workflow can replay; if any of the three
-environments fails; if Ruff exits nonzero; if `git diff --check` is
-not clean; if the approval-text extension cannot preflight as YELLOW
-and no safe fallback is accepted; if a crash window resolves to
-anything other than the existing `CLAIM_INTERRUPTED`/PENDING/CONSUMED
-vocabulary.
+Unchanged in spirit from `aa92241`, restated with the corrections:
+stop if progress is still written only after `resume()` returns; if
+synchronous execution is used to dismiss any inter-step crash window;
+if generic CLAIMED reconciliation runs before compound recovery; if an
+inherited CLAIMED compound workflow requires a second
+`APPROVED_UNCONSUMED → CLAIMED` claim; if progress can be missing when
+an approval is accepted; if plan and progress identities can disagree
+without failing closed; if a checkpoint failure allows the next step
+to run; if Step 1 can repeat after durable completion; if current
+ProjectState equality is treated as universal execution proof; if
+verification is fabricated from the final field value outside the
+verifier tool's own call; if an arbitrary three-step plan can enter
+compound recovery; or if the work no longer fits safely into Batch 2
+without a further foundation batch (assessed above: it still does).
 
 ## 25. Manual Anthropic limitation
 
-Live Anthropic acceptance remains postponed due to insufficient API
-credits — an external, non-technical limitation. No production code
-bypasses it. Batch 2's tests exercise the compound plan/execution/
-restart lifecycle entirely through direct construction and a fake
-provider, exactly like every other AI-adjacent test in this
-repository; Batch 3's live-routing tests likewise use a fake
-`AIProvider`, never a real Anthropic call.
+Unchanged from `aa92241` — live Anthropic acceptance remains postponed
+due to insufficient API credits; no production code bypasses it;
+Batch 2/3 tests use direct construction and a fake provider throughout.
 
-## 26. Acceptance criteria for this planning gate itself
+## 26. Acceptance criteria for this planning amendment itself
 
-- Repository-grounded: every function/file named above was read this
-  session, not assumed.
-- No production or test file changed.
+- Every correction above is grounded in a specific, named code
+  location already read this session or the prior one (`workflow/engine.py`'s
+  `_run_from()`/`resume()`/`_stop()`/`_try_reconstruct_paused_workflow()`,
+  `main.py`'s `reconcile_claimed_handoffs()`/`_reconcile_claimed_rows()`,
+  `approval/approval_manager.py`'s `invalidate_pending()`,
+  `workflow/paused_workflow_store.py`'s `delete()`/`get()`).
+- No production or test file changed by this amendment.
 - Phase 98 implementation not started; no live compound behaviour
   exists after this commit.
