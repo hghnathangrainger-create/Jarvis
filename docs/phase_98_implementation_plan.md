@@ -865,3 +865,17 @@ handoff safety interlock required before Batch 2 may begin is planned
 separately in `docs/phase_98_approval_handoff_plan.md`, which controls
 the exact required correction. No live compound wiring may begin until
 that interlock is implemented and formally accepted.
+
+## 19. Live Compound Re-entry Planning Gate — Reference
+
+The interlock referenced in Section 18 is now formally closed (commit
+`5f0b43c`). The re-entry planning gate for Phase 98 Batch 2/3 — live
+discriminator routing, trusted plan construction, progress-row
+integration, crash-window analysis, and the exact remaining-batch
+split — is planned separately in
+`docs/phase_98_live_compound_reentry_plan.md`. Selected outcome:
+Batch 2 builds the complete internal compound execution/restart/
+reconciliation lifecycle dormant (no live AI routing, unreachable by
+any user); Batch 3 activates live routing and closes Phase 98's
+compound work. No Phase 98 implementation has started as of this
+planning gate.
