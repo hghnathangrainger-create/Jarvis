@@ -69,6 +69,12 @@ _PLANNING_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
         "select_tool",
         "_select_compound_tool_sequence",
         "_build_phase_update_verify_show_workflow_plan",
+        # Phase 99, Batch 1: the second, dormant compound template's
+        # own plan builder - its own docstring names it a "compound
+        # template" for documentation purposes, exactly mirroring its
+        # ProjectState sibling above; never called live (see
+        # test_phase99_batch1_isolation.py's own confinement proof).
+        "_build_schedule_enable_verify_show_workflow_plan",
     }
 )
 

@@ -427,10 +427,14 @@ def test_project_state_update_phase_capability_exists_and_no_further_expansion_o
 ):
     """Confirms Phase 96 added exactly one new capability -
     PROJECT_STATE_UPDATE_PHASE, reusing the existing
-    PROJECT_STATE_VERIFY_FOCUS verifier - and nothing else: no
+    PROJECT_STATE_VERIFY_FOCUS verifier - and nothing else beyond it, no
     PROJECT_STATE_UPDATE_BRANCH/COMMIT/SUITE, no SCHEDULE_CREATE, no
-    schedule update/delete, and the real catalog contains exactly
-    these thirteen members."""
+    schedule update/delete, ever occurred. Phase 99, Batch 1 later adds
+    exactly one further, real, non-internal member,
+    SCHEDULE_SHOW_ENABLED_STATE - included in the set below, since this
+    test's own exact-membership assertion must stay honest about the
+    catalog's real, current contents rather than freeze it at its
+    Phase-96 snapshot forever."""
     assert any(
         member is CapabilityId.PROJECT_STATE_UPDATE_PHASE for member in CapabilityId
     )
@@ -454,6 +458,7 @@ def test_project_state_update_phase_capability_exists_and_no_further_expansion_o
         "schedule_verify_enabled_state",
         "schedule_disable",
         "project_state_update_phase",
+        "schedule_show_enabled_state",
     }
 
 

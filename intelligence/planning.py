@@ -118,7 +118,7 @@ from tools.registry import ToolRegistry
 #: independently enforces this too, so a model that ignores this
 #: instruction is still rejected.
 _TRUSTED_PLANNING_INSTRUCTION = (
-    "You are Jarvis's tool-selection planner. Exactly eleven capabilities "
+    "You are Jarvis's tool-selection planner. Exactly twelve capabilities "
     "are available to you:\n"
     "\n"
     '1. capability id "project_state_show" - shows the current '
@@ -183,6 +183,13 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     'arguments.value (a non-empty string). This action requires your '
     "explicit approval and will be verified with a structured read-back "
     "after it runs.\n"
+    "\n"
+    '12. capability id "schedule_show_enabled_state" - shows whether '
+    "one of your configured schedules, by its exact id, is currently "
+    "enabled or disabled. Use this only when the request explicitly "
+    "asks to check or show one specific schedule's enabled state by "
+    "id. Include the exact schedule id in arguments.schedule_id (an "
+    "integer). Takes no approval - read-only.\n"
     "\n"
     'Two further capability ids, "project_state_verify_focus" and '
     '"schedule_verify_enabled_state", exist only internally - neither '
@@ -256,6 +263,10 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     '{"decision": "execute", "capability_id": '
     '"project_state_update_phase", "arguments": {"value": "the '
     'requested new phase"}}\n'
+    "\n"
+    "Execute (check schedule enabled state):\n"
+    '{"decision": "execute", "capability_id": '
+    '"schedule_show_enabled_state", "arguments": {"schedule_id": 5}}\n'
     "\n"
     "Execute sequence (update phase, then show - the one fixed "
     "compound shape):\n"
@@ -1017,6 +1028,190 @@ def _build_phase_update_verify_show_workflow_plan(
             requires_verified_predecessor=True,
             verification_field_name="phase",
             verification_expected_value=approved_phase_value,
+        ),
+    )
+    return Plan(user_request=request_text, steps=steps)
+
+
+def _build_schedule_enable_verify_show_workflow_plan(
+    request_text: str,
+    *,
+    approved_schedule_id: int,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> Plan | str:
+    """Deterministically construct the fixed, exactly-three-step trusted
+    Plan for the second Phase 99 compound template (Batch 1, dormant -
+    docs/phase_99_second_compound_template_planning.md): SCHEDULE_ENABLE
+    -> SCHEDULE_VERIFY_ENABLED_STATE (trusted, model-invisible) ->
+    SCHEDULE_SHOW_ENABLED_STATE, with Step 3 gated on Step 2's own real
+    VerificationResult via PlanStep.requires_verified_predecessor,
+    exactly mirroring _build_phase_update_verify_show_workflow_plan()'s
+    own established shape.
+
+    Never called by select_tool() or any other live path in Batch 1 -
+    only this module's own dedicated tests, and a future, separately-
+    approved Batch 3 wiring, ever call this function. The AI never
+    selects, orders, or configures Steps 2/3: both are always this
+    function's own fixed, trusted insertion. Unlike the ProjectState
+    template's own Step 2/3 (which take no arguments beyond an
+    implicit singleton-row read), both steps here need the same
+    `schedule_id` threaded through - a small, hand-written, two-step
+    propagation specific to this one builder, never a generic
+    variable-passing mechanism.
+
+    Args:
+        request_text: The verbatim natural request (becomes
+            Plan.user_request).
+        approved_schedule_id: The exact, already-validated, already-
+            cross-step-identity-checked schedule id (from a
+            ParsedCompoundToolSelection's own step 1 argument, already
+            passed through intelligence.structured_output's shared
+            _validate_arguments() by the compound parser, and already
+            confirmed to equal step 2's own declared value by
+            intelligence.schedule_compound_grounding's own cross-step
+            check - never re-validated or re-read from model output
+            here).
+        tool_registry: Used only for has_tool()/get_tool() during
+            preflight.
+        security_manager: Used only for classify_action() during
+            preflight.
+        session_id: Optional session identifier for the preflight
+            ToolRequest only.
+        catalog: The capability catalog to resolve
+            SCHEDULE_ENABLE, its paired verifier, and
+            SCHEDULE_SHOW_ENABLED_STATE from.
+
+    Returns:
+        A real, three-step Plan ready for WorkflowEngine.run(), or a
+        short, bounded failure reason string if any of the three
+        capabilities is not configured, not present in the catalog, or
+        fails its own preflight - never an exception, matching this
+        module's existing "expected, describable outcome" convention.
+    """
+    write_adapter = catalog.get(CapabilityId.SCHEDULE_ENABLE)
+    if write_adapter is None:
+        return "the schedule-enable capability is not configured"
+
+    write_preflight = _preflight_capability(
+        write_adapter,
+        arguments={"schedule_id": approved_schedule_id},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(write_preflight, str):
+        return write_preflight
+    write_tool_input, write_decision = write_preflight
+
+    if write_adapter.paired_verify_capability_id is None:
+        return "the internal verification capability is not configured"
+    verify_adapter = catalog.get(write_adapter.paired_verify_capability_id)
+    if verify_adapter is None:
+        return "the internal verification capability is not configured"
+
+    verify_preflight = _preflight_capability(
+        verify_adapter,
+        arguments={"schedule_id": approved_schedule_id},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(verify_preflight, str):
+        return f"internal verification capability preflight failed: {verify_preflight}"
+    verify_tool_input, verify_decision = verify_preflight
+
+    show_adapter = catalog.get(CapabilityId.SCHEDULE_SHOW_ENABLED_STATE)
+    if show_adapter is None:
+        return "the schedule-show-enabled-state capability is not configured"
+
+    show_preflight = _preflight_capability(
+        show_adapter,
+        arguments={"schedule_id": approved_schedule_id},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(show_preflight, str):
+        return f"schedule-show-enabled-state capability preflight failed: {show_preflight}"
+    show_tool_input, show_decision = show_preflight
+
+    write_tool = tool_registry.get_tool(write_adapter.tool_name)
+    assert write_tool is not None  # guaranteed by this function's own preflight
+    write_action = write_tool.action_for(
+        ToolRequest(
+            tool_name=write_adapter.tool_name,
+            input_data=write_tool_input,
+            session_id=session_id,
+        )
+    )
+    write_reason = security_manager.classify_action(write_action).reason
+    # PlanStep.action is display/approval-text metadata only -
+    # ToolExecutor.execute() always re-derives the real classification
+    # text fresh from the live tool's own action_for() at both
+    # preflight (_preflight_capability(), just above) and real
+    # execution time, never from this field - see
+    # _build_phase_update_verify_show_workflow_plan()'s own identical
+    # reasoning. It is therefore safe to extend it here, honestly
+    # naming the full conditional sequence being approved.
+    write_action_display = (
+        f"{write_action}, then verify the stored enabled state durably "
+        "matches, and - only if that verification succeeds - show that "
+        "schedule's resulting enabled state"
+    )
+
+    verify_tool = tool_registry.get_tool(verify_adapter.tool_name)
+    assert verify_tool is not None
+    verify_action = verify_tool.action_for(
+        ToolRequest(
+            tool_name=verify_adapter.tool_name,
+            input_data=verify_tool_input,
+            session_id=session_id,
+        )
+    )
+
+    show_tool = tool_registry.get_tool(show_adapter.tool_name)
+    assert show_tool is not None
+    show_action = show_tool.action_for(
+        ToolRequest(
+            tool_name=show_adapter.tool_name,
+            input_data=show_tool_input,
+            session_id=session_id,
+        )
+    )
+
+    steps = (
+        PlanStep(
+            number=1,
+            description=write_adapter.description,
+            action=write_action_display,
+            tier=write_decision.tier,
+            reason=write_reason,
+            tool_name=write_adapter.tool_name,
+            tool_input=write_tool_input,
+        ),
+        PlanStep(
+            number=2,
+            description=verify_adapter.description,
+            action=verify_action,
+            tier=verify_decision.tier,
+            reason=verify_decision.reason,
+            tool_name=verify_adapter.tool_name,
+            tool_input=verify_tool_input,
+        ),
+        PlanStep(
+            number=3,
+            description=show_adapter.description,
+            action=show_action,
+            tier=show_decision.tier,
+            reason=show_decision.reason,
+            tool_name=show_adapter.tool_name,
+            tool_input=show_tool_input,
+            requires_verified_predecessor=True,
+            verification_field_name="enabled_str",
+            verification_expected_value="true",
         ),
     )
     return Plan(user_request=request_text, steps=steps)

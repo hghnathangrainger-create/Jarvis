@@ -28,7 +28,9 @@ two-step exception (update phase, then - only if verification
 succeeds - show project state) - the internal-only
 project_state_verify/schedule_verify_enabled_state tools, and the
 internal decision literal naming this exception, are deliberately
-never documented here, since neither is user-facing).
+never documented here, since neither is user-facing; updated Phase 99,
+Batch 1 to describe the same command's new read-only schedule-
+enabled-state-by-id capability).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -178,7 +180,9 @@ _HELP_LINES: tuple[str, ...] = (
     "manually-maintained project state, report basic Jarvis system health, "
     "list your configured schedules, list your most recently stored "
     "memories, search your stored memories for a query, show your recent "
-    "approval history, or show your recent workflow history (all "
+    "approval history, show your recent workflow history, or show whether "
+    "one of your existing schedules, by its exact id, is currently enabled "
+    "or disabled (all "
     "read-only, no approval needed - the same data 'show jarvis project "
     "state'/'health check'/'list schedules'/'show memories'/'search "
     "memories'/'show approval history'/'show workflow history' already "

@@ -251,9 +251,16 @@ def test_bare_status_does_not_ground_health_check() -> None:
 
 
 def test_check_schedule_status_does_not_ground_health_check() -> None:
+    """Phase 99, Batch 1 intentionally changes this expectation: "check"
+    + "schedule" now legitimately satisfies SCHEDULE_SHOW_ENABLED_STATE's
+    own signature (added this batch), so the request is no longer
+    signature-less - it correctly refuses HEALTH_CHECK specifically as
+    a unique-match mismatch instead. This is the same real, deliberate
+    collision-avoidance boundary test_schedule_show_enabled_state_does_not_collide_with_health_check
+    proves from the other capability's own side."""
     result = _ground("check schedule status", CapabilityId.HEALTH_CHECK)
     assert result.grounded is False
-    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
 
 
 def test_check_project_status_does_not_ground_health_check() -> None:
@@ -1651,13 +1658,167 @@ def test_internal_project_state_verifier_remains_absent_from_grounding_after_pha
     assert CapabilityId.PROJECT_STATE_VERIFY_FOCUS not in _SIGNATURES
 
 
-def test_all_eleven_user_facing_capabilities_retain_one_collision_free_accepted_phrasing() -> (
+
+# ---------------------------------------------------------------------------
+# 17. Phase 99, Batch 1: SCHEDULE_SHOW_ENABLED_STATE signature and numeric
+#    attribution.
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_show_enabled_state_real_phrasing_is_grounded() -> None:
+    result = _ground(
+        "check the enabled state of schedule 5",
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        schedule_id=5,
+    )
+    assert result.grounded is True
+
+
+def test_schedule_show_enabled_state_exact_id_is_extracted() -> None:
+    result = _ground(
+        "check the enabled state of schedule 12",
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        schedule_id=12,
+    )
+    assert result.grounded is True
+
+
+def test_schedule_show_enabled_state_wrong_id_refuses() -> None:
+    result = _ground(
+        "check the enabled state of schedule 5",
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        schedule_id=6,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.ARGUMENT_VALUE_MISMATCH
+
+
+def test_schedule_show_enabled_state_missing_marker_refuses() -> None:
+    result = _ground(
+        "please check it", CapabilityId.SCHEDULE_SHOW_ENABLED_STATE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_show_enabled_state_multiple_markers_refuses() -> None:
+    result = _ground(
+        "check the enabled state of schedule 5 and schedule 6",
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        schedule_id=5,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN
+
+
+def test_schedule_show_enabled_state_negated_request_refuses() -> None:
+    result = _ground(
+        "do not check the enabled state of schedule 5",
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        schedule_id=5,
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NEGATED_OR_CONFLICTING_REQUEST
+
+
+def test_schedule_show_enabled_state_action_without_domain_refuses() -> None:
+    result = _ground(
+        "please check this", CapabilityId.SCHEDULE_SHOW_ENABLED_STATE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.NO_SIGNATURE_MATCHED
+
+
+def test_schedule_show_enabled_state_does_not_collide_with_schedule_list() -> None:
+    """The whole reason this capability uses "check" rather than
+    "show"/"list": SCHEDULE_LIST's own signature has no qualifier, so
+    reusing its action words here would make every request satisfy
+    both signatures at once - this test proves that risk was actually
+    avoided, not merely reasoned about. "show my schedules" matches
+    only SCHEDULE_LIST's own signature (no "check" token present), so
+    grounding it against this capability instead correctly refuses as
+    a unique-match mismatch, never MULTIPLE_SIGNATURES_MATCHED."""
+    result = _ground(
+        "show my schedules", CapabilityId.SCHEDULE_SHOW_ENABLED_STATE, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_schedule_show_enabled_state_does_not_collide_with_enable_or_disable() -> None:
+    enable_request_grounds_show = _ground(
+        "enable schedule 5", CapabilityId.SCHEDULE_SHOW_ENABLED_STATE, schedule_id=5
+    )
+    assert enable_request_grounds_show.grounded is False
+    assert (
+        enable_request_grounds_show.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+    show_request_grounds_enable = _ground(
+        "check the enabled state of schedule 5",
+        CapabilityId.SCHEDULE_ENABLE,
+        schedule_id=5,
+    )
+    assert show_request_grounds_enable.grounded is False
+    assert (
+        show_request_grounds_enable.reason
+        is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+    )
+
+
+def test_schedule_show_enabled_state_does_not_collide_with_health_check() -> None:
+    """"check" is shared with HEALTH_CHECK's own action token - safe
+    only because the two domains ("schedule"/"schedules" vs. "health")
+    never co-occur in a real request; this test proves that directly:
+    a real schedule-check request matches only this capability's own
+    signature, so grounding it against HEALTH_CHECK instead correctly
+    refuses as a unique-match mismatch, never a collision."""
+    result = _ground(
+        "check the enabled state of schedule 5", CapabilityId.HEALTH_CHECK, schedule_id=5
+    )
+    assert result.grounded is False
+    assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_schedule_show_enabled_state_does_not_collide_with_any_other_existing_capability() -> (
     None
 ):
-    """Every one of the eleven model-selectable capabilities has at
+    request = "check the enabled state of schedule 5"
+    other_capabilities = (
+        CapabilityId.PROJECT_STATE_SHOW,
+        CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
+        CapabilityId.HEALTH_CHECK,
+        CapabilityId.SCHEDULE_LIST,
+        CapabilityId.MEMORY_LIST_RECENT,
+        CapabilityId.MEMORY_SEARCH,
+        CapabilityId.APPROVAL_HISTORY,
+        CapabilityId.WORKFLOW_HISTORY,
+        CapabilityId.SCHEDULE_ENABLE,
+        CapabilityId.SCHEDULE_DISABLE,
+        CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+    )
+    for capability_id in other_capabilities:
+        result = _ground(request, capability_id, value="irrelevant")
+        assert result.grounded is False
+        assert result.reason is UngroundedReason.SELECTED_CAPABILITY_NOT_UNIQUE_MATCH
+
+
+def test_internal_schedule_verifier_remains_absent_from_grounding_after_phase_99() -> (
+    None
+):
+    from intelligence.grounding import _SIGNATURES
+
+    assert CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE not in _SIGNATURES
+
+
+def test_all_twelve_user_facing_capabilities_retain_one_collision_free_accepted_phrasing() -> (
+    None
+):
+    """Every one of the twelve model-selectable capabilities has at
     least one real, accepted phrasing that grounds it and only it -
     proving the catalogue-wide uniqueness rule holds across the
-    complete, Phase-96-expanded signature table."""
+    complete, Phase-99-expanded signature table."""
     cases = (
         ("show my project state", CapabilityId.PROJECT_STATE_SHOW, {}),
         (
@@ -1685,6 +1846,11 @@ def test_all_eleven_user_facing_capabilities_retain_one_collision_free_accepted_
             "update my project phase to Phase 96",
             CapabilityId.PROJECT_STATE_UPDATE_PHASE,
             {"value": "Phase 96"},
+        ),
+        (
+            "check the enabled state of schedule 5",
+            CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+            {"schedule_id": 5},
         ),
     )
     for request_text, capability_id, arguments in cases:

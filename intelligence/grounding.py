@@ -299,13 +299,15 @@ class _IntentSignature:
     qualifier_tokens: tuple[str, ...] = ()
 
 
-#: Exactly the eleven model-selectable capabilities (Section 20.2's
+#: Exactly the twelve model-selectable capabilities (Section 20.2's
 #: final table for the original six; docs/phase_93_implementation_plan.md
 #: for APPROVAL_HISTORY/WORKFLOW_HISTORY, added Phase 93, Batch 1;
 #: docs/phase_94_implementation_plan.md, Section 6, for SCHEDULE_ENABLE,
 #: added Phase 94, Batch 2; docs/phase_95_implementation_plan.md for
 #: SCHEDULE_DISABLE, added Phase 95; docs/phase_96_implementation_plan.md
-#: for PROJECT_STATE_UPDATE_PHASE, added Phase 96). project_state_verify_focus
+#: for PROJECT_STATE_UPDATE_PHASE, added Phase 96;
+#: docs/phase_99_second_compound_template_planning.md for
+#: SCHEDULE_SHOW_ENABLED_STATE, added Phase 99, Batch 1). project_state_verify_focus
 #: and schedule_verify_enabled_state are both deliberately absent - both
 #: are internal_only and can never be a parsed EXECUTE decision's
 #: capability_id (intelligence/structured_output.py already rejects
@@ -384,6 +386,23 @@ _SIGNATURES: dict[CapabilityId, _IntentSignature] = {
         # Phase 95: no qualifier needed - "disable" is not an action
         # token of any other signature (including SCHEDULE_ENABLE's own
         # "enable"), so no collision requires a third dimension.
+    ),
+    CapabilityId.SCHEDULE_SHOW_ENABLED_STATE: _IntentSignature(
+        action_tokens=("check",),
+        domain_tokens=("schedule", "schedules"),
+        # Phase 99, Batch 1: deliberately "check", never "show"/"list" -
+        # both of those are already SCHEDULE_LIST's own action tokens,
+        # and SCHEDULE_LIST's own signature has no qualifier requirement
+        # at all (domain: "schedule"/"schedules" alone already
+        # satisfies it). Reusing "show"/"list" here would make any
+        # request mentioning both an action word and "schedule" satisfy
+        # *both* signatures at once - an unresolvable
+        # MULTIPLE_SIGNATURES_MATCHED ambiguity for every phrase this
+        # capability needs, since SCHEDULE_LIST's own existing behavior
+        # must never be narrowed to accommodate this addition. "check"
+        # collides with no other action token except HEALTH_CHECK's own
+        # - safe, since that capability's distinct "health" domain never
+        # co-occurs with "schedule" in a real request.
     ),
 }
 
@@ -481,6 +500,10 @@ _NUMERIC_ARGUMENT_MARKER_BY_CAPABILITY: dict[CapabilityId, str] = {
     # own marker. "enable schedule 5" and "disable schedule 5" are
     # never ambiguous with each other.
     CapabilityId.SCHEDULE_DISABLE: " schedule ",
+    # Phase 99, Batch 1: shared verbatim too - safe for the identical
+    # reason, disambiguated by action_tokens ("check" vs "enable"/
+    # "disable").
+    CapabilityId.SCHEDULE_SHOW_ENABLED_STATE: " schedule ",
 }
 
 

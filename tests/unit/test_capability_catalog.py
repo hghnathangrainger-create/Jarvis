@@ -23,11 +23,12 @@ from intelligence.capability_catalog import (
     CapabilityId,
     ExecutionStrategy,
     build_tool_input,
+    fixed_arguments_for,
     get_adapter,
 )
 
 
-def test_catalog_contains_exactly_the_thirteen_phase_96_entries() -> None:
+def test_catalog_contains_exactly_the_fourteen_phase_99_batch1_entries() -> None:
     assert set(CAPABILITY_CATALOG) == {
         CapabilityId.PROJECT_STATE_SHOW,
         CapabilityId.PROJECT_STATE_UPDATE_FOCUS,
@@ -42,6 +43,7 @@ def test_catalog_contains_exactly_the_thirteen_phase_96_entries() -> None:
         CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
         CapabilityId.SCHEDULE_DISABLE,
         CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
     }
 
 
@@ -60,6 +62,7 @@ def test_no_other_capability_id_exists() -> None:
         "schedule_verify_enabled_state",
         "schedule_disable",
         "project_state_update_phase",
+        "schedule_show_enabled_state",
     }
 
 
@@ -87,7 +90,7 @@ def test_verify_focus_adapter_fields_are_exact() -> None:
     assert adapter.internal_only is True
 
 
-def test_only_eleven_capabilities_are_model_selectable() -> None:
+def test_only_twelve_capabilities_are_model_selectable() -> None:
     selectable = {
         capability_id
         for capability_id, adapter in CAPABILITY_CATALOG.items()
@@ -105,6 +108,7 @@ def test_only_eleven_capabilities_are_model_selectable() -> None:
         CapabilityId.SCHEDULE_ENABLE,
         CapabilityId.SCHEDULE_DISABLE,
         CapabilityId.PROJECT_STATE_UPDATE_PHASE,
+        CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
     }
 
 
@@ -464,6 +468,31 @@ def test_schedule_disable_adapter_fields_are_exact() -> None:
         is CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE
     )
     assert adapter.paired_verify_input_keys == ("schedule_id",)
+
+
+# --- Phase 99, Batch 1: SCHEDULE_SHOW_ENABLED_STATE -------------------------
+
+
+def test_schedule_show_enabled_state_adapter_fields_are_exact() -> None:
+    adapter = CAPABILITY_CATALOG[CapabilityId.SCHEDULE_SHOW_ENABLED_STATE]
+    assert adapter.capability_id is CapabilityId.SCHEDULE_SHOW_ENABLED_STATE
+    assert adapter.tool_name == "schedule_show_enabled_state"
+    assert [spec.name for spec in adapter.arguments] == ["schedule_id"]
+    assert adapter.arguments[0].type_name == "int"
+    assert adapter.arguments[0].required is True
+    assert adapter.allowed_strategy is ExecutionStrategy.SINGLE_TOOL
+    assert adapter.max_execution_tier is SecurityTier.GREEN
+    assert adapter.verification_strategy_id is None
+    assert adapter.internal_only is False
+    assert adapter.paired_verify_capability_id is None
+    assert adapter.paired_verify_input_keys == ()
+
+
+def test_schedule_show_enabled_state_has_no_fixed_arguments_or_key_renames() -> None:
+    """Unlike memory_search/project_state_update_focus/etc., this
+    capability's real tool input matches its own declared schedule_id
+    argument one-to-one - no fixed literal, no key rename."""
+    assert fixed_arguments_for(CapabilityId.SCHEDULE_SHOW_ENABLED_STATE) == {}
 
 
 def test_schedule_enable_still_expects_true_and_disable_expects_false_by_construction() -> (

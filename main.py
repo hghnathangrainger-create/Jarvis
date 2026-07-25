@@ -132,6 +132,7 @@ from tools.builtin import (
     ScheduleDisableTool,
     ScheduleEnableTool,
     ScheduleListTool,
+    ScheduleShowEnabledStateTool,
     ScheduleVerifyEnabledStateTool,
     WebSearchTool,
     WebpageReadTool,
@@ -284,6 +285,11 @@ def build_orchestrator() -> JarvisOrchestrator:
     # always observe identical durable state. Never reachable via
     # CommandRouter grammar; never selectable by AI output.
     registry.register_tool(ScheduleVerifyEnabledStateTool(schedule_store))
+    # Real, public, read-only capability (Phase 99, Batch 1) - shares
+    # this exact same ScheduleStore. No CommandRouter grammar entry;
+    # selectable only through the existing, unmodified generic
+    # "ask jarvis to:" single-capability path.
+    registry.register_tool(ScheduleShowEnabledStateTool(schedule_store))
 
     # Web search (Phase 16): Jarvis's first external-network tool.
     # Read-only, GREEN, and deliberately provider-independent - this is

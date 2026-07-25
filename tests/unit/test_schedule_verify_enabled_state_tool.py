@@ -111,13 +111,109 @@ def test_bool_schedule_id_is_rejected_not_coerced() -> None:
     assert result.success is False
 
 
-def test_metadata_contains_only_schedule_id_and_enabled() -> None:
+def test_metadata_contains_only_schedule_id_enabled_and_enabled_str() -> None:
     """Data minimization: no query, time_of_day, name, or last_run_at
-    metadata is returned."""
+    metadata is returned. Phase 99, Batch 1 intentionally adds exactly
+    one more key, "enabled_str" - this assertion is updated, not
+    weakened, to reflect that additive change."""
     store = _store()
     record = store.create(query="test query", time_of_day="09:00", name="daily")
     result = _run(ScheduleVerifyEnabledStateTool(store), record.id)
-    assert set(result.metadata) == {"schedule_id", "enabled"}
+    assert set(result.metadata) == {"schedule_id", "enabled", "enabled_str"}
+
+
+# --- Phase 99, Batch 1: additive "enabled_str" contract -------------------------
+
+
+def test_enabled_schedule_reports_canonical_enabled_str_true() -> None:
+    store = _store()
+    record = store.create(query="test query", time_of_day="09:00")
+    result = _run(ScheduleVerifyEnabledStateTool(store), record.id)
+    assert result.metadata["enabled"] is True
+    assert result.metadata["enabled_str"] == "true"
+
+
+def test_disabled_schedule_reports_canonical_enabled_str_false() -> None:
+    store = _store()
+    record = store.create(query="test query", time_of_day="09:00")
+    store.disable(record.id)
+    result = _run(ScheduleVerifyEnabledStateTool(store), record.id)
+    assert result.metadata["enabled"] is False
+    assert result.metadata["enabled_str"] == "false"
+
+
+def test_enabled_str_is_always_exactly_lowercase_true_or_false() -> None:
+    store = _store()
+    enabled_record = store.create(query="q1", time_of_day="09:00")
+    disabled_record = store.create(query="q2", time_of_day="10:00")
+    store.disable(disabled_record.id)
+
+    enabled_result = _run(ScheduleVerifyEnabledStateTool(store), enabled_record.id)
+    disabled_result = _run(ScheduleVerifyEnabledStateTool(store), disabled_record.id)
+
+    assert enabled_result.metadata["enabled_str"] in {"true", "false"}
+    assert disabled_result.metadata["enabled_str"] in {"true", "false"}
+    assert enabled_result.metadata["enabled_str"] == "true"
+    assert disabled_result.metadata["enabled_str"] == "false"
+
+
+def test_enabled_and_enabled_str_never_disagree() -> None:
+    """Both fields are derived from the exact same observation in the
+    same statement - this test proves the invariant holds for both
+    boolean states, not merely that it holds for one."""
+    store = _store()
+    for should_disable in (False, True):
+        record = store.create(query="q", time_of_day="09:00")
+        if should_disable:
+            store.disable(record.id)
+        result = _run(ScheduleVerifyEnabledStateTool(store), record.id)
+        assert (result.metadata["enabled_str"] == "true") is (
+            result.metadata["enabled"] is True
+        )
+
+
+def test_enabled_str_is_derived_from_observed_state_never_from_a_parameter() -> None:
+    """Structural proof: run()'s own signature takes no expected/
+    requested/approved value at all - only `self` and `request` - and
+    enabled_str's own computation reads the freshly-fetched record's
+    "enabled" attribute directly, in the same expression as the
+    existing boolean key, with no other value ever in scope to read
+    from instead."""
+    node = next(
+        n
+        for n in ast.walk(ast.parse(inspect.getsource(ScheduleVerifyEnabledStateTool)))
+        if isinstance(n, ast.FunctionDef) and n.name == "run"
+    )
+    arg_names = {arg.arg for arg in node.args.args}
+    assert arg_names == {"self", "request"}
+
+    source = inspect.getsource(ScheduleVerifyEnabledStateTool.run)
+    assert 'record.enabled else "false"' in source
+
+
+def test_existing_boolean_metadata_key_and_type_are_unchanged() -> None:
+    store = _store()
+    record = store.create(query="test query", time_of_day="09:00")
+    result = _run(ScheduleVerifyEnabledStateTool(store), record.id)
+    assert isinstance(result.metadata["enabled"], bool)
+    assert result.metadata["enabled"] is True
+
+
+def test_no_existing_verifier_reader_prefers_the_string_field() -> None:
+    """Structural proof: neither the shared verification function nor
+    either existing workflow's own response translator ever references
+    "enabled_str" - both remain wired exclusively to the unchanged
+    boolean "enabled" key."""
+    import intelligence.verification as verification_module
+    from core.orchestrator import JarvisOrchestrator
+
+    assert "enabled_str" not in inspect.getsource(verification_module)
+    assert "enabled_str" not in inspect.getsource(
+        JarvisOrchestrator._schedule_enable_workflow_result_to_response
+    )
+    assert "enabled_str" not in inspect.getsource(
+        JarvisOrchestrator._schedule_disable_workflow_result_to_response
+    )
 
 
 def test_output_is_short_and_honest() -> None:

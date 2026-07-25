@@ -103,12 +103,19 @@ class TestNoLiveCompoundParserDispatch:
         Foundation B) adds exactly one, dormant consumer:
         _build_phase_update_verify_show_workflow_plan(), a private
         helper never called by select_tool() or any other live entry
-        point (see the companion test immediately below). This test is
-        updated, not weakened: it now proves the verification-gate
-        reference is confined entirely to that one function, and that
-        CompoundWorkflowProgress itself is still never referenced by
-        this module at all - progress persistence lives entirely in
-        core/compound_workflow.py, never here."""
+        point (see the companion test immediately below). Phase 99,
+        Batch 1 adds a second, sibling dormant consumer,
+        _build_schedule_enable_verify_show_workflow_plan(), for exactly
+        the same reason (its own Step 3 needs the identical
+        verification gate) - equally never called live (see
+        test_phase99_batch1_isolation.py's own confinement proof). This
+        test is updated, not weakened: it now proves the verification-
+        gate reference is confined entirely to those two functions, and
+        that CompoundWorkflowProgress itself is still never referenced
+        by this module at all - progress persistence lives entirely in
+        core/compound_workflow.py (ProjectState) and would live entirely
+        in a future, separate schedule-specific store (Phase 99, Batch
+        2+), never here."""
         source = _module_source("intelligence/planning.py")
         assert "CompoundWorkflowProgress" not in source
 
@@ -121,7 +128,8 @@ class TestNoLiveCompoundParserDispatch:
                     functions_referencing_gate.add(func_node.name)
 
         assert functions_referencing_gate == {
-            "_build_phase_update_verify_show_workflow_plan"
+            "_build_phase_update_verify_show_workflow_plan",
+            "_build_schedule_enable_verify_show_workflow_plan",
         }
 
     def test_select_tool_never_calls_the_dormant_compound_plan_builder(self) -> None:

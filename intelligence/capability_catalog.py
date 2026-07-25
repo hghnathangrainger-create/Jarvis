@@ -79,7 +79,18 @@ Responsibilities:
       still fully catalog-driven disambiguation: comparing the write
       step's own already-built tool_input against
       fixed_arguments_for(capability_id) (new, public accessor added
-      this phase) - never a hardcoded per-capability check.
+      this phase) - never a hardcoded per-capability check. Phase 99,
+      Batch 1 adds SCHEDULE_SHOW_ENABLED_STATE (model-selectable, GREEN,
+      SINGLE_TOOL, one required integer "schedule_id" argument) - a
+      genuinely new, independently useful, non-internal read capability
+      (unlike SCHEDULE_VERIFY_ENABLED_STATE, its internal-only sibling)
+      closing a real gap: there was previously no way to check one
+      schedule's own enabled state without listing up to 50 schedules
+      at once. Reachable today only through the existing, unmodified
+      generic single-capability "ask jarvis to:" path; a future,
+      separately-approved batch may additionally wire it as the final
+      read step of a second, dormant, fixed multi-step request
+      template.
     - Provide a small, deterministic tool-input builder that copies a
       capability's own declared (model-supplied) arguments, plus - for
       the small number of capabilities that need it - a fixed set of
@@ -135,6 +146,7 @@ class CapabilityId(Enum):
     SCHEDULE_ENABLE = "schedule_enable"
     SCHEDULE_VERIFY_ENABLED_STATE = "schedule_verify_enabled_state"
     SCHEDULE_DISABLE = "schedule_disable"
+    SCHEDULE_SHOW_ENABLED_STATE = "schedule_show_enabled_state"
 
 
 class ExecutionStrategy(Enum):
@@ -431,6 +443,22 @@ CAPABILITY_CATALOG: dict[CapabilityId, CapabilityAdapter] = {
         internal_only=False,
         paired_verify_capability_id=CapabilityId.SCHEDULE_VERIFY_ENABLED_STATE,
         paired_verify_input_keys=("schedule_id",),
+    ),
+    CapabilityId.SCHEDULE_SHOW_ENABLED_STATE: CapabilityAdapter(
+        capability_id=CapabilityId.SCHEDULE_SHOW_ENABLED_STATE,
+        tool_name="schedule_show_enabled_state",
+        description=(
+            "Shows whether one of your configured schedules, by its "
+            "exact id, is currently enabled or disabled. Read-only and "
+            "safe."
+        ),
+        arguments=(
+            CapabilityArgumentSpec(name="schedule_id", type_name="int", required=True),
+        ),
+        allowed_strategy=ExecutionStrategy.SINGLE_TOOL,
+        max_execution_tier=SecurityTier.GREEN,
+        verification_strategy_id=None,
+        internal_only=False,
     ),
 }
 

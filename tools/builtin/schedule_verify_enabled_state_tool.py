@@ -4,6 +4,14 @@ schedule_verify_enabled_state_tool.py
 An internal-only, read-only tool that reports one durable schedule's
 current enabled state in a structured (not human-parsed) form (Phase
 94, Batch 2 - docs/phase_94_implementation_plan.md, Section 13/14).
+Phase 99, Batch 1 (docs/phase_99_second_compound_template_planning.md,
+Section 8.1) adds one additive metadata key, "enabled_str" - a
+canonical "true"/"false" string mirror of the existing "enabled"
+boolean, derived from the exact same observation, needed only so a
+future compound template's Step 3 gate (WorkflowEngine's existing,
+unmodified, string-only verification-gate primitive) can be evaluated
+against this tool's result. The existing "enabled" boolean, and every
+existing reader of it, is completely unchanged.
 
 ScheduleVerifyEnabledStateTool exists solely so the "ask jarvis to:
 enable schedule <id>" workflow can read back the schedule's real,
@@ -145,7 +153,26 @@ class ScheduleVerifyEnabledStateTool(BaseTool):
                 f"Schedule {record.id} is currently "
                 f"{'enabled' if record.enabled else 'disabled'}."
             ),
-            metadata={"schedule_id": record.id, "enabled": record.enabled},
+            metadata={
+                "schedule_id": record.id,
+                "enabled": record.enabled,
+                # Phase 99, Batch 1 (docs/phase_99_second_compound_template_planning.md,
+                # Section 8.1): an additive, canonical string mirror of
+                # the same, already-observed "enabled" boolean above -
+                # computed from the exact same `record.enabled` value,
+                # in this same expression, so the two can never diverge.
+                # Needed only because WorkflowEngine's own
+                # _verification_gate_failure_reason() (and
+                # PlanStep.verification_expected_value) compare a
+                # string, never a bool - this key exists solely to
+                # satisfy that existing, unmodified, string-only gate
+                # for a future compound template; every existing reader
+                # of this tool's metadata (verify_schedule_enabled_state(),
+                # both schedule enable/disable workflow response
+                # translators) continues reading only the unchanged
+                # "enabled" boolean above and never this key.
+                "enabled_str": "true" if record.enabled else "false",
+            },
         )
 
     @staticmethod

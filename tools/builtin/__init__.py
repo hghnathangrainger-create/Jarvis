@@ -106,6 +106,12 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
       94, Batch 2) - never selectable by AI, never a user command;
       reachable only as the fixed second step of the schedule-enable-
       and-verify workflow.
+    - ScheduleShowEnabledStateTool: reads back one schedule's current
+      enabled state by its exact id (Phase 99, Batch 1) - unlike
+      ScheduleVerifyEnabledStateTool, this one is real and public:
+      selectable via "ask jarvis to:", with its own catalog entry, and
+      intended to be shown to the user as a genuine result. Read-only
+      and safe; no CommandRouter grammar entry of its own.
     - ProjectStateUpdateTool: updates one field (branch, phase, commit,
       suite, focus) of Jarvis's manually-maintained project-state
       record (Phase 89, Batch 1). Never inspects git, a subprocess, or
@@ -151,6 +157,9 @@ from tools.builtin.schedule_create_tool import ScheduleCreateTool
 from tools.builtin.schedule_disable_tool import ScheduleDisableTool
 from tools.builtin.schedule_enable_tool import ScheduleEnableTool
 from tools.builtin.schedule_list_tool import ScheduleListTool
+from tools.builtin.schedule_show_enabled_state_tool import (
+    ScheduleShowEnabledStateTool,
+)
 from tools.builtin.schedule_verify_enabled_state_tool import (
     ScheduleVerifyEnabledStateTool,
 )
@@ -191,4 +200,5 @@ __all__ = [
     "ScheduleEnableTool",
     "ScheduleDisableTool",
     "ScheduleVerifyEnabledStateTool",
+    "ScheduleShowEnabledStateTool",
 ]
