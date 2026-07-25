@@ -22,10 +22,13 @@ same command's new verified schedule-disable capability, which reuses
 the identical internal verifier the enable capability already uses;
 updated Phase 96 to describe the same command's new verified
 project-state phase-update capability, which reuses the identical
-internal verifier the focus-update capability already uses - the
-internal-only project_state_verify/schedule_verify_enabled_state
-tools are deliberately never documented here, since neither is a user
-command).
+internal verifier the focus-update capability already uses; updated
+Phase 98, Batch 3 to describe the same command's one narrow, fixed
+two-step exception (update phase, then - only if verification
+succeeds - show project state) - the internal-only
+project_state_verify/schedule_verify_enabled_state tools, and the
+internal decision literal naming this exception, are deliberately
+never documented here, since neither is user-facing).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -198,6 +201,15 @@ _HELP_LINES: tuple[str, ...] = (
     "zero replans, no arbitrary tool access, no autonomous behavior - a "
     "real result is only ever shown after the real, unmodified tool "
     "actually runs.",
+    "  ask jarvis to: update my project phase to <value> and then show my "
+    "project state - the one fixed exception to the single-capability rule "
+    "above: updates the phase field (approval required, verified as above), "
+    "and - only if that verification succeeds - also shows the resulting "
+    "project state in the same reply. The words 'and then' must join "
+    "exactly this one pair, in exactly this order; no other pair, order, "
+    "repetition, or count of steps is ever recognized this way. A decline, "
+    "an approval timeout, or a verification failure or mismatch ends the "
+    "request with an honest explanation and never shows project state.",
 )
 
 

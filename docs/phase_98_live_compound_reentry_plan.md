@@ -848,3 +848,220 @@ identical under all three environments; Ruff clean across the 4-file
 correction scope; `git diff --check` clean. No production or test file
 outside this narrow scope changed. Phase 98 remains open; Batch 3 was
 not started; no live compound behaviour exists.
+
+## 29. Batch 3 implementation evidence — atomic live activation
+
+**Phase 98 is now closed.** The first live bounded compound request -
+`ask jarvis to: update my project phase to <value> and then show my
+project state` - is reachable end-to-end through the real, wired-
+together path, atomically, in one working set: live discriminator
+routing, exact compound parsing/grounding, the trusted three-step
+Plan, progress creation before an actionable approval, one honest
+approval, live claim/resume with observer attachment,
+`CompoundCheckpointError` handling, compound-first startup recovery
+ordering, six-outcome response translation, and help/user-guide
+exposure.
+
+### Live wiring added exactly as designed
+
+- **`intelligence/planning.py`** - `select_tool()` now calls
+  `peek_compound_decision(response.text)` immediately after
+  `router.route()` succeeds; a `True` result commits fully to the new
+  `_select_compound_tool_sequence()` helper (parse → ground → build),
+  never falling back to `parse_tool_selection()`. Three new
+  `PlanningOutcomeKind` members
+  (`EXECUTABLE_COMPOUND_WORKFLOW`/`INVALID_COMPOUND_OUTPUT`/
+  `UNGROUNDED_COMPOUND_SELECTION`). `_TRUSTED_PLANNING_INSTRUCTION`
+  extended with exactly one compound-decision paragraph, naming the one
+  fixed template and explicitly prohibiting any other pair, reversed
+  order, extra steps, or repetition. Step 1's `action` text (display-
+  only, never authoritative for security classification - confirmed via
+  `ToolExecutor.execute()`/`_preflight_capability()` both re-deriving
+  classification fresh from `tool.action_for()`) is honestly extended to
+  describe the full conditional three-step sequence for approval
+  display.
+- **`core/orchestrator.py`** - new `paused_workflow_store`/
+  `compound_progress_store` optional constructor collaborators (default
+  `None`, every existing call site unaffected);
+  `validate_pending_approval_for_transition()` (the live Foundation G
+  wiring point, called from `ui/cli.py` immediately before `approve()`);
+  `_start_compound_update_phase_and_show_workflow()` (runs the plan,
+  then establishes progress before ever returning an actionable
+  approval); `_compound_step_observer_for()` (recognizes the trusted
+  plan purely from durable state - never decision/model output); a
+  rewritten `_claim_and_resume_workflow()` that attaches the observer
+  only for a recognized, approved compound resume, catches
+  `CompoundCheckpointError` in its own block *before* the pre-existing
+  generic `except Exception`, and dispatches to
+  `translate_compound_workflow_result()` for `is_compound` results.
+- **`main.py`** - `build_orchestrator()` constructs and passes through
+  the new `CompoundWorkflowProgressStore`; `reconcile_claimed_handoffs()`
+  rewritten with compound-first ordering: history repair →
+  `repair_or_isolate_pending_compound_progress()` →
+  `reconcile_claimed_compound_workflows()` (a small, dedicated,
+  throwaway compound-only `ToolRegistry`/`ToolExecutor`/
+  `SecurityManager`/`WorkflowEngine` stack, never the full production
+  registry) → the existing, unchanged generic `_reconcile_claimed_rows()`,
+  which now only ever sees rows the compound pass did not already
+  resolve. New `_DurableCompoundApprovalInvalidator` adapter implements
+  the approval-invalidator contract directly against
+  `PendingApprovalStore.mark_expired()` + `ApprovalHistoryStore.record_timeout()`
+  - deliberately never a fresh `ApprovalManager` (which would require an
+  incorrect `reload_pending()` call against the narrow compound-only
+  registry, wrongly invalidating every unrelated real pending approval).
+- **`ui/cli.py`** - `_handle_approval()` calls
+  `validate_pending_approval_for_transition()` immediately before
+  recording an approval decision (never for a decline - decline never
+  transitions to `APPROVED_UNCONSUMED`, so this gate does not apply).
+- **`tools/builtin/help_tool.py`/`docs/user_guide.md`** - exactly one
+  narrow, honest compound example added to each, describing only the
+  fixed phase-update-then-show exception in natural language (`and
+  then`) - never the internal `execute_sequence` decision literal or
+  the internal word "compound," and never implying a general multi-step
+  mechanism exists.
+
+### Design correction discovered and fixed during live activation: dedicated non-execution terminalization
+
+**Issue discovered.** Live-testing the decline path exposed a genuine
+defect unreachable in Batch 2's own dormant tests (which only ever
+attached a fake, trace-recording observer with no real CAS logic).
+`WorkflowEngine.resume()`'s decline branch calls
+`_observer_after_step(step_observer, workflow_id, 0, tool_result)`
+directly, **never** `_observer_before_step()` first (an existing,
+deliberately-tested Batch 2 engine contract -
+`TestDeclineNeverInvokesBeforeStep`). The real
+`CompoundStepObserver.after_step()` for a failed step 0 calls
+`CompoundWorkflowProgressStore.mark_step_1_failed()`, whose CAS
+precondition requires `step_1_status == IN_PROGRESS` - a state only
+`before_step()` (via `record_pre_execution_observation()`) ever sets.
+Since `before_step()` is never called for a decline, this transition
+always raised `CompoundWorkflowProgressError`, surfacing to the user as
+the checkpoint-interrupted message instead of an honest decline
+outcome - for *every* decline of the compound approval, not merely an
+edge case.
+
+**Two rejected fixes.** Widening `mark_step_1_failed()`'s own CAS
+precondition to also accept `PENDING` would have reversed an existing,
+explicitly tested Batch 1 contract
+(`test_illegal_from_pending_state`) and overloaded a real-execution-
+failure primitive to also mean "never attempted." Making `resume()`
+call `before_step()` before `after_step()` on decline would have
+changed a generic, already-tested `WorkflowEngine` contract that every
+future observer (not only this one) depends on, and would have made
+the pre-execution `project_state_verify` read fire even for a decline
+that will never write anything.
+
+**Correction implemented: a dedicated non-execution terminalization
+path**, never routed through `mark_step_1_failed()` at all:
+
+- `CompoundOverallStatus` gains one new, narrow bounded member,
+  `NOT_EXECUTED` - honestly distinct from `FAILED` (which always means
+  a real attempt genuinely did not succeed).
+- `CompoundWorkflowProgressStore.mark_not_executed_before_start()` -
+  new, CAS-backed, idempotent (a second call on an already-
+  `NOT_EXECUTED` row is a safe no-op, returned unchanged). Legal only
+  when every step is still `PENDING`, overall status is still
+  `PENDING`, and no pre-execution observation was ever recorded - i.e.
+  the row is in exactly the pristine state `create()` left it in. Never
+  classifies Step 1 as `FAILED`.
+- `core/orchestrator.py`'s `_claim_and_resume_workflow()`: when a
+  recognized compound workflow's decision is not approved, the trusted
+  `step_observer` is never attached at all (`step_observer = None`) -
+  the existing, generic `WorkflowEngine` decline contract runs
+  completely unaffected (ToolExecutor, the verifier, and the show step
+  all receive zero calls, exactly as for any other declined workflow) -
+  and the new `_terminalize_declined_compound_progress()` helper calls
+  `mark_not_executed_before_start()` directly, best-effort, absorbing
+  `CompoundWorkflowProgressError` silently (never blocking or altering
+  the decline's own outcome).
+- `core/compound_workflow.py`'s new
+  `terminalize_declined_or_expired_compound_progress()` - the startup
+  consistency repair backstop, wired into `main.reconcile_claimed_handoffs()`
+  alongside the existing PENDING/CLAIMED passes (order-independent - it
+  only ever touches rows already durably `DECLINED`/`EXPIRED`, a
+  disjoint set). This is the *sole* mechanism that ever terminalizes an
+  **expired** compound workflow's progress row at all: expiry never
+  goes through `resume()` - `WorkflowEngine._reap_stale_paused()`
+  silently discards the paused workflow lazily, with no callback into
+  this module whatsoever - so unlike decline (which is also
+  terminalized live, synchronously, with this repair pass only as its
+  own crash-window backstop), an expired row's progress is *always*
+  resolved here, never live. `ReconciliationSummary` gains
+  `compound_progress_terminalized: int = 0`.
+- The authoritative handoff state (`DECLINED`/`EXPIRED` on
+  `pending_approval_state`) is never touched by any of the above - it
+  was already correct before this correction; only the compound
+  progress row's own honesty was ever the defect.
+
+**New tests** (`tests/unit/test_phase98_batch3_live_compound_activation.py::TestDeclineAndExpiryTerminalization`):
+decline terminalizes progress as `NOT_EXECUTED` with zero observer step
+events and zero execution of all three real tools; the generic
+`WorkflowEngine` decline contract (paused row removed, `workflow_stopped`
+terminal history) is unaffected; the terminalization is idempotent;
+expiry leaves the progress row exactly `PENDING`/pristine live (no
+hook exists); the repair pass correctly terminalizes it.
+
+### Test suite added
+
+- `tests/unit/test_phase98_batch3_live_compound_activation.py` - 34
+  tests: decision activation (6), approval and progress creation (3),
+  normal execution end-to-end (4), six-outcome translation (4),
+  `CompoundCheckpointError` handling (2), decline/expiry
+  terminalization (5), restart and crash recovery (3), regression (3),
+  plus the corrected verification-unavailable double.
+- Every pre-existing dormant-isolation assertion this batch's
+  activation intentionally flips (`test_compound_isolation.py`,
+  `test_phase98_batch1_isolation.py`,
+  `test_phase98_batch2_dormant_isolation.py`) was rewritten as a
+  narrower, structural *confinement* proof (AST-based: the compound
+  reference is confined to exactly the intended methods/functions),
+  never simply deleted or weakened to "anything goes." One further,
+  pre-existing test outside the Phase 98 test files themselves,
+  `test_production_approval_wiring.py::test_main_source_always_passes_pending_store_to_approval_manager`,
+  was narrowed to name one explicit, structurally-identified exception:
+  the compound-recovery-only `WorkflowEngine`'s bare `ApprovalManager()`,
+  used solely to satisfy a required constructor argument for an engine
+  instance that is only ever used for its own read-only
+  `reconstruct_claimed_compound_plan()` accessor (confirmed via that
+  method's own docstring: "never mutates approval or paused-workflow
+  state itself").
+
+### Verification
+
+- Full suite: **5687 passed, 3 skipped, 0 failed**, identical under the
+  normal environment, `AI_REASONING_ENABLED=false`, and
+  `PYTHON_DOTENV_DISABLED=1`.
+- Batch 3 Ruff scope (`git diff --name-only a5cfa58 -- '*.py'`, plus
+  the new untracked test file): **all checks passed, exit 0**.
+- Complete Phase 98 Ruff scope (`git diff --name-only 3583820 -- '*.py'`,
+  spanning Batch 1, the handoff interlock, dormant lifecycle, checkpoint
+  correction, and this live activation together): **all checks passed,
+  exit 0**.
+- `git diff --check` clean for both ranges.
+
+### Guarantees
+
+Exactly one compound decision, for exactly one fixed template, is ever
+live; no fallback to a single-capability interpretation on any
+compound-parse/grounding failure; no second claim CAS; no
+`CONSUMED`/`CLAIM_INTERRUPTED` on a checkpoint failure; compound-first
+startup recovery strictly before the generic CLAIMED fallback; a
+decline or expiry never executes any of the three real tools and is
+never misreported as a checkpoint/infrastructure failure; help/user
+guide expose only the one fixed natural-language example, never the
+internal decision literal or general multi-tool capability.
+
+### Non-guarantees (explicitly out of scope)
+
+No second compound template exists or is planned; no arbitrary
+multi-tool execution of any kind; no live mechanism terminalizes an
+expired compound workflow's progress except the startup repair pass
+(a long-running process that never restarts will show a stale-but-
+harmless `PENDING` progress row for an expired approval until its next
+restart); Anthropic live acceptance remains postponed (insufficient API
+credits) - this batch's own tests use direct construction and a fake
+provider throughout, exactly as every prior Phase 98 batch's own tests
+do.
+
+Phase 98 is now closed. See `docs/phase_98_completion_report.md` for
+the full closure report.

@@ -83,13 +83,24 @@ class CompoundStepStatus(Enum):
 
 class CompoundOverallStatus(Enum):
     """The bounded status vocabulary for the whole compound workflow.
-    Exactly these five members exist."""
+    Exactly these six members exist.
+
+    NOT_EXECUTED (Phase 98, Batch 3 - docs/phase_98_live_compound_reentry_plan.md):
+    the one honest, non-execution terminal state for a workflow whose
+    Step 1 approval was declined, or whose approval window expired,
+    strictly before Step 1 was ever durably attempted. Deliberately
+    separate from FAILED, which always means a real execution attempt
+    genuinely did not succeed - NOT_EXECUTED instead means no attempt
+    was ever made at all, so overloading FAILED for it would falsely
+    suggest a write was tried and failed.
+    """
 
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     NEEDS_RECONCILIATION = "needs_reconciliation"
     COMPLETED = "completed"
     FAILED = "failed"
+    NOT_EXECUTED = "not_executed"
 
 
 class CompoundVerificationOutcome(Enum):
@@ -463,6 +474,65 @@ class CompoundWorkflowProgressStore:
                 "step_1_status": CompoundStepStatus.FAILED.value,
                 "overall_status": CompoundOverallStatus.FAILED.value,
             },
+        )
+
+    def mark_not_executed_before_start(
+        self, workflow_id: str
+    ) -> CompoundWorkflowProgressRecord:
+        """Terminalize a pristine, never-attempted row as honestly
+        NOT_EXECUTED (Phase 98, Batch 3 - docs/phase_98_live_compound_reentry_plan.md):
+        the dedicated non-execution path for a decline or an approval-
+        window expiry that occurred strictly before Step 1 was ever
+        durably attempted.
+
+        Deliberately never reached via mark_step_1_failed() - that
+        method's own precondition (step_1_status=IN_PROGRESS) and this
+        one's (every step still PENDING, no pre-execution observation)
+        are mutually exclusive, so a caller can never legally reach
+        this transition after WorkflowEngine's own before_step()
+        checkpoint has already run for Step 1. WorkflowEngine's decline
+        contract never calls before_step() at all (see
+        workflow.engine.resume()'s own decline branch), so a declined
+        Step 1 approval always finds the row still in this pristine
+        state.
+
+        Idempotent: calling this a second time on a row already
+        NOT_EXECUTED is a safe no-op, returning the record unchanged -
+        so both a live caller and a later startup repair pass may call
+        this for the same row without coordination.
+
+        Args:
+            workflow_id: The workflow id to update.
+
+        Returns:
+            The record after the transition, or the already-
+            NOT_EXECUTED record unchanged if already terminalized.
+
+        Raises:
+            CompoundWorkflowProgressError: If no row exists for
+                workflow_id, or execution has already genuinely begun
+                (any step is not PENDING, or a pre-execution
+                observation was already recorded) - this never
+                overwrites real progress.
+        """
+        existing = self.get(workflow_id)
+        if existing is None:
+            raise CompoundWorkflowProgressError(
+                f"No compound workflow progress row for workflow_id={workflow_id!r}."
+            )
+        if existing.overall_status is CompoundOverallStatus.NOT_EXECUTED:
+            return existing
+
+        return self._compare_and_set(
+            workflow_id,
+            expected={
+                "step_1_status": CompoundStepStatus.PENDING.value,
+                "step_2_status": CompoundStepStatus.PENDING.value,
+                "step_3_status": CompoundStepStatus.PENDING.value,
+                "overall_status": CompoundOverallStatus.PENDING.value,
+                "pre_execution_phase_value": None,
+            },
+            updates={"overall_status": CompoundOverallStatus.NOT_EXECUTED.value},
         )
 
     def start_step_2(self, workflow_id: str) -> CompoundWorkflowProgressRecord:

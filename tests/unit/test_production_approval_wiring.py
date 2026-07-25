@@ -78,7 +78,19 @@ def test_build_orchestrator_approval_manager_performs_a_real_cas(
 def test_main_source_always_passes_pending_store_to_approval_manager() -> None:
     """Structural proof (AST-based, not brittle text search): every
     ApprovalManager(...) call in main.py's own source supplies
-    pending_store as a keyword argument."""
+    pending_store as a keyword argument - except one, deliberately
+    inert exception (Phase 98, Batch 3 -
+    docs/phase_98_live_compound_reentry_plan.md): reconcile_claimed_
+    handoffs()'s dedicated compound-recovery WorkflowEngine is
+    constructed with a bare ApprovalManager() solely to satisfy
+    WorkflowEngine's own required constructor argument, because that
+    particular WorkflowEngine instance is only ever used for its own
+    read-only reconstruct_claimed_compound_plan() accessor - which its
+    own docstring guarantees "never mutates approval or paused-workflow
+    state itself" - never run()/resume(), so no real CAS/claim path is
+    ever reachable through it. Identified structurally (the `approvals=`
+    value of the one WorkflowEngine(...) call whose `executor=` is
+    `compound_executor`), never by a blanket carve-out."""
     source = (_REPO_ROOT / "main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     calls = [
@@ -89,9 +101,41 @@ def test_main_source_always_passes_pending_store_to_approval_manager() -> None:
         and node.func.id == "ApprovalManager"
     ]
     assert calls, "main.py must construct at least one ApprovalManager"
+
+    def _is_inert_compound_recovery_exception(call: ast.Call) -> bool:
+        for parent in ast.walk(tree):
+            if not (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Name)
+                and parent.func.id == "WorkflowEngine"
+            ):
+                continue
+            approvals_kw = next(
+                (kw for kw in parent.keywords if kw.arg == "approvals"), None
+            )
+            executor_kw = next(
+                (kw for kw in parent.keywords if kw.arg == "executor"), None
+            )
+            if (
+                approvals_kw is not None
+                and approvals_kw.value is call
+                and executor_kw is not None
+                and isinstance(executor_kw.value, ast.Name)
+                and executor_kw.value.id == "compound_executor"
+            ):
+                return True
+        return False
+
     for call in calls:
         keyword_names = {kw.arg for kw in call.keywords}
-        assert "pending_store" in keyword_names
+        if "pending_store" in keyword_names:
+            continue
+        assert _is_inert_compound_recovery_exception(call), (
+            "every production ApprovalManager must receive pending_store, "
+            "except the one, deliberately inert compound-recovery "
+            "ApprovalManager() built only to satisfy WorkflowEngine's "
+            "constructor for a read-only accessor"
+        )
 
 
 # --- test-only fallback exists, but cannot affect production -----------------

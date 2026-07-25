@@ -84,6 +84,16 @@ from intelligence.capability_catalog import (
     ExecutionStrategy,
     build_tool_input,
 )
+from intelligence.compound_grounding import (
+    CompoundGroundingResult,
+    ground_compound_decision,
+)
+from intelligence.compound_structured_output import (
+    CompoundToolSelectionParseError,
+    ParsedCompoundToolSelection,
+    parse_compound_tool_selection,
+    peek_compound_decision,
+)
 from intelligence.context import AssembledContext, build_ai_context_block
 from intelligence.grounding import ground_decision
 from intelligence.structured_output import (
@@ -180,6 +190,22 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "output, and must never appear in your response under any "
     "circumstances.\n"
     "\n"
+    "Exactly one compound decision exists, for exactly one fixed "
+    "request shape: the request explicitly asks you to update the "
+    'project phase and then show the project state, in that exact '
+    'order, joined by the exact words "and then". Only for that exact '
+    'shape, respond with {"decision": "execute_sequence", "steps": '
+    '[{"capability_id": "project_state_update_phase", "arguments": '
+    '{"value": "the requested new phase"}}, {"capability_id": '
+    '"project_state_show", "arguments": {}}]} - always these same two '
+    "steps, in this exact order, and no others. Never use "
+    '"execute_sequence" for any other pair of capabilities, never '
+    "reverse this order, never include more than these two steps, "
+    "never repeat a step, and never invent a third step - if the "
+    "request does not exactly match this one shape, use a single "
+    '"execute"/"unsupported" decision instead, exactly as described '
+    "above.\n"
+    "\n"
     "If no capability above can satisfy the request, you must return "
     "the exact unsupported object.\n"
     "\n"
@@ -231,6 +257,13 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     '"project_state_update_phase", "arguments": {"value": "the '
     'requested new phase"}}\n'
     "\n"
+    "Execute sequence (update phase, then show - the one fixed "
+    "compound shape):\n"
+    '{"decision": "execute_sequence", "steps": [{"capability_id": '
+    '"project_state_update_phase", "arguments": {"value": "the '
+    'requested new phase"}}, {"capability_id": "project_state_show", '
+    '"arguments": {}}]}\n'
+    "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'
     "\n"
@@ -275,6 +308,25 @@ class PlanningOutcomeKind(Enum):
     #: values (Phase 92, Batch 1). No preflight, approval, execution,
     #: or verification of any kind is ever attempted for this outcome.
     UNGROUNDED_SELECTION = "ungrounded_selection"
+    #: A valid "execute_sequence" decision for the one trusted compound
+    #: template (Phase 98, Batch 3 - docs/phase_98_live_compound_reentry_plan.md),
+    #: parsed, grounded, and built into the exact trusted three-step
+    #: Plan - `workflow_plan` is set, ready for WorkflowEngine.run().
+    EXECUTABLE_COMPOUND_WORKFLOW = "executable_compound_workflow"
+    #: peek_compound_decision() identified "execute_sequence", but the
+    #: compound parser/plan builder rejected it (malformed schema,
+    #: duplicate key, wrong step count/capability/order, invalid
+    #: argument, or an internal preflight failure) - detail carries a
+    #: bounded reason. Never falls back to parse_tool_selection() or
+    #: any single-capability interpretation - see select_tool()'s own
+    #: "no fallback" contract.
+    INVALID_COMPOUND_OUTPUT = "invalid_compound_output"
+    #: A structurally valid "execute_sequence" decision that
+    #: intelligence.compound_grounding.ground_compound_decision() could
+    #: not attribute to the live request - detail carries one of
+    #: CompoundUngroundedReason's bounded values. No plan, approval,
+    #: execution, or verification of any kind is ever attempted.
+    UNGROUNDED_COMPOUND_SELECTION = "ungrounded_compound_selection"
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +462,27 @@ def select_tool(
     except (AIProviderError, ResponseValidationError):
         return PlanningOutcome(kind=PlanningOutcomeKind.PROVIDER_FAILED)
 
+    # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md):
+    # the live discriminator peek. Inspects only the top-level
+    # "decision" key of the raw response - the exact same tolerant
+    # fence/duplicate-key-safe parse both parsers already use, so peek
+    # and whichever parser then runs can never disagree about what the
+    # top-level object contains. Once this returns True, this call
+    # commits fully to the compound path below: parse_tool_selection()
+    # is never invoked for this response, under any circumstance -
+    # a malformed/ungrounded compound decision terminates as its own,
+    # distinct outcome, never falling back to a single-capability
+    # interpretation.
+    if peek_compound_decision(response.text):
+        return _select_compound_tool_sequence(
+            response.text,
+            request_text,
+            tool_registry=tool_registry,
+            security_manager=security_manager,
+            session_id=session_id,
+            catalog=active_catalog,
+        )
+
     try:
         parsed = parse_tool_selection(response.text, active_catalog)
     except ToolSelectionParseError as exc:
@@ -490,6 +563,94 @@ def select_tool(
         steps=(step,),
     )
     return PlanningOutcome(kind=PlanningOutcomeKind.EXECUTABLE, plan=plan)
+
+
+def _select_compound_tool_sequence(
+    raw_text: str,
+    request_text: str,
+    *,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> PlanningOutcome:
+    """Parse, ground, and build the one trusted compound plan for a
+    response select_tool() has already committed to as
+    "execute_sequence" (Phase 98, Batch 3 -
+    docs/phase_98_live_compound_reentry_plan.md).
+
+    Never called except from select_tool() itself, immediately after
+    peek_compound_decision() returns True for this exact `raw_text` -
+    there is no other call site, and no fallback: any failure here
+    (parse, ground, or build) terminates as its own distinct,
+    non-fallback outcome.
+
+    Args:
+        raw_text: The raw, untrimmed model response text (identical to
+            what peek_compound_decision() already inspected).
+        request_text: The live, verbatim request text - the only
+            source of grounding evidence, exactly as ground_decision()
+            already requires for the single-decision path.
+        tool_registry: Used only for has_tool()/get_tool() during
+            preflight.
+        security_manager: Used only for classify_action() during
+            preflight.
+        session_id: Optional session identifier for the preflight
+            ToolRequest only.
+        catalog: The capability catalog to validate against.
+
+    Returns:
+        A PlanningOutcome. EXECUTABLE_COMPOUND_WORKFLOW with
+        `workflow_plan` set on success. INVALID_COMPOUND_OUTPUT (a
+        bounded `detail`) for a parse or plan-construction failure.
+        UNGROUNDED_COMPOUND_SELECTION (a bounded `detail`) if
+        ground_compound_decision() refuses the request.
+    """
+    try:
+        parsed: ParsedCompoundToolSelection = parse_compound_tool_selection(
+            raw_text, catalog
+        )
+    except CompoundToolSelectionParseError as exc:
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT, detail=exc.reason
+        )
+
+    grounding: CompoundGroundingResult = ground_compound_decision(
+        request_text=request_text, parsed=parsed
+    )
+    if not grounding.grounded:
+        assert grounding.reason is not None  # guaranteed when not grounded
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION,
+            detail=grounding.reason.value,
+        )
+
+    # Guaranteed by ground_compound_decision()'s own template match: the
+    # first step is exactly PROJECT_STATE_UPDATE_PHASE, whose own
+    # declared, already-validated argument is a bounded, non-empty
+    # string (intelligence.structured_output._validate_arguments()'s
+    # own shared string-hygiene rule, reused unchanged by the compound
+    # parser).
+    approved_phase_value = parsed.steps[0].arguments["value"]
+    assert isinstance(approved_phase_value, str)
+
+    workflow_plan = _build_phase_update_verify_show_workflow_plan(
+        request_text,
+        approved_phase_value=approved_phase_value,
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+        catalog=catalog,
+    )
+    if isinstance(workflow_plan, str):
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT, detail=workflow_plan
+        )
+
+    return PlanningOutcome(
+        kind=PlanningOutcomeKind.EXECUTABLE_COMPOUND_WORKFLOW,
+        workflow_plan=workflow_plan,
+    )
 
 
 def _preflight_capability(
@@ -789,6 +950,22 @@ def _build_phase_update_verify_show_workflow_plan(
         )
     )
     write_reason = security_manager.classify_action(write_action).reason
+    # Phase 98, Batch 3: PlanStep.action is display/approval-text
+    # metadata only - ToolExecutor.execute() always re-derives the
+    # real classification text fresh from the live tool's own
+    # action_for() at both preflight (_preflight_capability(), just
+    # above) and real execution time, never from this field (see
+    # PlanStep.action's own docstring). It is therefore safe to extend
+    # it here, honestly naming the full conditional sequence the user
+    # is actually approving - required so the one approval this
+    # workflow ever creates truthfully states that verification runs
+    # and that the final show is conditional on it succeeding, never
+    # implying Step 3 always runs.
+    write_action_display = (
+        f"{write_action}'s phase to '{approved_phase_value}', then "
+        "verify the stored value durably matches, and - only if that "
+        "verification succeeds - show the resulting project state"
+    )
 
     verify_tool = tool_registry.get_tool(verify_adapter.tool_name)
     assert verify_tool is not None
@@ -814,7 +991,7 @@ def _build_phase_update_verify_show_workflow_plan(
         PlanStep(
             number=1,
             description=write_adapter.description,
-            action=write_action,
+            action=write_action_display,
             tier=write_decision.tier,
             reason=write_reason,
             tool_name=write_adapter.tool_name,

@@ -35,7 +35,7 @@ from dataclasses import replace
 from typing import Callable, Protocol
 
 from approval.approval_manager import ApprovalManager
-from approval.approval_models import ApprovalDecision
+from approval.approval_models import ApprovalDecision, ApprovalRequest
 from ai.file_ingestion import ingest_file_for_ai
 from ai.memory_ingestion import (
     MemoryIngestionResult,
@@ -60,6 +60,13 @@ from ai.web_search_ingestion import ingest_web_search_for_ai
 from ai.webpage_ingestion import ingest_webpage_for_ai
 from config.constants import EventOutcome, SecurityTier, StepStatus
 from core.command_router import CommandRouter
+from core.compound_workflow import (
+    compound_progress_identity_matches,
+    establish_compound_progress_or_isolate,
+    matches_compound_plan_shape,
+    translate_compound_workflow_result,
+    validate_compound_approval_before_transition,
+)
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
 from inbox.inbox_store import InboxStore
 from intelligence.capability_catalog import (
@@ -98,7 +105,13 @@ from tools.base_tool import ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from tools.web_search_provider import WebSearchProvider
-from workflow.engine import WorkflowEngine
+from workflow.compound_progress_observer import CompoundStepObserver
+from workflow.compound_workflow_progress_store import (
+    CompoundWorkflowProgressError,
+    CompoundWorkflowProgressStore,
+)
+from workflow.engine import CompoundCheckpointError, WorkflowEngine
+from workflow.paused_workflow_store import PausedWorkflowStore
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
     build_create_and_read_plan,
@@ -242,6 +255,24 @@ _ASK_JARVIS_TO_PROVIDER_FAILED_MESSAGE = (
     "Jarvis's AI provider could not process this request right now."
 )
 _ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX = "Jarvis could not safely process that request:"
+#: Phase 98, Batch 3: the one compound-specific invalid-output prefix -
+#: mirrors _ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX's own convention
+#: exactly, applied to PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT's
+#: own bounded `detail` (a short, non-sensitive reason from the Phase
+#: 97 compound parser or the trusted compound plan builder - never the
+#: raw model output).
+_ASK_JARVIS_TO_INVALID_COMPOUND_OUTPUT_PREFIX = (
+    "Jarvis could not safely process that combined request:"
+)
+#: The one, fixed, non-technical refusal message for
+#: PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION - never exposes
+#: the bounded internal CompoundUngroundedReason code, the live
+#: request, a candidate clause, or a rejected/candidate value.
+_ASK_JARVIS_TO_COMPOUND_UNGROUNDED_MESSAGE = (
+    "Jarvis could not safely confirm that request matches the one "
+    "supported combined phase-update-and-show request, so nothing was "
+    "run. Please restate it directly and exactly."
+)
 #: Phase 92, Batch 2: the two public refusal messages for
 #: PlanningOutcomeKind.UNGROUNDED_SELECTION (intelligence.grounding.
 #: ground_decision()). Neither ever exposes the bounded internal
@@ -304,6 +335,29 @@ _ASK_JARVIS_TO_SAFETY_MISMATCH_MESSAGE = (
     "Jarvis refused this update: the safety check that should have "
     "required your approval did not behave as expected, so nothing was "
     "changed."
+)
+
+#: Shown only for a live CompoundCheckpointError (Phase 98, Batch 3 -
+#: docs/phase_98_live_compound_reentry_plan.md) - a durable-checkpoint
+#: infrastructure failure, never a known terminal workflow outcome.
+#: Deliberately never mentions database internals, a stack trace, the
+#: raw exception text, prompts, model output, or secrets, and never
+#: claims the handoff has already reached CLAIM_INTERRUPTED - only a
+#: future, exclusive startup reconciliation pass may make that
+#: determination.
+_COMPOUND_CHECKPOINT_INTERRUPTED_MESSAGE = (
+    "Jarvis paused this request because a durable checkpoint could not "
+    "be recorded. No step was repeated and nothing further was "
+    "executed; this will be safely resolved automatically the next "
+    "time Jarvis starts."
+)
+#: Shown for the one honest infrastructure-failure case in the
+#: compound progress-creation/approval-gating contract (Foundation F) -
+#: never exposes the underlying reason's raw text beyond this fixed,
+#: bounded description.
+_ASK_JARVIS_TO_COMPOUND_PROGRESS_FAILURE_MESSAGE = (
+    "Jarvis could not safely prepare this request's durable tracking, "
+    "so no approval was created and nothing was changed."
 )
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
@@ -586,6 +640,8 @@ class JarvisOrchestrator:
         logger: _AuditLogger | None = None,
         context_assembler: ContextAssembler | None = None,
         tool_selection_router: AIRouter | None = None,
+        paused_workflow_store: PausedWorkflowStore | None = None,
+        compound_progress_store: CompoundWorkflowProgressStore | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -667,6 +723,26 @@ class JarvisOrchestrator:
                 reasoning_engine's own None-when-disabled convention),
                 "ask jarvis to:" requests fail honestly instead of
                 calling any provider.
+            paused_workflow_store: An optional, already-constructed
+                PausedWorkflowStore (Phase 98, Batch 3 -
+                docs/phase_98_live_compound_reentry_plan.md) - the same
+                real instance main.py already builds and passes to
+                workflow_engine, never a second one. Used only by the
+                one trusted compound workflow's own progress-creation
+                and approval-time-validation gates
+                (establish_compound_progress_or_isolate()/
+                validate_compound_approval_before_transition()). When
+                omitted, the compound workflow fails honestly instead
+                of ever creating a progress row or an actionable
+                approval for it - every other request path is
+                completely unaffected.
+            compound_progress_store: An optional, already-constructed
+                CompoundWorkflowProgressStore (Phase 98, Batch 3) -
+                the sole per-step durable checkpoint authority for the
+                one trusted compound workflow. When omitted, the
+                compound workflow fails honestly instead of running
+                live; every other request path is completely
+                unaffected.
         """
         self._planner = planner
         self._executor = executor
@@ -682,6 +758,8 @@ class JarvisOrchestrator:
         self._logger = logger
         self._context_assembler = context_assembler
         self._tool_selection_router = tool_selection_router
+        self._paused_workflow_store = paused_workflow_store
+        self._compound_progress_store = compound_progress_store
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -694,6 +772,46 @@ class JarvisOrchestrator:
             The ApprovalManager instance.
         """
         return self._approvals
+
+    def validate_pending_approval_for_transition(
+        self, request: ApprovalRequest
+    ) -> str | None:
+        """Foundation G, live wiring (Phase 98, Batch 3 -
+        docs/phase_98_live_compound_reentry_plan.md): the trusted,
+        server-side check a caller (the CLI) must run immediately
+        before transitioning a pending approval to APPROVED_UNCONSUMED,
+        independent of whether progress creation was ever attempted
+        earlier.
+
+        A no-op (returns None) for every non-compound approval, or
+        when either durable store is not configured - existing
+        approvals remain completely unaffected. Only ever refuses a
+        request this orchestrator has already, independently
+        recognized (from persisted, non-model-controlled state) as the
+        one trusted compound template with a missing or mismatched
+        progress row.
+
+        Args:
+            request: The pending ApprovalRequest about to be decided.
+
+        Returns:
+            None if the transition may proceed. A short, bounded,
+            honest reason if it must not.
+        """
+        if self._paused_workflow_store is None or self._compound_progress_store is None:
+            return None
+        workflow_id = request.metadata.get("workflow_id")
+        if not workflow_id:
+            return None
+        validation = validate_compound_approval_before_transition(
+            paused_workflow_store=self._paused_workflow_store,
+            progress_store=self._compound_progress_store,
+            request_id=request.request_id,
+            workflow_id=workflow_id,
+        )
+        if validation.is_compound_workflow and not validation.valid:
+            return validation.reason
+        return None
 
     def execute_approved(
         self, response: JarvisResponse, decision: ApprovalDecision
@@ -854,9 +972,50 @@ class JarvisOrchestrator:
                     plan=plan,
                 )
 
+        # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md):
+        # recognize the one trusted compound plan purely from already-
+        # durable, non-model-controlled state - never from decision or
+        # request content - and attach its trusted step_observer only
+        # when recognized. None/False for every existing, non-compound
+        # workflow: completely unaffected.
+        step_observer, is_compound = self._compound_step_observer_for(
+            workflow_id, decision, session_id
+        )
+
+        if is_compound and not decision.is_approved:
+            # Dedicated non-execution terminalization path (Phase 98,
+            # Batch 3): a decline must never attach the trusted
+            # step_observer at all - the existing, generic
+            # WorkflowEngine decline contract (no before_step() call,
+            # ToolExecutor/verifier/show all receive zero calls) runs
+            # completely unaffected, exactly as for every other
+            # workflow. The compound progress row is instead
+            # terminalized separately, honestly, as NOT_EXECUTED -
+            # never by (mis)routing it through mark_step_1_failed(),
+            # which requires Step 1 to have actually started.
+            self._terminalize_declined_compound_progress(workflow_id)
+            step_observer = None
+
         try:
             result = self._workflow_engine.resume(
-                workflow_id, decision, session_id=session_id
+                workflow_id, decision, session_id=session_id, step_observer=step_observer
+            )
+        except CompoundCheckpointError:
+            # Mandatory acceptance condition (Phase 98, Batch 3): caught
+            # BEFORE the generic Exception handler below, and handled
+            # completely differently - a checkpoint infrastructure
+            # failure is never a known terminal outcome. Never marks
+            # CONSUMED, never marks CLAIM_INTERRUPTED here, never
+            # re-raises: the handoff is left exactly CLAIMED (as it was
+            # the moment claim_for_resume() succeeded above), and
+            # WorkflowEngine.resume() has already restored the paused
+            # workflow's own durable and in-memory state before this
+            # exception ever reached here. Only exclusive startup
+            # compound reconciliation may resolve this further.
+            return JarvisResponse(
+                success=False,
+                message=_COMPOUND_CHECKPOINT_INTERRUPTED_MESSAGE,
+                plan=plan,
             )
         except Exception:
             # Never expected once has_paused() has already been
@@ -889,12 +1048,94 @@ class JarvisOrchestrator:
             # sole source of truth for what actually happened.
             self._approvals.mark_consumed(decision.request_id)
 
+        if is_compound:
+            response, _kind = translate_compound_workflow_result(result)
+            return response
+
         # Phase 90, Batch 3; generalized Phase 94, Batch 2: each real
         # verified-workflow shape is recognised purely structurally
         # (no new persisted marker, per Section 24.C.12) - never
         # mistaken for any of the five pre-existing fixed Phase 15
         # workflows, whose own tool names never match either pair.
         return self._translate_verified_workflow_result(result)
+
+    def _compound_step_observer_for(
+        self,
+        workflow_id: str,
+        decision: ApprovalDecision,
+        session_id: int | None,
+    ) -> tuple[CompoundStepObserver | None, bool]:
+        """Recognize the one trusted compound plan purely from already-
+        durable, non-model-controlled state, and build its trusted
+        step_observer only when recognized (Phase 98, Batch 3).
+
+        Never selects or configures anything from `decision`/model
+        output - only the already-paused Plan's own structural
+        fingerprint and the linked CompoundWorkflowProgress row's own
+        identity (both entirely trusted, persisted state) decide
+        recognition.
+
+        Args:
+            workflow_id: The workflow about to be resumed - already
+                confirmed paused by the caller.
+            decision: The already-recorded ApprovalDecision (used only
+                for its own request_id, to cross-check progress
+                identity).
+            session_id: Optional session identifier, forwarded only
+                into the observer's own pre-execution observation read.
+
+        Returns:
+            (observer, True) if recognized; (None, False) otherwise -
+            including when compound_progress_store is not configured
+            at all, which always means "not this template" for this
+            orchestrator instance.
+        """
+        if self._compound_progress_store is None:
+            return None, False
+        peeked_plan = self._workflow_engine.peek_paused_plan(workflow_id)
+        if peeked_plan is None or not matches_compound_plan_shape(peeked_plan):
+            return None, False
+        progress_record = self._compound_progress_store.get(workflow_id)
+        if progress_record is None or not compound_progress_identity_matches(
+            peeked_plan,
+            progress_record,
+            request_id=decision.request_id,
+            workflow_id=workflow_id,
+        ):
+            return None, False
+        observer = CompoundStepObserver(
+            plan=peeked_plan,
+            progress_store=self._compound_progress_store,
+            executor=self._executor,
+            session_id=session_id,
+        )
+        return observer, True
+
+    def _terminalize_declined_compound_progress(self, workflow_id: str) -> None:
+        """Best-effort, idempotent: mark a recognized compound
+        workflow's progress row honestly NOT_EXECUTED when its Step 1
+        approval is declined before ever starting (Phase 98, Batch 3).
+
+        Never raises, and never blocks or alters the decline's own
+        generic WorkflowEngine outcome - this is a side concern (the
+        durable progress row's own honesty for later inspection/
+        reconciliation), never a gate on the decline itself. A
+        CompoundWorkflowProgressError here (the row was already
+        terminalized - by a startup repair pass, most likely - or,
+        rarer, execution had somehow already genuinely begun) is
+        silently absorbed: mark_not_executed_before_start()'s own CAS
+        precondition already guarantees this never overwrites real
+        progress.
+
+        Args:
+            workflow_id: The workflow about to be declined.
+        """
+        if self._compound_progress_store is None:
+            return
+        try:
+            self._compound_progress_store.mark_not_executed_before_start(workflow_id)
+        except CompoundWorkflowProgressError:
+            pass
 
     def resume_approved_unconsumed_workflow(
         self, request_id: str
@@ -2130,6 +2371,33 @@ class JarvisOrchestrator:
         if outcome.kind is PlanningOutcomeKind.EXECUTABLE_WORKFLOW:
             return self._start_update_focus_workflow(plan, outcome, session_id)
 
+        if outcome.kind is PlanningOutcomeKind.EXECUTABLE_COMPOUND_WORKFLOW:
+            return self._start_compound_update_phase_and_show_workflow(
+                plan, outcome, session_id
+            )
+
+        if outcome.kind is PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT:
+            # Phase 98, Batch 3: peek_compound_decision() already
+            # committed to the compound path for this response - no
+            # fallback to a single-capability interpretation exists,
+            # ever, for this outcome. Zero plan, zero approval, zero
+            # execution.
+            return JarvisResponse(
+                success=False,
+                message=(
+                    f"{_ASK_JARVIS_TO_INVALID_COMPOUND_OUTPUT_PREFIX} "
+                    f"{outcome.detail}."
+                ),
+                plan=plan,
+            )
+
+        if outcome.kind is PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_COMPOUND_UNGROUNDED_MESSAGE,
+                plan=plan,
+            )
+
         if outcome.kind is PlanningOutcomeKind.UNGROUNDED_SELECTION:
             # Phase 92, Batch 2: refused before any preflight, approval,
             # execution, or verification - see
@@ -2217,6 +2485,97 @@ class JarvisOrchestrator:
             )
 
         return self._translate_verified_workflow_result(result)
+
+    def _start_compound_update_phase_and_show_workflow(
+        self,
+        plan: Plan,
+        outcome: PlanningOutcome,
+        session_id: int | None,
+    ) -> JarvisResponse:
+        """Run the exact trusted three-step compound Plan (phase update
+        -> internal phase verification -> ProjectState show) through
+        the real, unmodified WorkflowEngine, then establish its
+        durable progress row before returning an actionable approval
+        (Phase 98, Batch 3 - docs/phase_98_live_compound_reentry_plan.md,
+        atomic activation).
+
+        Args:
+            plan: The generic Plan built for the raw "ask jarvis to:"
+                request text (used only for an early-exit failure
+                response - the real workflow response otherwise carries
+                its own, internal three-step Plan instead).
+            outcome: The EXECUTABLE_COMPOUND_WORKFLOW PlanningOutcome
+                carrying the real, already-preflighted, already-
+                fingerprint-eligible three-step workflow_plan.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. An honest failure if WorkflowEngine or
+            either durable compound store is not configured, if the
+            first run() call does not pause for approval (a genuine
+            safety mismatch), or if progress could not be established
+            (in which case the pending approval/paused workflow have
+            already been terminally isolated by
+            establish_compound_progress_or_isolate() itself - never
+            left showable). Otherwise, the honest WAITING-translated
+            response, now backed by a durable, identity-validated
+            progress row.
+        """
+        if self._workflow_engine is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+        if self._paused_workflow_store is None or self._compound_progress_store is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        assert outcome.workflow_plan is not None  # guaranteed by EXECUTABLE_COMPOUND_WORKFLOW
+        compound_plan = outcome.workflow_plan
+        result = self._workflow_engine.run(compound_plan, session_id=session_id)
+
+        if result.overall_status is not StepStatus.WAITING:
+            # Step 1 was preflighted YELLOW but did not pause for
+            # approval at real execution time - refuse honestly,
+            # exactly mirroring _start_update_focus_workflow's own
+            # safety-mismatch contract. Never reaches progress
+            # creation at all in this case.
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_SAFETY_MISMATCH_MESSAGE,
+                plan=plan,
+                intelligence_trace=(
+                    "Step 1/3: safety mismatch - the expected approval "
+                    "requirement was not applied.",
+                ),
+            )
+
+        assert result.pending_approval_request is not None  # guaranteed by WAITING
+        established = establish_compound_progress_or_isolate(
+            plan=compound_plan,
+            workflow_id=result.workflow_id,
+            request_id=result.pending_approval_request.request_id,
+            progress_store=self._compound_progress_store,
+            approval_invalidator=self._approvals,
+            paused_workflow_store=self._paused_workflow_store,
+        )
+        if isinstance(established, str):
+            # Foundation F: the pending approval and paused workflow
+            # have already been terminally isolated (invalidated/
+            # deleted) by establish_compound_progress_or_isolate()
+            # itself, using only existing, bounded APIs - never left
+            # showable without valid progress.
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_COMPOUND_PROGRESS_FAILURE_MESSAGE,
+                plan=plan,
+            )
+
+        return self._workflow_result_to_response(result)
 
     def _translate_verified_workflow_result(
         self, result: WorkflowResult

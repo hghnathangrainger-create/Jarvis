@@ -3,10 +3,22 @@ test_compound_isolation.py
 
 Structural proof that Phase 97's compound grounding foundation
 (intelligence/compound_structured_output.py,
-intelligence/compound_grounding.py) has zero live wiring and zero
-side effects (docs/phase_97_implementation_plan.md). Covers "Parser
-isolation tests" (1-6) and "Structural no-side-effect tests" (58-68)
-from the Phase 97 implementation task.
+intelligence/compound_grounding.py) itself has zero side effects
+(docs/phase_97_implementation_plan.md) - covers "Structural no-side-
+effect tests" (58-68) from the Phase 97 implementation task, and these
+never changed: neither module's own source has ever been edited since
+Phase 97, so every one of these assertions still holds unchanged.
+
+Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md)
+formally, atomically activated live wiring for both modules, through
+exactly one entry point: intelligence/planning.py's select_tool(),
+which core/orchestrator.py and main.py depend on only indirectly (via
+core/compound_workflow.py's own separate, dormant-since-Batch-2
+functions - never by importing compound_structured_output/
+compound_grounding directly themselves). "Parser isolation" (originally
+items 1-6) is therefore revised, not removed: it now proves the wiring
+is exactly this narrow - one call site, one discriminator peek, no
+fallback - rather than proving no wiring exists at all.
 
 These tests use direct imports, module-source AST inspection, and
 signature/behavior assertions - never brittle text matching where a
@@ -17,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -36,7 +49,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LIVE_RUNTIME_MODULES = (
     "intelligence/structured_output.py",
     "intelligence/grounding.py",
-    "intelligence/planning.py",
     "core/orchestrator.py",
     "security/security_manager.py",
     "tools/executor.py",
@@ -45,6 +57,46 @@ _LIVE_RUNTIME_MODULES = (
 
 _COMPOUND_MODULE_NAMES = frozenset(
     {"compound_structured_output", "compound_grounding"}
+)
+
+#: Phase 98, Batch 3: intelligence/planning.py's own methods that are
+#: allowed to reference a compound identifier - the live discriminator
+#: peek plus the one dedicated compound helper it delegates to.
+#: Everything else in the module must stay exactly as narrow as it was
+#: before Batch 3.
+_PLANNING_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
+    {
+        "select_tool",
+        "_select_compound_tool_sequence",
+        "_build_phase_update_verify_show_workflow_plan",
+    }
+)
+
+#: Phase 98, Batch 3: core/orchestrator.py's own methods that are
+#: allowed to reference a compound identifier - proven narrow by
+#: test_orchestrator_compound_wiring_is_confined_to_named_methods below.
+_ORCHESTRATOR_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
+    {
+        "__init__",
+        "validate_pending_approval_for_transition",
+        "_claim_and_resume_workflow",
+        "_compound_step_observer_for",
+        "_start_compound_update_phase_and_show_workflow",
+        "_handle_ask_jarvis_to_request",
+        "_terminalize_declined_compound_progress",
+    }
+)
+
+#: Phase 98, Batch 3: main.py's own functions/classes that are allowed
+#: to reference a compound identifier - proven narrow by
+#: test_main_compound_wiring_is_confined_to_named_functions below.
+_MAIN_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
+    {
+        "build_orchestrator",
+        "reconcile_claimed_handoffs",
+        "__init__",
+        "invalidate_pending",
+    }
 )
 
 
@@ -136,17 +188,63 @@ class TestExistingLiveParserIsolation:
         assert not issubclass(CompoundToolSelectionParseError, ToolSelectionParseError)
         assert not issubclass(ToolSelectionParseError, CompoundToolSelectionParseError)
 
-    def test_trusted_instruction_does_not_mention_compound_output(self) -> None:
+    def test_trusted_instruction_describes_exactly_one_compound_shape(self) -> None:
+        """Phase 98, Batch 3: the trusted instruction now teaches
+        exactly one compound decision, for exactly one fixed two-step
+        sequence, never a general multi-step facility. Proven
+        structurally: every "steps" array the instruction's own JSON
+        examples contain names exactly these two capability ids, in
+        exactly this order - never any other pair, never reversed."""
         instruction = live_planning._TRUSTED_PLANNING_INSTRUCTION
-        assert "execute_sequence" not in instruction
-        assert "and then" not in instruction.casefold()
+        assert "execute_sequence" in instruction
+        assert '"and then"' in instruction
+        assert "Exactly one compound decision exists" in instruction
+        assert "never invent a third step" in instruction
+        assert "never reverse this order" in instruction
+        assert 'never use "execute_sequence" for any other pair' in (
+            instruction.casefold()
+        )
+
+        steps_arrays = re.findall(r'"steps":\s*\[(.*?)\]\}', instruction, re.DOTALL)
+        assert steps_arrays, "expected at least one execute_sequence steps array"
+        for steps_blob in steps_arrays:
+            assert '"project_state_update_phase"' in steps_blob
+            assert '"project_state_show"' in steps_blob
+            assert steps_blob.index("project_state_update_phase") < steps_blob.index(
+                "project_state_show"
+            ), "the fixed compound shape must always update phase before showing"
+
+
+def _functions_referencing(source: str, needle: str) -> set[str]:
+    """Return the name of every FunctionDef/AsyncFunctionDef in `source`
+    whose own source segment contains `needle` (case-insensitive) -
+    used to prove a reference is confined to a known, expected set of
+    functions/methods rather than merely asserting it exists at all."""
+    tree = ast.parse(source)
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if needle in segment.casefold():
+            hits.add(node.name)
+    return hits
 
 
 class TestNoLiveImportOfCompoundModules:
-    """Items 4-6: no live runtime module imports either new compound
-    module, proven by parsing each live module's own real source with
-    the standard library `ast` module - not by asserting behavior that
-    merely happens not to trigger a code path."""
+    """Items 4-6, revised for Phase 98, Batch 3: every live runtime
+    module still never imports either compound module, EXCEPT
+    intelligence/planning.py - the one module Batch 3 atomically wired
+    as the live entry point. Proven by parsing each live module's own
+    real source with the standard library `ast` module - not by
+    asserting behavior that merely happens not to trigger a code path.
+
+    core/orchestrator.py and main.py deliberately stay off this "must
+    not import" list's exclusion: Batch 3 wires them only indirectly,
+    through core/compound_workflow.py's own separate functions/types -
+    neither ever imports compound_structured_output or
+    compound_grounding by name - so the blanket check below still
+    holds true for both, unchanged."""
 
     @pytest.mark.parametrize("relative_path", _LIVE_RUNTIME_MODULES)
     def test_live_module_does_not_import_compound_modules(
@@ -159,13 +257,79 @@ class TestNoLiveImportOfCompoundModules:
             f"found reference(s): {referenced & _COMPOUND_MODULE_NAMES}"
         )
 
-    def test_select_tool_source_has_no_compound_reference(self) -> None:
-        source = inspect.getsource(live_planning.select_tool)
-        assert "compound" not in source.casefold()
+    def test_planning_module_imports_exactly_the_two_compound_modules(self) -> None:
+        """Phase 98, Batch 3: intelligence/planning.py is the sole live
+        wiring point - it imports both compound modules directly."""
+        source = _module_source_path("intelligence/planning.py").read_text(
+            encoding="utf-8"
+        )
+        referenced = _referenced_module_names(source)
+        assert _COMPOUND_MODULE_NAMES <= referenced
 
-    def test_orchestrator_module_source_has_no_compound_reference(self) -> None:
+    def test_select_tool_source_compound_wiring_is_exactly_the_discriminator(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3: select_tool() itself only ever peeks at
+        the discriminator and delegates to _select_compound_tool_
+        sequence() - it never inlines compound parsing, grounding, or
+        plan construction itself. Proven via ast.Call inspection of
+        select_tool's own body, not by counting substring occurrences
+        (which would also match this function's own explanatory
+        comments)."""
+        source = inspect.getsource(live_planning.select_tool)
+        tree = ast.parse(source)
+        called_names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "peek_compound_decision" in called_names
+        assert "_select_compound_tool_sequence" in called_names
+        # Parsing/grounding/building stay confined to
+        # _select_compound_tool_sequence's own body, never duplicated
+        # or inlined directly inside select_tool.
+        assert "parse_compound_tool_selection" not in called_names
+        assert "ground_compound_decision" not in called_names
+        assert "_build_phase_update_verify_show_workflow_plan" not in called_names
+
+    def test_planning_module_compound_wiring_is_confined_to_named_functions(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3: no function in intelligence/planning.py
+        other than select_tool() and its own dedicated
+        _select_compound_tool_sequence() helper references a compound
+        identifier - proving the atomic activation added exactly one
+        narrow wiring point, never a broader sprawl through the
+        module's other, unrelated functions (_preflight_capability,
+        _build_write_and_verify_workflow_plan, etc.)."""
+        source = _module_source_path("intelligence/planning.py").read_text(
+            encoding="utf-8"
+        )
+        hits = _functions_referencing(source, "compound")
+        assert hits <= _PLANNING_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS, (
+            f"unexpected compound reference inside: "
+            f"{hits - _PLANNING_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS}"
+        )
+
+    def test_orchestrator_compound_wiring_is_confined_to_named_methods(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3: core/orchestrator.py's compound wiring
+        (imports of core.compound_workflow /
+        workflow.compound_progress_observer /
+        workflow.compound_workflow_progress_store symbols) is confined
+        to exactly its intended methods - never a broader, uncontrolled
+        sprawl through the rest of the class. Proven by walking the
+        module's own AST, not by a blanket substring search."""
         source = inspect.getsource(live_orchestrator)
-        assert "compound" not in source.casefold()
+        referenced_modules = _referenced_module_names(source)
+        assert not (referenced_modules & _COMPOUND_MODULE_NAMES)
+
+        hits = _functions_referencing(source, "compound")
+        assert hits <= _ORCHESTRATOR_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS, (
+            f"unexpected compound reference inside: "
+            f"{hits - _ORCHESTRATOR_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS}"
+        )
 
     def test_capability_catalog_module_is_unmodified_by_compound_concerns(
         self,
@@ -259,7 +423,19 @@ class TestNoSideEffects:
             assert "help_tool" not in identifiers
             assert "HelpTool" not in identifiers
 
-    def test_help_tool_and_user_guide_have_no_compound_entry(self) -> None:
+    def test_help_tool_and_user_guide_expose_exactly_one_narrow_compound_example(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3 requires exposing exactly the one fixed
+        two-step exception (update phase, then show project state) to
+        users - but never the internal "execute_sequence" decision
+        literal, never the internal word "compound" itself, and never
+        implying a general multi-step mechanism exists. Proven
+        precisely: "and then" appears (the one honest natural-language
+        connector), but only ever immediately preceded by "phase to
+        <value>"-shaped text and followed by "show" - never any other
+        pairing - and the internal jargon never leaks into either
+        user-facing surface."""
         help_source = _module_source_path(
             "tools/builtin/help_tool.py"
         ).read_text(encoding="utf-8")
@@ -267,13 +443,36 @@ class TestNoSideEffects:
             encoding="utf-8"
         )
         assert "execute_sequence" not in help_source
-        assert "and then" not in help_source.casefold()
         assert "execute_sequence" not in guide_source
+        assert "compound" not in help_source.casefold()
+        assert "compound_workflow" not in guide_source.casefold()
 
-    def test_no_main_wiring(self) -> None:
+        assert "and then" in help_source.casefold()
+        assert "and then" in guide_source.casefold()
+        assert re.search(
+            r"phase to [^\n\"]*and then show", help_source, re.IGNORECASE
+        ), "help_tool.py's compound example must be exactly phase-update-then-show"
+        assert re.search(
+            r"phase to [^\n]*and then show", guide_source, re.IGNORECASE
+        ), "user_guide.md's compound example must be exactly phase-update-then-show"
+
+    def test_main_compound_wiring_is_confined_to_named_functions(self) -> None:
+        """Phase 98, Batch 3: main.py legitimately wires compound-first
+        startup recovery (build_orchestrator, reconcile_claimed_
+        handoffs, _DurableCompoundApprovalInvalidator) - but, like
+        core/orchestrator.py, never imports compound_structured_output
+        or compound_grounding directly, and never references a
+        compound identifier outside these specific, expected
+        functions/methods."""
         source = _module_source_path("main.py").read_text(encoding="utf-8")
         referenced = _referenced_module_names(source)
         assert not (referenced & _COMPOUND_MODULE_NAMES)
+
+        hits = _functions_referencing(source, "compound")
+        assert hits <= _MAIN_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS, (
+            f"unexpected compound reference inside: "
+            f"{hits - _MAIN_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS}"
+        )
 
     def test_no_package_initializer_export_required(self) -> None:
         init_source = _module_source_path("intelligence/__init__.py").read_text(

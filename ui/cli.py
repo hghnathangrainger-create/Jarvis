@@ -426,6 +426,25 @@ class JarvisCLI:
             output_func=self._output,
         )
 
+        # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md,
+        # Foundation G, live wiring): immediately before a workflow-
+        # linked approval could transition PENDING -> APPROVED_UNCONSUMED,
+        # run the trusted, server-side compound-progress validation. A
+        # no-op for every non-compound approval; only ever refuses an
+        # approval this orchestrator has already, independently
+        # recognized as the one trusted compound template with missing
+        # or mismatched progress - never claims, executes, or
+        # reconstructs anything from AI output.
+        if answer.is_approved:
+            validation_failure = (
+                self._orchestrator.validate_pending_approval_for_transition(request)
+            )
+            if validation_failure is not None:
+                self._output(
+                    f"jarvis> [ERROR] Could not approve: {validation_failure}"
+                )
+                return
+
         # Record the decision through the Core's ApprovalManager so it is stored
         # and written to the audit log. The manager returns the authoritative
         # decision.

@@ -879,3 +879,18 @@ reconciliation lifecycle dormant (no live AI routing, unreachable by
 any user); Batch 3 activates live routing and closes Phase 98's
 compound work. No Phase 98 implementation has started as of this
 planning gate.
+
+## 20. Phase 98 closed — Batch 3 atomic live activation
+
+Batch 3 is complete. The dormant lifecycle Batch 2 built (Section 19)
+is now atomically, live-wired end to end: live discriminator routing,
+exact compound parsing/grounding, progress creation before an
+actionable approval, live claim/resume with `CompoundCheckpointError`
+handling, compound-first startup recovery, six-outcome response
+translation, and help/user-guide exposure. One design correction was
+discovered and fixed during live activation (a dedicated non-execution
+terminalization path for a declined/expired compound workflow, never
+routed through the existing `mark_step_1_failed()` primitive). Full
+detail, including the correction's exact rationale, is recorded in
+`docs/phase_98_live_compound_reentry_plan.md` (Section 29) and
+`docs/phase_98_completion_report.md`. **Phase 98 is now closed.**

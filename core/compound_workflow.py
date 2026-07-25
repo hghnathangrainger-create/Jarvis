@@ -26,6 +26,10 @@ Responsibilities:
       (Foundation H).
     - Translate a compound WorkflowResult into one of six honest,
       bounded outcomes (Foundation I).
+    - Terminalize a declined-or-expired compound workflow's progress
+      row as honestly NOT_EXECUTED - never FAILED - when a crash (or,
+      for expiry, always) prevented live terminalization (Phase 98,
+      Batch 3).
 
 Does NOT:
     - Get imported by intelligence/planning.py, core/orchestrator.py,
@@ -519,6 +523,81 @@ def repair_or_isolate_pending_compound_progress(
             isolated += 1
 
     return CompoundProgressRepairSummary(repaired=repaired, isolated=isolated)
+
+
+def terminalize_declined_or_expired_compound_progress(
+    *,
+    pending_store: _PendingApprovalStoreProtocol,
+    progress_store: CompoundWorkflowProgressStore,
+    declined_status: object,
+    expired_status: object,
+) -> int:
+    """Startup consistency repair for a declined or expired compound-
+    linked progress row that was never terminalized live (Phase 98,
+    Batch 3 - docs/phase_98_live_compound_reentry_plan.md): the
+    dedicated non-execution terminalization path's own crash-recovery
+    backstop.
+
+    A live decline is already terminalized synchronously by
+    JarvisOrchestrator._terminalize_declined_compound_progress()
+    immediately after WorkflowEngine.resume() returns - this repair
+    pass only ever needs to act when that call never happened (a crash
+    between decline and terminalization) or could not have happened at
+    all (expiry: WorkflowEngine's own lazy _reap_stale_paused() removes
+    a paused workflow with no callback into this module whatsoever, so
+    an expired compound workflow's progress row is *only* ever
+    terminalized here, whether the process crashed or not).
+
+    Never touches a row that is not linked to this exact trusted
+    template (checked directly against the progress row's own
+    `template_id`/`request_id` fields - never by re-deriving a Plan
+    from a paused-workflow row, which may already be gone by the time
+    either decline or expiry reaches this point). Never overwrites a
+    row where execution genuinely began (mark_not_executed_before_start()'s
+    own CAS precondition refuses that case; refused here too, silently -
+    a real, in-progress or completed workflow is never this function's
+    concern).
+
+    Args:
+        pending_store: The real PendingApprovalStore.
+        progress_store: The real CompoundWorkflowProgressStore.
+        declined_status: The DECLINED PendingApprovalHandoffStatus
+            value (passed in rather than imported, mirroring this
+            module's other functions' own convention).
+        expired_status: The EXPIRED PendingApprovalHandoffStatus value.
+
+    Returns:
+        The number of progress rows this call terminalized as
+        NOT_EXECUTED. Idempotent - calling this repeatedly, including
+        with nothing new to do, always returns 0 on every call after
+        the first.
+    """
+    terminalized = 0
+    for status in (declined_status, expired_status):
+        for record in pending_store.list_by_handoff_status(status):
+            workflow_id = record.metadata.get("workflow_id")
+            if not workflow_id:
+                continue
+
+            progress = progress_store.get(workflow_id)
+            if progress is None:
+                continue
+            if progress.template_id != ALLOWED_TEMPLATE_ID:
+                continue
+            if progress.request_id != record.request_id:
+                continue
+
+            try:
+                progress_store.mark_not_executed_before_start(workflow_id)
+                terminalized += 1
+            except CompoundWorkflowProgressError:
+                # Either already terminalized (idempotent no-op already
+                # returns without raising - see that method's own
+                # contract) or execution genuinely began before the
+                # decline/expiry was recorded: never overwritten.
+                continue
+
+    return terminalized
 
 
 # ---------------------------------------------------------------------------

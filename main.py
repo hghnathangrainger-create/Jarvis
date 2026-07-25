@@ -77,6 +77,11 @@ from approval.approval_models import PendingApprovalHandoffStatus
 from approval.pending_approval_store import PendingApprovalStore
 from config.settings import load_settings
 from core.command_router import CommandRouter
+from core.compound_workflow import (
+    reconcile_claimed_compound_workflows,
+    repair_or_isolate_pending_compound_progress,
+    terminalize_declined_or_expired_compound_progress,
+)
 from core.orchestrator import JarvisOrchestrator
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler
@@ -141,6 +146,7 @@ from voice.output import VoiceOutputService
 from voice.stt import FakeSpeechToTextProvider, SpeechToTextProvider
 from voice.tts import FakeTextToSpeechProvider, TextToSpeechProvider
 from web.safe_web_fetcher import SafeWebFetcher
+from workflow.compound_workflow_progress_store import CompoundWorkflowProgressStore
 from workflow.engine import WorkflowEngine
 from workflow.paused_workflow_store import PausedWorkflowStore
 from workflow.workflow_history_store import WorkflowHistoryStore
@@ -402,6 +408,18 @@ def build_orchestrator() -> JarvisOrchestrator:
     # on that order.
     paused_workflows = PausedWorkflowStore(session_factory)
 
+    # Durable, per-step compound-workflow progress (Phase 98, Batch 3 -
+    # docs/phase_98_live_compound_reentry_plan.md): the sole checkpoint
+    # authority for the one trusted compound template
+    # (PROJECT_STATE_UPDATE_PHASE -> phase verification ->
+    # PROJECT_STATE_SHOW). A *different* table from paused_workflows/
+    # workflow_history above - see
+    # workflow/compound_workflow_progress_store.py's own module
+    # docstring. Passed into JarvisOrchestrator below so it can
+    # establish/validate progress for that one template; every other
+    # request path never touches it.
+    compound_progress_store = CompoundWorkflowProgressStore(session_factory)
+
     # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same
     # ToolExecutor, ApprovalManager, and EventLogger instances already built
     # above - no duplicate execution, approval, or logging authority is ever
@@ -497,6 +515,12 @@ def build_orchestrator() -> JarvisOrchestrator:
         # above (not a second one) powers the explicit "ask jarvis to:
         # <request>" tool-selection command.
         tool_selection_router=tool_selection_router,
+        # Phase 98, Batch 3: the same PausedWorkflowStore/
+        # CompoundWorkflowProgressStore instances already built above
+        # (not second ones) power the one trusted compound workflow's
+        # progress-creation and approval-time-validation gates.
+        paused_workflow_store=paused_workflows,
+        compound_progress_store=compound_progress_store,
     )
 
 
@@ -626,15 +650,35 @@ class ReconciliationSummary:
             was backfilled to match the row's own durable handoff_status.
         claimed_consumed: Number of inherited CLAIMED rows for which
             positive terminal workflow-history evidence was found and
-            which were transitioned to CONSUMED.
+            which were transitioned to CONSUMED - includes both
+            generic rows and the exact trusted compound template
+            (Phase 98, Batch 3), resolved by its own dedicated,
+            compound-first reconciliation pass before the generic one
+            ever runs.
         claimed_interrupted: Number of inherited CLAIMED rows for which
             no such evidence was found (or could not be proven) and
-            which were transitioned to CLAIM_INTERRUPTED.
+            which were transitioned to CLAIM_INTERRUPTED - includes
+            both generic rows and the exact trusted compound template.
+        compound_progress_repaired: Number of exact trusted compound
+            PENDING rows whose missing CompoundWorkflowProgress row was
+            idempotently repaired before being shown as an actionable
+            approval (Phase 98, Batch 3, Foundation F).
+        compound_progress_isolated: Number of exact trusted compound
+            PENDING rows whose progress could not be unambiguously
+            repaired and were terminally isolated instead.
+        compound_progress_terminalized: Number of exact trusted
+            compound DECLINED/EXPIRED rows whose progress row was
+            found still pristine (never terminalized live - a crash,
+            for a decline, or always, for an expiry) and was
+            idempotently marked NOT_EXECUTED (Phase 98, Batch 3).
     """
 
     history_repaired: int
     claimed_consumed: int
     claimed_interrupted: int
+    compound_progress_repaired: int = 0
+    compound_progress_isolated: int = 0
+    compound_progress_terminalized: int = 0
 
 
 def start_execution_session() -> tuple[JarvisOrchestrator, ExecutionProcessLock]:
@@ -760,18 +804,133 @@ def reconcile_claimed_handoffs(lock: ExecutionProcessLock) -> ReconciliationSumm
     pending_store = PendingApprovalStore(session_factory)
     history_store = ApprovalHistoryStore(session_factory)
     workflow_history = WorkflowHistoryStore(session_factory)
+    compound_progress_store = CompoundWorkflowProgressStore(session_factory)
 
     history_repaired = _repair_approval_history_consistency(
         pending_store, history_store
     )
+
+    # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md):
+    # a small, dedicated stack for the one trusted compound template
+    # only - never the full production ToolRegistry, since compound
+    # recovery only ever needs the three ProjectState tools this one
+    # template uses. The invalidator is a durable-store-only adapter
+    # (mark_expired + record_timeout), never ApprovalManager's own
+    # in-memory _pending dict - a fresh ApprovalManager would require
+    # calling reload_pending() against this narrow registry first,
+    # which would incorrectly invalidate every real, unrelated pending
+    # approval whose own tool is not one of these three.
+    compound_project_state_store = ProjectStateStore(session_factory)
+    compound_registry = ToolRegistry()
+    compound_registry.register_tool(ProjectStateShowTool(compound_project_state_store))
+    compound_registry.register_tool(ProjectStateUpdateTool(compound_project_state_store))
+    compound_registry.register_tool(ProjectStateVerifyTool(compound_project_state_store))
+    compound_security = SecurityManager()
+    compound_executor = ToolExecutor(
+        registry=compound_registry, security_manager=compound_security, logger=None
+    )
+    # This WorkflowEngine instance is only ever used for its own
+    # read-only reconstruct_claimed_compound_plan() accessor - never
+    # run()/resume() - so its own approvals/paused_store collaborators
+    # are never meaningfully invoked.
+    compound_workflow_engine = WorkflowEngine(
+        executor=compound_executor, approvals=ApprovalManager()
+    )
+    compound_invalidator = _DurableCompoundApprovalInvalidator(
+        pending_store=pending_store,
+        history_store=history_store,
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+    compound_repair = repair_or_isolate_pending_compound_progress(
+        pending_store=pending_store,
+        paused_workflow_store=PausedWorkflowStore(session_factory),
+        progress_store=compound_progress_store,
+        approval_invalidator=compound_invalidator,
+        pending_status=PendingApprovalHandoffStatus.PENDING,
+    )
+
+    compound_claimed = reconcile_claimed_compound_workflows(
+        pending_store=pending_store,
+        paused_workflow_store=PausedWorkflowStore(session_factory),
+        progress_store=compound_progress_store,
+        workflow_engine=compound_workflow_engine,
+        tool_registry=compound_registry,
+        security_manager=compound_security,
+        tool_executor=compound_executor,
+        claimed_status=PendingApprovalHandoffStatus.CLAIMED,
+    )
+
+    # Phase 98, Batch 3: the dedicated non-execution terminalization
+    # path's own crash-recovery backstop - a declined compound row a
+    # crash prevented from being terminalized live, or (its only
+    # mechanism at all) an expired one, since WorkflowEngine's own lazy
+    # paused-workflow reaping never calls back into this module. Order
+    # relative to the PENDING/CLAIMED passes above never matters: this
+    # only ever touches rows already durably DECLINED/EXPIRED, a
+    # disjoint set from PENDING/CLAIMED.
+    compound_terminalized = terminalize_declined_or_expired_compound_progress(
+        pending_store=pending_store,
+        progress_store=compound_progress_store,
+        declined_status=PendingApprovalHandoffStatus.DECLINED,
+        expired_status=PendingApprovalHandoffStatus.EXPIRED,
+    )
+
+    # Only now does the existing, unchanged generic CLAIMED fallback
+    # run - it will only ever see rows the compound-specific pass above
+    # did not already resolve (left_for_generic), since every resolved
+    # compound row has already transitioned out of CLAIMED.
     claimed_consumed, claimed_interrupted = _reconcile_claimed_rows(
         pending_store, history_store, workflow_history
     )
     return ReconciliationSummary(
         history_repaired=history_repaired,
-        claimed_consumed=claimed_consumed,
-        claimed_interrupted=claimed_interrupted,
+        claimed_consumed=claimed_consumed + compound_claimed.consumed,
+        claimed_interrupted=claimed_interrupted + compound_claimed.interrupted,
+        compound_progress_repaired=compound_repair.repaired,
+        compound_progress_isolated=compound_repair.isolated,
+        compound_progress_terminalized=compound_terminalized,
     )
+
+
+class _DurableCompoundApprovalInvalidator:
+    """Adapts PendingApprovalStore/ApprovalHistoryStore's own durable
+    primitives to core.compound_workflow's approval-invalidator
+    contract (a single `invalidate_pending(request_id, *, reason) ->
+    bool` method), mirroring ApprovalManager.invalidate_pending()'s
+    exact durable behaviour (mark_expired + record_timeout) - without
+    depending on ApprovalManager's own in-memory `_pending` dict, which
+    would otherwise require an incorrect reload_pending() call against
+    a registry that only knows about this one template's own three
+    tools (Phase 98, Batch 3).
+    """
+
+    def __init__(self, *, pending_store, history_store, clock) -> None:
+        self._pending_store = pending_store
+        self._history_store = history_store
+        self._clock = clock
+
+    def invalidate_pending(self, request_id: str, *, reason: str) -> bool:
+        """Mirrors ApprovalManager.invalidate_pending()'s own durable
+        behaviour exactly: CAS PENDING -> EXPIRED, then record an
+        honest approval-history timeout entry. A no-op (returns False)
+        if the row is not currently PENDING.
+
+        Args:
+            request_id: The pending approval request id to invalidate.
+            reason: A short, bounded, honest reason.
+
+        Returns:
+            True if the row was found and invalidated; False otherwise.
+        """
+        if not self._pending_store.mark_expired(request_id):
+            return False
+        self._history_store.record_timeout(
+            request_id=request_id,
+            timed_out_at=self._clock(),
+            reason=f"Could not be resumed after restart: {reason}",
+        )
+        return True
 
 
 def _expected_history_status(handoff_status: PendingApprovalHandoffStatus) -> str:

@@ -2,9 +2,21 @@
 test_phase98_batch1_isolation.py
 
 Structural proof that Phase 98 Batch 1's two new foundations (the
-PlanStep verification gate and CompoundWorkflowProgressStore) add zero
-live compound wiring and zero user-visible behavior
+PlanStep verification gate and CompoundWorkflowProgressStore) added
+zero live compound wiring and zero user-visible behavior at the time
 (docs/phase_98_implementation_plan.md).
+
+Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md)
+formally, atomically activated live wiring for CompoundWorkflowProgressStore
+through exactly two call sites: main.py's build_orchestrator() (owns
+the store instance) and core/orchestrator.py (consumes it through its
+own new, narrow set of methods). Every assertion below that concerned
+those two files is revised, not removed, to prove the reference is
+confined exactly there - never a broader sprawl - while every other
+module keeps the original, unchanged "must never import this" bar.
+The PlanStep verification-gate assertions (requires_verified_predecessor)
+are untouched: Batch 3 added no new reference to that gate outside the
+one dormant-since-Batch-2 builder this file already accounted for.
 
 Uses direct imports and module-source AST inspection - never brittle
 raw-text search where a structural check is possible, matching the
@@ -24,11 +36,41 @@ _LIVE_RUNTIME_MODULES = (
     "intelligence/compound_grounding.py",
     "intelligence/structured_output.py",
     "intelligence/planning.py",
-    "core/orchestrator.py",
-    "main.py",
 )
 
 _NEW_BATCH1_MODULE_NAMES = frozenset({"compound_workflow_progress_store"})
+
+#: Phase 98, Batch 3: the only two modules now legitimately importing
+#: CompoundWorkflowProgressStore, and the only functions/methods within
+#: them allowed to reference it or the store's own class name.
+_BATCH3_PROGRESS_STORE_CONSUMERS = ("core/orchestrator.py", "main.py")
+
+_ORCHESTRATOR_ALLOWED_PROGRESS_STORE_FUNCTIONS = frozenset(
+    {
+        "__init__",
+        "validate_pending_approval_for_transition",
+        "_claim_and_resume_workflow",
+        "_compound_step_observer_for",
+        "_start_compound_update_phase_and_show_workflow",
+        "_terminalize_declined_compound_progress",
+    }
+)
+
+_MAIN_ALLOWED_PROGRESS_STORE_FUNCTIONS = frozenset(
+    {"build_orchestrator", "reconcile_claimed_handoffs"}
+)
+
+
+def _functions_referencing(source: str, needle: str) -> set[str]:
+    tree = ast.parse(source)
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if needle in segment:
+            hits.add(node.name)
+    return hits
 
 
 def _module_source(relative_path: str) -> str:
@@ -122,14 +164,28 @@ class TestNoCompoundPlanConstruction:
 
 
 class TestNoOrchestratorCompoundBranch:
-    def test_orchestrator_does_not_import_new_progress_store(self) -> None:
+    def test_orchestrator_imports_progress_store_only_for_compound_wiring(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3 activation: core/orchestrator.py now
+        legitimately imports CompoundWorkflowProgressStore - but only
+        as one of its Batch 3 compound-workflow collaborators, never
+        as a general-purpose dependency injected elsewhere."""
         source = _module_source("core/orchestrator.py")
         referenced = _referenced_module_names(source)
-        assert not (referenced & _NEW_BATCH1_MODULE_NAMES)
+        assert _NEW_BATCH1_MODULE_NAMES <= referenced
 
-    def test_orchestrator_source_has_no_compound_progress_reference(self) -> None:
+    def test_orchestrator_progress_reference_confined_to_named_methods(self) -> None:
         source = _module_source("core/orchestrator.py")
-        assert "CompoundWorkflowProgress" not in source
+        hits = _functions_referencing(source, "CompoundWorkflowProgress")
+        assert hits <= _ORCHESTRATOR_ALLOWED_PROGRESS_STORE_FUNCTIONS, (
+            f"unexpected CompoundWorkflowProgress reference inside: "
+            f"{hits - _ORCHESTRATOR_ALLOWED_PROGRESS_STORE_FUNCTIONS}"
+        )
+        # The PlanStep verification gate itself is still never
+        # orchestrator.py's own concern - it is planning.py's fixed,
+        # trusted plan-construction detail, and WorkflowEngine's own
+        # internal gate check, never re-implemented or re-inspected here.
         assert "requires_verified_predecessor" not in source
 
 
@@ -145,10 +201,20 @@ class TestNoUserFacingExposure:
         assert "requires_verified_predecessor" not in source
         assert "CompoundWorkflowProgress" not in source
 
-    def test_main_does_not_import_new_progress_store(self) -> None:
+    def test_main_imports_progress_store_only_for_compound_wiring(self) -> None:
+        """Phase 98, Batch 3 activation: main.py now legitimately
+        imports CompoundWorkflowProgressStore inside build_orchestrator()
+        (to construct the one real instance) and reconcile_claimed_
+        handoffs() (compound-first startup recovery) - nowhere else."""
         source = _module_source("main.py")
         referenced = _referenced_module_names(source)
-        assert not (referenced & _NEW_BATCH1_MODULE_NAMES)
+        assert _NEW_BATCH1_MODULE_NAMES <= referenced
+
+        hits = _functions_referencing(source, "CompoundWorkflowProgress")
+        assert hits <= _MAIN_ALLOWED_PROGRESS_STORE_FUNCTIONS, (
+            f"unexpected CompoundWorkflowProgress reference inside: "
+            f"{hits - _MAIN_ALLOWED_PROGRESS_STORE_FUNCTIONS}"
+        )
 
 
 class TestNoProductionCapabilityUsesNewMechanism:

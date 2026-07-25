@@ -2,11 +2,21 @@
 test_phase98_batch2_dormant_isolation.py
 
 Structural proof that Phase 98, Batch 2's new trusted compound
-lifecycle (docs/phase_98_live_compound_reentry_plan.md) adds zero live
-compound wiring and zero user-visible behavior. No production request
-path, help output, user guide, or prompt instruction may ever reach
-peek_compound_decision(), the dormant plan builder, or any function in
-core/compound_workflow.py.
+lifecycle (docs/phase_98_live_compound_reentry_plan.md) itself added
+zero live compound wiring and zero user-visible behavior at the time.
+
+Phase 98, Batch 3 formally, atomically activated this lifecycle
+through exactly two call sites - intelligence/planning.py's
+select_tool() (the live discriminator peek) and core/orchestrator.py
+(consumes core/compound_workflow.py's functions and
+workflow/compound_progress_observer.py's CompoundStepObserver, through
+its own new, narrow set of methods) - plus main.py's compound-first
+startup recovery wiring. Every assertion below that concerned those
+specific modules/functions is revised, not removed, to prove the
+activation is confined exactly there. help_tool.py/docs/user_guide.md/
+ui/cli.py/core/command_router.py's own assertions are untouched here -
+see the dedicated compound-example additions and their own test
+coverage for what Batch 3 legitimately changed there.
 
 Uses direct imports and module-source AST inspection - never brittle
 raw-text search where a structural check is possible, mirroring
@@ -28,17 +38,40 @@ _LIVE_RUNTIME_MODULES = (
     "intelligence/compound_structured_output.py",
     "intelligence/compound_grounding.py",
     "intelligence/structured_output.py",
-    "intelligence/planning.py",
-    "core/orchestrator.py",
-    "main.py",
     "ui/cli.py",
     "core/command_router.py",
-    "tools/builtin/help_tool.py",
 )
 
 _NEW_BATCH2_MODULE_NAMES = frozenset(
     {"compound_workflow", "compound_progress_observer"}
 )
+
+#: Phase 98, Batch 3: the only functions/methods in core/orchestrator.py
+#: and main.py allowed to reference a Batch 2 compound-lifecycle name.
+_ORCHESTRATOR_ALLOWED_COMPOUND_FUNCTIONS = frozenset(
+    {
+        "__init__",
+        "validate_pending_approval_for_transition",
+        "_claim_and_resume_workflow",
+        "_compound_step_observer_for",
+        "_start_compound_update_phase_and_show_workflow",
+    }
+)
+_MAIN_ALLOWED_COMPOUND_FUNCTIONS = frozenset(
+    {"build_orchestrator", "reconcile_claimed_handoffs", "invalidate_pending"}
+)
+
+
+def _functions_referencing(source: str, needle: str) -> set[str]:
+    tree = ast.parse(source)
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if needle in segment:
+            hits.add(node.name)
+    return hits
 
 
 def _module_source(relative_path: str) -> str:
@@ -59,7 +92,10 @@ def _referenced_module_names(source: str) -> set[str]:
 
 class TestNoLiveModuleImportsBatch2Internals:
     """core/compound_workflow.py and workflow/compound_progress_observer.py
-    are never imported by any live runtime module in Batch 2."""
+    are never imported by any of these live runtime modules - the ones
+    Batch 3 did not touch. (core/orchestrator.py and main.py are the
+    two Batch 3 exceptions, covered by TestOrchestratorAndMainCompoundWiring
+    below.)"""
 
     @pytest.mark.parametrize("relative_path", _LIVE_RUNTIME_MODULES)
     def test_module_does_not_import_batch2_internals(self, relative_path: str) -> None:
@@ -68,12 +104,20 @@ class TestNoLiveModuleImportsBatch2Internals:
         assert not (referenced & _NEW_BATCH2_MODULE_NAMES)
 
 
-class TestSelectToolUnreachableToCompoundBuilder:
-    def test_select_tool_never_calls_dormant_compound_plan_builder(self) -> None:
-        """Duplicated, narrower proof alongside
-        test_phase98_batch1_isolation.py's own equivalent test - kept
-        here too so this file alone fully documents Batch 2's dormant
-        boundary without depending on another file's own assertion."""
+class TestSelectToolCompoundDispatch:
+    """Phase 98, Batch 3 activation: select_tool() is now the one live
+    call site for both peek_compound_decision() and the dormant-since-
+    Batch-2 compound plan builder (indirectly, via its own dedicated
+    _select_compound_tool_sequence() helper) - proven confined, not
+    absent."""
+
+    def test_select_tool_calls_the_compound_plan_builder_only_via_its_own_helper(
+        self,
+    ) -> None:
+        """select_tool() itself must never call
+        _build_phase_update_verify_show_workflow_plan() directly - only
+        _select_compound_tool_sequence() may, keeping the delegation
+        chain exactly one level deep."""
         source = _module_source("intelligence/planning.py")
         tree = ast.parse(source)
         select_tool_node = next(
@@ -87,27 +131,71 @@ class TestSelectToolUnreachableToCompoundBuilder:
             if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
         }
         assert "_build_phase_update_verify_show_workflow_plan" not in called_names
+        assert "_select_compound_tool_sequence" in called_names
 
-    def test_planning_module_never_calls_peek_compound_decision(self) -> None:
-        """peek_compound_decision() is written and independently
-        testable, but Batch 2 attaches no call site to it anywhere in
-        planning.py - Batch 3's own, separately-approved wiring is the
-        only place this may change."""
+    def test_planning_module_calls_peek_compound_decision_only_from_select_tool(
+        self,
+    ) -> None:
+        """Phase 98, Batch 3: peek_compound_decision() is now live -
+        actually *called* only from select_tool() itself. (Its own
+        docstring in _select_compound_tool_sequence() names it too, to
+        explain the calling contract, but that is a docstring mention,
+        never a real ast.Call - only genuine calls count here.)"""
         source = _module_source("intelligence/planning.py")
-        assert "peek_compound_decision" not in source
+        tree = ast.parse(source)
+        calling_functions: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "peek_compound_decision"
+                ):
+                    calling_functions.add(node.name)
+                    break
+        assert calling_functions == {"select_tool"}
 
 
-class TestNoOrchestratorOrMainCompoundBranch:
-    def test_orchestrator_source_has_no_compound_workflow_reference(self) -> None:
+class TestOrchestratorAndMainCompoundWiring:
+    """Phase 98, Batch 3 activation: core/orchestrator.py and main.py
+    now legitimately reference Batch 2's compound lifecycle - proven
+    confined to exactly the intended methods/functions, never a
+    broader, uncontrolled sprawl through either module."""
+
+    def test_orchestrator_compound_workflow_reference_confined_to_named_methods(
+        self,
+    ) -> None:
         source = _module_source("core/orchestrator.py")
-        assert "compound_workflow" not in source
-        assert "CompoundStepObserver" not in source
+        assert "compound_workflow" in source
+        assert "CompoundStepObserver" in source
+        # resume_claimed_compound_workflow() itself is never called here
+        # - orchestrator.py attaches the observer to the existing,
+        # unmodified WorkflowEngine.resume(), never a separate
+        # compound-specific resume function.
         assert "resume_claimed_compound_workflow" not in source
 
-    def test_main_source_has_no_compound_workflow_reference(self) -> None:
+        hits = _functions_referencing(source, "compound_workflow") | (
+            _functions_referencing(source, "CompoundStepObserver")
+        )
+        assert hits <= _ORCHESTRATOR_ALLOWED_COMPOUND_FUNCTIONS, (
+            f"unexpected compound-lifecycle reference inside: "
+            f"{hits - _ORCHESTRATOR_ALLOWED_COMPOUND_FUNCTIONS}"
+        )
+
+    def test_main_compound_workflow_reference_confined_to_named_functions(
+        self,
+    ) -> None:
         source = _module_source("main.py")
-        assert "compound_workflow" not in source
-        assert "reconcile_claimed_compound_workflows" not in source
+        assert "compound_workflow" in source
+        assert "reconcile_claimed_compound_workflows" in source
+
+        hits = _functions_referencing(source, "compound_workflow")
+        assert hits <= _MAIN_ALLOWED_COMPOUND_FUNCTIONS, (
+            f"unexpected compound_workflow reference inside: "
+            f"{hits - _MAIN_ALLOWED_COMPOUND_FUNCTIONS}"
+        )
 
 
 class TestNoUserFacingExposure:
