@@ -97,6 +97,12 @@ from intelligence.compound_structured_output import (
 )
 from intelligence.context import AssembledContext, build_ai_context_block
 from intelligence.grounding import ground_decision
+from intelligence.actionable_decision_issue import (
+    ActionableDecisionIssue,
+    classify_actionable_issue_from_invalid_output,
+    classify_actionable_issue_from_ungrounded_selection,
+    classify_actionable_issue_from_unsupported,
+)
 from intelligence.schedule_compound_grounding import ground_schedule_compound_decision
 from intelligence.structured_output import (
     ToolSelectionDecision,
@@ -442,12 +448,24 @@ class PlanningOutcome:
             UngroundedReason's bounded values) - never the raw model
             output, the live request, a candidate argument span, or a
             rejected value.
+        actionable_issue: Set only for the narrow Phase 101 Batch 1
+            case (docs/phase_101_actionable_ambiguity_planning.md): an
+            INVALID_OUTPUT, UNGROUNDED_SELECTION, or UNSUPPORTED
+            outcome whose failing capability is independently confirmed
+            by request_text alone (never by model output or historical
+            context) to be a missing/invalid required argument for one
+            of the five allowlisted capabilities. None for every other
+            outcome, including every EXECUTABLE* kind - this field
+            carries no authority and is never consumed by approval,
+            workflow, or execution code; Batch 1 populates it only for
+            this feature's own dedicated tests to inspect.
     """
 
     kind: PlanningOutcomeKind
     plan: StructuredPlan | None = None
     workflow_plan: Plan | None = None
     detail: str | None = None
+    actionable_issue: ActionableDecisionIssue | None = None
 
 
 def select_tool(
@@ -536,12 +554,33 @@ def select_tool(
     try:
         parsed = parse_tool_selection(response.text, active_catalog)
     except ToolSelectionParseError as exc:
+        # Phase 101, Batch 1: never trusts exc.reason or the raw model
+        # text alone - classify_actionable_issue_from_invalid_output()
+        # gates on the exact eligible reason strings, then independently
+        # re-confirms capability identity against request_text through
+        # the real, unmodified ground_decision(). Populates
+        # actionable_issue only for this feature's own tests; the
+        # live-facing kind/detail below are completely unchanged.
         return PlanningOutcome(
-            kind=PlanningOutcomeKind.INVALID_OUTPUT, detail=exc.reason
+            kind=PlanningOutcomeKind.INVALID_OUTPUT,
+            detail=exc.reason,
+            actionable_issue=classify_actionable_issue_from_invalid_output(
+                raw_text=response.text, request_text=request_text, reason=exc.reason
+            ),
         )
 
     if parsed.decision is ToolSelectionDecision.UNSUPPORTED:
-        return PlanningOutcome(kind=PlanningOutcomeKind.UNSUPPORTED)
+        # Phase 101, Batch 1: the model's own "unsupported" decision is
+        # never used as a source of capability identity (it carries
+        # none) - classify_actionable_issue_from_unsupported() relies
+        # entirely on request_text, independent of anything the model
+        # returned.
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.UNSUPPORTED,
+            actionable_issue=classify_actionable_issue_from_unsupported(
+                request_text=request_text
+            ),
+        )
 
     assert parsed.capability_id is not None  # guaranteed for EXECUTE
     adapter = active_catalog[parsed.capability_id]
@@ -562,9 +601,17 @@ def select_tool(
     )
     if not grounding.grounded:
         assert grounding.reason is not None  # guaranteed when not grounded
+        # Phase 101, Batch 1: reuses this exact, already-computed
+        # grounding result directly - no new grounding call. By this
+        # point ground_decision() has already independently confirmed
+        # request_text matches exactly one capability signature and
+        # that it agrees with the model's own parsed.capability_id.
         return PlanningOutcome(
             kind=PlanningOutcomeKind.UNGROUNDED_SELECTION,
             detail=grounding.reason.value,
+            actionable_issue=classify_actionable_issue_from_ungrounded_selection(
+                capability_id=parsed.capability_id, reason=grounding.reason
+            ),
         )
 
     preflight = _preflight_capability(
