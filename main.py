@@ -90,6 +90,7 @@ from core.schedule_compound_workflow import (
 )
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler
+from intelligence.verified_action_context import VerifiedActionContextBuilder
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
@@ -383,17 +384,6 @@ def build_orchestrator() -> JarvisOrchestrator:
     # manager connection, never AI, never a subprocess, never git.
     registry.register_tool(PreparePromptTool(jarvis_brain, project_state_store))
 
-    # ContextAssembler (Phase 90, Batch 1): powers the explicit "ask
-    # jarvis: <request>" Context Intelligence command. Reuses the exact
-    # same `memory`/`project_state_store` instances already constructed
-    # above - never a second MemoryManager/ProjectStateStore connection.
-    # Registers no tool of its own: it is never reachable through
-    # CommandRouter's ordinary match()/build_input() path, only through
-    # JarvisOrchestrator's own dedicated "ask jarvis:" dispatch branch.
-    context_assembler = ContextAssembler(
-        memory_manager=memory, project_state_store=project_state_store
-    )
-
     executor = ToolExecutor(
         registry=registry,
         security_manager=security,
@@ -444,6 +434,36 @@ def build_orchestrator() -> JarvisOrchestrator:
     # that one template; every other request path never touches it.
     schedule_compound_progress_store = ScheduleCompoundWorkflowProgressStore(
         session_factory
+    )
+
+    # VerifiedActionContextBuilder (Phase 100, Batch 2 -
+    # docs/phase_100_intelligence_core_gap_audit.md): the one narrow,
+    # owned dependency wrapping the two compound progress stores and
+    # PendingApprovalStore already constructed above (not second
+    # instances) - so ContextAssembler below never threads three stores
+    # independently, and never imports a SQLAlchemy model directly.
+    verified_action_context_builder = VerifiedActionContextBuilder(
+        project_state_progress_store=compound_progress_store,
+        schedule_progress_store=schedule_compound_progress_store,
+        pending_approval_store=pending_approvals,
+    )
+
+    # ContextAssembler (Phase 90, Batch 1; extended Phase 100, Batch 2
+    # with a third, optional Verified Action Context source): powers
+    # the explicit "ask jarvis: <request>" Context Intelligence command
+    # and the "ask jarvis to: <request>" tool-selection command (both
+    # single-capability and compound) identically, via this one shared
+    # instance. Reuses the exact same `memory`/`project_state_store`/
+    # `verified_action_context_builder` instances already constructed
+    # above - never a second MemoryManager/ProjectStateStore/builder.
+    # Registers no tool of its own: it is never reachable through
+    # CommandRouter's ordinary match()/build_input() path, only through
+    # JarvisOrchestrator's own dedicated "ask jarvis:"/"ask jarvis to:"
+    # dispatch branches.
+    context_assembler = ContextAssembler(
+        memory_manager=memory,
+        project_state_store=project_state_store,
+        verified_action_context_builder=verified_action_context_builder,
     )
 
     # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same

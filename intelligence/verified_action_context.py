@@ -1,13 +1,14 @@
 """
 verified_action_context.py
 
-Phase 100, Batch 1 (dormant foundation) -
-docs/phase_100_intelligence_core_gap_audit.md, Section 12A: a narrow,
-deterministic, read-only view over already-durable evidence from the
-two live compound workflows (ProjectState phase-update,
-schedule-enable) plus current pending-approval/handoff state, so a
-later, separately-approved batch can let Jarvis's reasoning read back
-what it has actually already done.
+Phase 100 (docs/phase_100_intelligence_core_gap_audit.md, Section
+12A): a narrow, deterministic, read-only view over already-durable
+evidence from the two live compound workflows (ProjectState
+phase-update, schedule-enable) plus current pending-approval/handoff
+state, so Jarvis's reasoning can read back what it has actually
+already done. Batch 1 built this module as a dormant foundation; Batch
+2 (this module's own VerifiedActionContextBuilder, consumed by
+intelligence/context.py::ContextAssembler) is the sole live consumer.
 
 Responsibilities:
     - Define the bounded VerifiedActionDomain/VerifiedActionStatus
@@ -44,10 +45,11 @@ Responsibilities:
       current-state claim from historical evidence (Section 12A.10).
 
 Does NOT:
-    - Call ContextAssembler, PromptBuilder, select_tool(), or any other
-      live reasoning/prompt path. Nothing in this module is imported by
-      intelligence/context.py, ai/, or core/orchestrator.py during
-      Batch 1 - wiring is a separately-approved Batch 2 responsibility.
+    - Call PromptBuilder, select_tool(), or any AI provider directly -
+      the only live caller is ContextAssembler, and only through
+      VerifiedActionContextBuilder.build()'s own narrow return value;
+      this module has no reference to a prompt, a model, or the tool-
+      selection pipeline.
     - Read WorkflowHistoryStore or ApprovalHistoryStore. The former's
       own record deliberately carries no tool_input/target-identity
       column (storage/models.py's own docstring); the latter is fully
@@ -780,3 +782,64 @@ def build_verified_action_context(
     return VerifiedActionContext(
         entries=entries, truncated=truncated, notes=tuple(notes)
     )
+
+
+class VerifiedActionContextBuilder:
+    """One narrow, owned dependency wrapping the three durable stores
+    Verified Action Context needs (Phase 100, Batch 2 -
+    docs/phase_100_intelligence_core_gap_audit.md).
+
+    Exists so intelligence/context.py's ContextAssembler receives a
+    single collaborator instead of threading
+    CompoundWorkflowProgressStore/ScheduleCompoundWorkflowProgressStore/
+    PendingApprovalStore independently through its own constructor -
+    ContextAssembler never imports a SQLAlchemy model or store module
+    directly; it only ever calls this class's own build() method.
+
+    Attributes:
+        _project_state_progress_store: The real
+            CompoundWorkflowProgressStore, or None.
+        _schedule_progress_store: The real
+            ScheduleCompoundWorkflowProgressStore, or None.
+        _pending_approval_store: The real PendingApprovalStore, or None.
+    """
+
+    def __init__(
+        self,
+        *,
+        project_state_progress_store: CompoundWorkflowProgressStore | None,
+        schedule_progress_store: ScheduleCompoundWorkflowProgressStore | None,
+        pending_approval_store: PendingApprovalStore | None,
+    ) -> None:
+        """Initialise the builder with its three read-only collaborators.
+
+        Args:
+            project_state_progress_store: The real
+                CompoundWorkflowProgressStore, or None to omit that
+                domain entirely.
+            schedule_progress_store: The real
+                ScheduleCompoundWorkflowProgressStore, or None to omit
+                that domain entirely.
+            pending_approval_store: The real PendingApprovalStore, or
+                None to disable handoff-dependent statuses.
+        """
+        self._project_state_progress_store = project_state_progress_store
+        self._schedule_progress_store = schedule_progress_store
+        self._pending_approval_store = pending_approval_store
+
+    def build(self) -> VerifiedActionContext:
+        """Build one bounded, deterministic VerifiedActionContext.
+
+        Constructed fresh from durable stores on every call - never
+        cached, never authoritative beyond the moment of the read
+        (Section 12A.10's historical-truth contract) - so a restart
+        reconstructs identical context from the same durable rows.
+
+        Returns:
+            A VerifiedActionContext with up to five entries.
+        """
+        return build_verified_action_context(
+            project_state_progress_store=self._project_state_progress_store,
+            schedule_progress_store=self._schedule_progress_store,
+            pending_approval_store=self._pending_approval_store,
+        )

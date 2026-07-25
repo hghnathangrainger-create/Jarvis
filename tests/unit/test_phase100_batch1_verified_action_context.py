@@ -1267,7 +1267,16 @@ def _referenced_module_names(source: str) -> set[str]:
 
 
 _LIVE_MODULES_THAT_MUST_NOT_REFERENCE_BATCH1 = (
-    "intelligence/context.py",
+    # Phase 100, Batch 2 (docs/phase_100_intelligence_core_gap_audit.md)
+    # activated exactly one legitimate consumer,
+    # intelligence/context.py's ContextAssembler, plus main.py's own
+    # composition-root wiring of it - both removed from this "must
+    # never reference" list below and covered instead by
+    # TestLiveIntegrationConfinement's own confinement proof. Every
+    # other module here must still never reference this module at
+    # all: context reaches the AI only through ContextAssembler's own
+    # already-built ContextItem/AIContextBlock, never by a second,
+    # independent import elsewhere.
     "intelligence/planning.py",
     "intelligence/structured_output.py",
     "intelligence/compound_structured_output.py",
@@ -1278,7 +1287,6 @@ _LIVE_MODULES_THAT_MUST_NOT_REFERENCE_BATCH1 = (
     "ai/router.py",
     "ai/prompt_studio.py",
     "core/orchestrator.py",
-    "main.py",
 )
 
 
@@ -1292,11 +1300,21 @@ class TestDormancyAndRegression:
         assert "verified_action_context" not in referenced
         assert "verified_action_context" not in source
 
-    def test_context_assembler_unchanged_source_has_no_third_source_reference(
-        self,
-    ) -> None:
+    def test_no_new_table_added_to_storage_models(self) -> None:
+        source = _module_source("storage/models.py")
+        assert "VerifiedActionContext" not in source
+        assert "verified_action" not in source.lower()
+
+
+class TestLiveIntegrationConfinement:
+    """Phase 100, Batch 2: proves the one legitimate live reference
+    (ContextAssembler) is confined to exactly its own expected call
+    sites, never spread further - the same confinement-not-absence
+    convention this codebase already established for Phase 98/99
+    Batch 3's own activation proofs."""
+
+    def test_context_source_has_exactly_the_accepted_three_members(self) -> None:
         source = _module_source("intelligence/context.py")
-        assert "VerifiedAction" not in source
         tree = ast.parse(source)
         (context_source_node,) = (
             node
@@ -1310,12 +1328,83 @@ class TestDormancyAndRegression:
             for target in stmt.targets
             if isinstance(target, ast.Name)
         }
-        assert member_names == {"MEMORY", "PROJECT_STATE"}
+        assert member_names == {"MEMORY", "PROJECT_STATE", "VERIFIED_ACTIONS"}
 
-    def test_no_new_table_added_to_storage_models(self) -> None:
-        source = _module_source("storage/models.py")
-        assert "VerifiedActionContext" not in source
-        assert "verified_action" not in source.lower()
+    def test_verified_action_context_reference_confined_to_named_functions(
+        self,
+    ) -> None:
+        source = _module_source("intelligence/context.py")
+        tree = ast.parse(source)
+        functions_referencing: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                segment = ast.get_source_segment(source, node) or ""
+                if "VerifiedAction" in segment or "verified_action" in segment:
+                    functions_referencing.add(node.name)
+        assert functions_referencing == {
+            "__init__", "assemble", "_build_verified_action_items",
+        }
+
+    def test_main_constructs_exactly_one_verified_action_context_builder(
+        self,
+    ) -> None:
+        source = _module_source("main.py")
+        assert source.count("VerifiedActionContextBuilder(") == 1
+
+    def test_main_reuses_existing_store_instances_for_the_builder(self) -> None:
+        """The builder must be constructed from the same
+        compound_progress_store/schedule_compound_progress_store/
+        pending_approvals instances already built for other consumers -
+        never a second, independently constructed store."""
+        source = _module_source("main.py")
+        tree = ast.parse(source)
+        call = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "VerifiedActionContextBuilder"
+        )
+        passed_names = {
+            kw.value.id
+            for kw in call.keywords
+            if isinstance(kw.value, ast.Name)
+        }
+        assert passed_names == {
+            "compound_progress_store",
+            "schedule_compound_progress_store",
+            "pending_approvals",
+        }
+
+    def test_no_duplicate_progress_store_construction_in_build_orchestrator(
+        self,
+    ) -> None:
+        """build_orchestrator() (the composition root) must construct
+        each store exactly once and reuse those same instances for the
+        builder - reconcile_claimed_handoffs()'s own separate, later
+        startup-recovery stack legitimately builds its own independent
+        instances (Phase 98/99's own established pattern) and is
+        excluded from this check by construction (scoped to the
+        build_orchestrator function body only)."""
+        source = _module_source("main.py")
+        tree = ast.parse(source)
+        build_orchestrator_node = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "build_orchestrator"
+        )
+        # Exact Call-node matching, not substring search:
+        # "CompoundWorkflowProgressStore(" is itself a substring of
+        # "ScheduleCompoundWorkflowProgressStore(", so a naive
+        # str.count() would double-count.
+        constructor_calls = [
+            node.func.id
+            for node in ast.walk(build_orchestrator_node)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert constructor_calls.count("CompoundWorkflowProgressStore") == 1
+        assert constructor_calls.count("ScheduleCompoundWorkflowProgressStore") == 1
+        assert constructor_calls.count("PendingApprovalStore") == 1
 
     def test_zero_database_writes_from_builder(
         self, session_factory, ps_store, sched_store, approval_store
