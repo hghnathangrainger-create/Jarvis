@@ -155,8 +155,14 @@ def test_checkpoint_failure_stops_before_the_write_and_leaves_claimed(
     checkpoint cannot be durably recorded (here, because no progress
     row exists at all for this workflow_id - the observer's own
     record_pre_execution_observation() call will raise), the write
-    tool must never be invoked, and the handoff must remain CLAIMED
-    for startup reconciliation - never silently repaired in-process."""
+    tool must never be invoked. Phase 98, Batch 2 acceptance
+    correction: this must raise CompoundCheckpointError - never return
+    an ordinary FAILED WorkflowResult - and the paused workflow/handoff
+    must be left exactly as they were, never silently repaired or
+    consumed in-process."""
+    from approval.approval_models import PendingApprovalHandoffStatus
+    from workflow.engine import CompoundCheckpointError
+
     stack = _Stack(tmp_path / "checkpoint_failure.db")
     plan = stack.build_plan("should-never-be-written")
 
@@ -175,23 +181,23 @@ def test_checkpoint_failure_stops_before_the_write_and_leaves_claimed(
         executor=stack.executor,
         session_id=None,
     )
-    result = stack.workflow_engine.resume(workflow_id, decision, step_observer=observer)
+    with pytest.raises(CompoundCheckpointError):
+        stack.workflow_engine.resume(workflow_id, decision, step_observer=observer)
 
-    from config.constants import StepStatus
-
-    assert result.overall_status is StepStatus.FAILED
     assert stack.project_state_store.get() is None  # the write never ran
-    assert "checkpoint" in (result.step_outcomes[-1].tool_result.error or "").casefold()
 
     # The claim is left exactly as it is - CLAIMED - for the exclusive
     # startup-recovery/compound-reconciliation pass to resolve; this
-    # in-process failure never repairs or repeats anything itself.
-    from approval.approval_models import PendingApprovalHandoffStatus
-
+    # in-process failure never repairs, consumes, or repeats anything
+    # itself.
     assert (
         stack.pending_store.get_handoff_status(request_id)
         == PendingApprovalHandoffStatus.CLAIMED
     )
+    # The paused workflow's durable state is retained too - restored by
+    # resume() itself before the exception propagated.
+    assert stack.paused_store.get(workflow_id) is not None
+    assert stack.workflow_engine.has_paused(workflow_id) is True
 
 
 def test_verification_mismatch_stops_before_show_and_translates_honestly(

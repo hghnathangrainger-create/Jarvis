@@ -31,8 +31,9 @@ from storage.database import create_session_factory, initialize_database  # noqa
 from tools.base_tool import BaseTool, ToolRequest, ToolResult  # noqa: E402
 from tools.executor import ToolExecutor  # noqa: E402
 from tools.registry import ToolRegistry  # noqa: E402
-from workflow.engine import WorkflowEngine  # noqa: E402
+from workflow.engine import CompoundCheckpointError, WorkflowEngine  # noqa: E402
 from workflow.paused_workflow_store import PausedWorkflowStore  # noqa: E402
+from workflow.workflow_history_store import WorkflowHistoryStore  # noqa: E402
 
 
 class _RecordingTool(BaseTool):
@@ -120,7 +121,22 @@ class _TracingObserver:
         return self._after_failures.get(step_index)
 
 
-def _build(session_factory=None):
+def _session_factory():
+    from sqlalchemy import create_engine
+
+    engine = create_engine("sqlite:///:memory:")
+    initialize_database(engine)
+    return create_session_factory(engine)
+
+
+def _build():
+    """Builds one full, real-persistence stack (real PendingApprovalStore,
+    PausedWorkflowStore, WorkflowHistoryStore, all backed by a real,
+    in-memory SQLite database) so checkpoint-failure tests can prove,
+    for real, that paused state is retained and no terminal history is
+    written - not merely that the returned WorkflowResult looks a
+    certain way."""
+    session_factory = _session_factory()
     security = SecurityManager()
     registry = ToolRegistry()
     write_tool = _RecordingTool("write_tool", tier_action="delete something")
@@ -133,13 +149,29 @@ def _build(session_factory=None):
     registry.register_tool(show_tool)
     executor = ToolExecutor(registry=registry, security_manager=security, logger=None)
 
-    if session_factory is not None:
-        pending_store = PendingApprovalStore(session_factory)
-        approvals = ApprovalManager(pending_store=pending_store)
-    else:
-        approvals = ApprovalManager()
-    engine = WorkflowEngine(executor=executor, approvals=approvals)
-    return engine, approvals, write_tool, verify_tool, show_tool
+    pending_store = PendingApprovalStore(session_factory)
+    approvals = ApprovalManager(pending_store=pending_store)
+    paused_store = PausedWorkflowStore(session_factory)
+    history = WorkflowHistoryStore(session_factory)
+    engine = WorkflowEngine(
+        executor=executor, approvals=approvals, paused_store=paused_store, history=history
+    )
+    return engine, approvals, write_tool, verify_tool, show_tool, paused_store, history
+
+
+def _assert_no_terminal_history(history: WorkflowHistoryStore, workflow_id: str) -> None:
+    """A checkpoint infrastructure failure alone must never create
+    positive terminal evidence (workflow_completed/workflow_stopped) -
+    the exact two statuses the generic interlock's own
+    latest_status_for()-based reconciliation treats as proof a workflow
+    reached a known terminal state. Ordinary, non-terminal history
+    entries (workflow_started/workflow_step_started/workflow_step_waiting,
+    already written before any checkpoint failure could occur) are
+    expected and harmless - this only asserts neither terminal status
+    was ever additionally recorded."""
+    latest = history.latest_status_for(workflow_id)
+    if latest is not None:
+        assert latest.status not in ("workflow_completed", "workflow_stopped")
 
 
 def _run_and_approve(engine, approvals):
@@ -153,7 +185,7 @@ def _run_and_approve(engine, approvals):
 
 class TestObserverNeverAttachedToRun:
     def test_run_pauses_without_ever_calling_before_step_or_after_step(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        engine, approvals, write_tool, verify_tool, show_tool, *_ = _build()
         plan = _three_step_plan()
         trace: list = []
         # run() itself accepts no step_observer parameter at all - this
@@ -168,7 +200,7 @@ class TestObserverNeverAttachedToRun:
 
 class TestExactCheckpointOrdering:
     def test_before_and_after_fire_in_strict_per_step_order(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        engine, approvals, write_tool, verify_tool, show_tool, *_ = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
@@ -190,95 +222,189 @@ class TestExactCheckpointOrdering:
 
     def test_before_step_fires_before_the_tool_is_invoked(self) -> None:
         """A before_step failure for step 0 must prevent the write
-        tool from ever being called at all."""
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        tool from ever being called at all, and (Phase 98, Batch 2
+        acceptance correction) must raise CompoundCheckpointError -
+        never an ordinary FAILED WorkflowResult."""
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
         observer = _TracingObserver(trace, before_failures={0: "checkpoint unavailable"})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        with pytest.raises(CompoundCheckpointError):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
         assert write_tool.calls == []
         assert verify_tool.calls == []
         # before_step itself still recorded the attempt; only the tool
         # call and any subsequent after_step never happen.
         assert trace == [("before", 0)]
+        # No terminal history was written, and the paused workflow's
+        # durable row is retained, exactly as it was before resume().
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
+        assert engine.has_paused(workflow_id) is True
 
 
-class TestFailClosedOnReturnedReason:
-    def test_before_step_failure_stops_before_the_tool_runs(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+class TestCheckpointFailureRaisesAndPreservesRecovery:
+    """Phase 98, Batch 2 acceptance correction
+    (docs/phase_98_live_compound_reentry_plan.md, "Checkpoint-Failure
+    Handoff and Terminal Semantics"): a checkpoint infrastructure
+    failure must never be converted into an ordinary, known FAILED
+    WorkflowResult via _stop() - it must raise CompoundCheckpointError,
+    write no workflow_stopped/workflow_completed terminal history, and
+    leave the paused workflow (durable and in-memory) exactly as it was
+    before this resume() attempt, so compound-specific startup
+    reconciliation remains reachable."""
+
+    def test_before_step_failure_on_step_2_stops_before_the_verifier_runs(self) -> None:
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
         observer = _TracingObserver(trace, before_failures={1: "cannot mark step 2 active"})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        with pytest.raises(CompoundCheckpointError, match="cannot mark step 2 active"):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
         assert len(write_tool.calls) == 1  # step 1 did run
         assert verify_tool.calls == []  # step 2 never invoked
         assert show_tool.calls == []
         assert trace == [("before", 0), ("after", 0, True), ("before", 1)]
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
+        assert engine.has_paused(workflow_id) is True
 
-    def test_after_step_failure_stops_the_workflow_without_advancing(self) -> None:
+    def test_after_step_failure_on_step_1_success_stops_without_advancing(self) -> None:
         """The tool itself succeeded, but its checkpoint could not be
-        recorded - the engine must never silently advance to Step 2."""
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        recorded - the engine must never silently advance to Step 2,
+        and must never mark this a known terminal result."""
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
         observer = _TracingObserver(trace, after_failures={0: "durable write failed"})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        with pytest.raises(CompoundCheckpointError, match="durable write failed"):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
         assert len(write_tool.calls) == 1
         assert verify_tool.calls == []  # never reached
-        last_outcome = result.step_outcomes[-1]
-        assert last_outcome.status is StepStatus.FAILED
-        assert "durable write failed" in (last_outcome.tool_result.error or "")
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
+        assert engine.has_paused(workflow_id) is True
 
     def test_after_step_failure_mid_workflow_stops_before_final_step(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
         observer = _TracingObserver(trace, after_failures={1: "verification checkpoint failed"})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        with pytest.raises(CompoundCheckpointError):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
         assert len(verify_tool.calls) == 1
         assert show_tool.calls == []  # step 3 never reached
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
 
-
-class TestFailClosedOnRaisedException:
-    def test_raising_before_step_stops_the_workflow_rather_than_crashing(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+    def test_after_step_failure_on_step_3_success_never_repeats_step_1(self) -> None:
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
         trace: list = []
-        observer = _TracingObserver(trace, raise_on={("before", 0)})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        observer = _TracingObserver(trace, after_failures={2: "overall terminal checkpoint failed"})
+        with pytest.raises(CompoundCheckpointError):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
+        assert len(write_tool.calls) == 1  # Step 1 ran exactly once
+        assert len(verify_tool.calls) == 1
+        assert len(show_tool.calls) == 1
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
+
+    def test_raising_before_step_is_the_same_nonterminal_path_as_a_returned_reason(
+        self,
+    ) -> None:
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
+        workflow_id, decision = _run_and_approve(engine, approvals)
+
+        observer = _TracingObserver([], raise_on={("before", 0)})
+        with pytest.raises(CompoundCheckpointError):
+            engine.resume(workflow_id, decision, step_observer=observer)
+
         assert write_tool.calls == []
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
 
-    def test_raising_after_step_stops_the_workflow_rather_than_crashing(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+    def test_raising_after_step_is_the_same_nonterminal_path_as_a_returned_reason(
+        self,
+    ) -> None:
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
 
-        trace: list = []
-        observer = _TracingObserver(trace, raise_on={("after", 0)})
-        result = engine.resume(workflow_id, decision, step_observer=observer)
+        observer = _TracingObserver([], raise_on={("after", 0)})
+        with pytest.raises(CompoundCheckpointError):
+            engine.resume(workflow_id, decision, step_observer=observer)
 
-        assert result.overall_status is StepStatus.FAILED
         assert len(write_tool.calls) == 1
         assert verify_tool.calls == []
+        _assert_no_terminal_history(history, workflow_id)
+        assert paused_store.get(workflow_id) is not None
+
+    def test_checkpoint_failure_never_marks_handoff_consumable_state(self) -> None:
+        """A checkpoint failure must never allow the caller to observe
+        a real, well-defined WorkflowResult it could mistake for a
+        known terminal outcome - resume() must raise instead."""
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
+        workflow_id, decision = _run_and_approve(engine, approvals)
+
+        observer = _TracingObserver([], after_failures={0: "db unavailable"})
+        try:
+            engine.resume(workflow_id, decision, step_observer=observer)
+            raised = False
+        except CompoundCheckpointError:
+            raised = True
+        assert raised is True
+
+
+class TestGenericStopUnaffectedByCheckpointCorrection:
+    """Proves the generic, non-compound _stop() path (no step_observer
+    attached) is completely unchanged: it still writes workflow_stopped
+    and returns an ordinary FAILED WorkflowResult for a genuinely known
+    outcome."""
+
+    def test_ordinary_tool_failure_without_observer_still_stops_normally(self) -> None:
+        engine, approvals, write_tool, verify_tool, show_tool, paused_store, history = _build()
+
+        class _AlwaysFailsTool(BaseTool):
+            @property
+            def name(self) -> str:
+                return "write_tool"
+
+            @property
+            def description(self) -> str:
+                return "fails"
+
+            def action_for(self, request: ToolRequest) -> str:
+                return "delete something"
+
+            def run(self, request: ToolRequest) -> ToolResult:
+                return ToolResult(tool_name=self.name, success=False, error="genuine failure")
+
+        engine._executor._registry._tools["write_tool"] = _AlwaysFailsTool()
+        workflow_id, decision = _run_and_approve(engine, approvals)
+
+        result = engine.resume(workflow_id, decision)  # no step_observer at all
+
+        assert result.overall_status is StepStatus.FAILED
+        assert result.step_outcomes[-1].tool_result.error == "genuine failure"
+        latest = history.latest_status_for(workflow_id)
+        assert latest is not None
+        assert latest.status == "workflow_stopped"
+        assert paused_store.get(workflow_id) is None  # correctly removed - a known outcome
 
 
 class TestDeclineNeverInvokesBeforeStep:
     def test_decline_calls_after_step_but_never_before_step(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        engine, approvals, write_tool, verify_tool, show_tool, *_ = _build()
         plan = _three_step_plan()
         result = engine.run(plan)
         request_id = result.pending_approval_request.request_id
@@ -295,7 +421,7 @@ class TestDeclineNeverInvokesBeforeStep:
 
 class TestExistingWorkflowsUnaffectedByOmittedObserver:
     def test_omitting_step_observer_behaves_exactly_as_before(self) -> None:
-        engine, approvals, write_tool, verify_tool, show_tool = _build()
+        engine, approvals, write_tool, verify_tool, show_tool, *_ = _build()
         workflow_id, decision = _run_and_approve(engine, approvals)
         result = engine.resume(workflow_id, decision)
         assert result.overall_status is StepStatus.COMPLETED

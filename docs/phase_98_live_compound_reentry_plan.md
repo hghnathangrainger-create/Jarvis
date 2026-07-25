@@ -755,3 +755,96 @@ intentional, planned additions - never weakened.
 - Git-derived Ruff scope (21 files: 9 modified, 12 new): **all checks
   passed, exit 0**.
 - `git diff --check`: clean.
+
+## 28. Batch 2 acceptance correction — checkpoint-failure handoff and terminal semantics
+
+**Issue discovered.** Batch 2's own design converted every observer/
+checkpoint infrastructure failure into a synthetic `ToolResult` and
+called `WorkflowEngine._stop()` — the same method used for a genuinely
+*known* terminal outcome (an ordinary tool failure, a decline, a
+verification-gate mismatch). `_stop()` unconditionally writes a
+`workflow_stopped` history entry and returns an ordinary `WorkflowResult`.
+Since `workflow_stopped` is one of exactly two event names the existing,
+unmodified generic interlock (`main._reconcile_claimed_rows()`) accepts
+as positive terminal evidence, and since `_claim_and_resume_workflow()`
+already treats *any* `WorkflowResult` `resume()` returns (rather than
+raises) as "a real, well-defined result" and unconditionally calls
+`mark_consumed()` — a checkpoint infrastructure failure (a CAS conflict,
+a missing progress row, a transient database error, an unexpected
+observer exception) would have been indistinguishable from a definitive,
+known outcome the moment Batch 3 wired a `step_observer` into the live
+resume path. This would have caused the handoff to be marked `CONSUMED`
+(or, on restart, the generic interlock to independently reach the same
+conclusion) for an outcome nobody had actually confirmed — silently
+defeating the entire purpose of compound-specific reconciliation.
+`resume()` also unconditionally removed the durable `paused_workflow_state`
+row before any checkpoint was even attempted, which — combined with the
+above — would have left compound-specific startup recovery with nothing
+to reconstruct the plan from.
+
+**Correction implemented.** The preferred design (a dedicated,
+nonterminal checkpoint exception) was selected. `workflow/engine.py`
+adds `CompoundCheckpointError(Exception)`, and every checkpoint touch
+point inside `resume()`/`_run_from()` now raises it directly instead of
+converting the failure into a synthetic `ToolResult` and calling
+`_stop()`. `_stop()` itself was reverted to its pre-Batch-2 form (no
+`step_observer` parameter at all) — it is now reachable only for a
+genuinely known outcome, exactly as before Batch 2 existed.
+`resume()` wraps its own body (everything after the paused-state
+removal) in a single `try/except CompoundCheckpointError`, which
+restores both the durable (`_persist_paused_state()`) and in-memory
+(`self._paused[workflow_id]`) paused state before re-raising — so a
+checkpoint failure leaves no trace of ever having been attempted from
+the durable record's own point of view, regardless of which step
+triggered it (compound recovery only ever needs the plan's own static
+content, never `waiting_step_index` to reflect the exact point of
+failure).
+
+**Why checkpoint infrastructure failure remains nonterminal.** A
+checkpoint failure means the *durable evidence* of what happened could
+not be trusted — not that the requested sequence completed, not that it
+definitively failed before mutation, and not that no reconciliation is
+required. Raising instead of returning a `WorkflowResult` means no
+`workflow_stopped`/`workflow_completed` history entry is ever written
+for this failure alone, and no caller can mistake it for a well-defined
+result the way it already treats an ordinary return.
+
+**Why the handoff stays `CLAIMED`.** `CompoundCheckpointError` is a
+distinct exception type from the generic `Exception` the existing,
+unmodified `_claim_and_resume_workflow()` already catches around
+`resume()` (which calls `mark_claim_interrupted()` before re-raising).
+A future, separately-approved Batch 3 wiring must catch
+`CompoundCheckpointError` specifically, *before* that generic handler,
+and must do nothing to the handoff at all — leaving it exactly
+`CLAIMED`, never immediately `CLAIM_INTERRUPTED` and never `CONSUMED`.
+This planning obligation is documented here for Batch 3; Batch 2 itself
+makes no orchestrator change (per the dormant boundary), so no live
+code path can reach this decision point yet.
+
+**How startup reconciliation resolves it.** Because the paused workflow
+and its progress row are both left intact, a checkpoint-failed compound
+workflow remains fully eligible for
+`core.compound_workflow.resume_claimed_compound_workflow()`'s existing
+crash-state matrix: Step 1's own real durable state is classified via
+the unchanged `reconcile_phase_update()`; Step 2/3 (both read-only) may
+be safely rerun. `tests/integration/test_compound_checkpoint_failure_handoff_semantics.py::TestStep1SuccessCheckpointFailureHandoffSemantics::test_remains_reconcilable_by_compound_recovery_afterward`
+proves this directly: a Step-1-success/checkpoint-failure is followed by
+a real `resume_claimed_compound_workflow()` call that reaches `CONSUMED`
+with a fully `COMPLETED` progress row, using only durable state and zero
+second claim.
+
+**Files changed:** `workflow/engine.py` (the correction itself),
+`tests/unit/test_workflow_engine_compound_checkpoints.py` (7 tests
+updated to assert `CompoundCheckpointError` instead of the old
+synthetic-`_stop()` behaviour; new `TestGenericStopUnaffectedByCheckpointCorrection`
+class), `tests/integration/test_compound_lifecycle_dormant_end_to_end.py`
+(1 test updated), and the new
+`tests/integration/test_compound_checkpoint_failure_handoff_semantics.py`
+(6 tests proving the handoff/progress-level semantics directly with a
+real `PendingApprovalStore`).
+
+**Verification:** full suite **5659 passed, 3 skipped, 0 failed**,
+identical under all three environments; Ruff clean across the 4-file
+correction scope; `git diff --check` clean. No production or test file
+outside this narrow scope changed. Phase 98 remains open; Batch 3 was
+not started; no live compound behaviour exists.

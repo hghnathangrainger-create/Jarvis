@@ -225,28 +225,32 @@ class _CompoundStepObserver(Protocol):
     persisted, non-model-controlled state. Nothing here is ever
     selected, configured, or influenced by model output.
 
-    Both methods return an optional short, bounded stop reason -
-    exactly mirroring _verification_gate_failure_reason()'s own
-    existing "None means proceed, a string means stop" shape - so a
-    checkpoint-persistence failure is handled by this engine's own,
-    already-proven STOP-only mechanism, never a second, parallel
-    control-flow path.
+    Both methods return an optional short, bounded stop reason. Unlike
+    _verification_gate_failure_reason()'s own "None means proceed, a
+    string means stop" shape - which represents a genuinely *known*
+    outcome and always flows into _stop() - a non-None return from
+    either of these two methods means the checkpoint *infrastructure*
+    itself could not be trusted (Phase 98, Batch 2 acceptance
+    correction - docs/phase_98_live_compound_reentry_plan.md). The
+    engine converts that into a raised CompoundCheckpointError, never
+    an ordinary _stop()-produced WorkflowResult: see that exception's
+    own docstring for the full reasoning.
     """
 
     def before_step(self, workflow_id: str, step_index: int) -> str | None:
         """Called once, immediately before the step at `step_index` is
         invoked (before self._executor.execute()). A non-None return
-        stops the workflow immediately, via the same _stop() path a
-        verification-gate failure already uses, without ever invoking
-        the step's own tool.
+        raises CompoundCheckpointError immediately, without ever
+        invoking the step's own tool - never routed through _stop().
 
         Args:
             workflow_id: The workflow being resumed/continued.
             step_index: The zero-based index of the step about to run.
 
         Returns:
-            None to proceed, or a short, bounded reason to stop before
-            the tool is invoked.
+            None to proceed, or a short, bounded reason if the
+            checkpoint could not be recorded before the tool would be
+            invoked.
         """
         ...
 
@@ -255,23 +259,23 @@ class _CompoundStepObserver(Protocol):
     ) -> str | None:
         """Called once for every step outcome this engine ever produces
         for the resumed workflow - a genuine success, an ordinary tool
-        failure, a decline, a blocked result, or a verification-gate
-        stop - via the one, already-shared path each of those already
-        flows through (_stop(), or the loop's own success-continuation
-        branch). A non-None return after an otherwise-successful
-        `tool_result` converts that step into a stop (the tool may have
-        succeeded, but its durable checkpoint could not be recorded) -
-        the engine never silently advances to the next step without a
-        confirmed checkpoint.
+        failure, a decline, or a blocked result. A non-None return
+        raises CompoundCheckpointError - whether `tool_result` itself
+        was a success or a known failure, the checkpoint that would
+        durably record that outcome could not be trusted, so this is
+        never converted into an ordinary _stop()-produced
+        WorkflowResult either way. The engine never silently advances
+        to the next step, and never marks the current one as a known
+        terminal outcome, without a confirmed checkpoint.
 
         Args:
             workflow_id: The workflow being resumed/continued.
             step_index: The zero-based index of the step whose outcome
                 is now known.
             tool_result: The real ToolResult for that step (including a
-                synthetic declined/gate-failure result for those
-                cases) - never unrestricted, unbounded output; callers
-                persist only the bounded fields they need.
+                synthetic declined result for that case) - never
+                unrestricted, unbounded output; callers persist only
+                the bounded fields they need.
 
         Returns:
             None if the checkpoint was recorded (or nothing needed
@@ -316,6 +320,64 @@ class WorkflowError(Exception):
     kind of misuse - not a decision the workflow itself made about its
     own step - so it is raised, not returned as a FAILED WorkflowResult.
     """
+
+
+class CompoundCheckpointError(Exception):
+    """Raised when a trusted, optional step_observer's own checkpoint
+    (before_step()/after_step()) could not be durably recorded (Phase
+    98, Batch 2 acceptance correction -
+    docs/phase_98_live_compound_reentry_plan.md, "Checkpoint-Failure
+    Handoff and Terminal Semantics").
+
+    A checkpoint infrastructure failure - a missing/mismatched progress
+    row, a CAS conflict, a database error, or an unexpected observer
+    exception - is neither a known tool success nor a known tool
+    failure: it means the *durable evidence* of what actually happened
+    could not be trusted. It must therefore never be represented as an
+    ordinary FAILED WorkflowResult via _stop() (which this engine
+    reserves exclusively for a genuinely known outcome - an ordinary
+    tool failure, a RED block, a decline, a verification-gate mismatch,
+    or unusable previous-step input) and never returned at all: raising
+    this instead of returning a WorkflowResult means -
+        - no workflow_stopped, workflow_completed, or any other
+          history entry is ever written for this failure alone (this
+          exception propagates before any of resume()'s/_run_from()'s
+          own history-recording calls for this step are ever reached);
+        - a caller can never mistake it for "a real, well-defined
+          result" the way it already treats an ordinary returned
+          WorkflowResult - a future, separately-approved orchestrator
+          wiring must catch this exception specifically, before any
+          generic `except Exception` handler, and must leave the
+          approval handoff exactly CLAIMED (never CONSUMED, and never
+          immediately CLAIM_INTERRUPTED either - only exclusive
+          startup compound reconciliation may decide that);
+        - resume() itself restores the paused workflow's durable and
+          in-memory state, unchanged, before this propagates - a later,
+          independent restart can still find and safely reconstruct
+          the exact plan this attempt was working from.
+
+    Only ever raised when a real step_observer is attached to
+    resume()/_run_from() - never for any existing workflow, which
+    always passes step_observer=None and so can never reach any of the
+    call sites that raise this.
+
+    Attributes:
+        reason: A short, bounded, honest description of which
+            checkpoint failed and why - never a raw stack trace,
+            unrestricted tool output, or secret (the same bounded
+            convention _observer_before_step()/_observer_after_step()
+            already use to convert a raised observer exception into a
+            reason string).
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Initialise the error with its bounded reason.
+
+        Args:
+            reason: A short, bounded, honest failure description.
+        """
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +763,12 @@ class WorkflowEngine:
                 terminal); or (Phase 28) if decision.request_id does not
                 match the request_id this exact paused workflow is
                 actually waiting on.
+            CompoundCheckpointError: If step_observer is attached and
+                one of its checkpoints could not be durably recorded
+                (Phase 98, Batch 2 acceptance correction). The paused
+                workflow's durable and in-memory state is restored,
+                unchanged, before this propagates - never left deleted
+                the way a genuinely known outcome's paused state is.
         """
         paused = self._paused.pop(workflow_id, None)
         if paused is None:
@@ -758,133 +826,146 @@ class WorkflowEngine:
         )
         step = paused.plan.steps[paused.waiting_step_index]
 
-        if not decision.is_approved:
-            tool_result = ToolResult(
-                tool_name=step.tool_name or "",
-                success=False,
-                error="This action was declined and was not run.",
+        # Phase 98, Batch 2 acceptance correction: every checkpoint
+        # touch point below this line may raise CompoundCheckpointError
+        # instead of returning a WorkflowResult. Restoring the paused
+        # workflow's durable and in-memory state is centralised here,
+        # in exactly one place, rather than at each individual raise
+        # site - this instance's own paused-state removal above is the
+        # only thing that ever needs undoing, regardless of which step
+        # or checkpoint the failure actually occurred at (compound
+        # recovery only ever needs the plan's own static content, never
+        # `waiting_step_index`/`resolved_tool_input` to reflect the
+        # exact point of failure - see
+        # core.compound_workflow._continue_recognized_compound_workflow(),
+        # which reads only the persisted Plan and the progress row's
+        # own step statuses).
+        try:
+            if not decision.is_approved:
+                tool_result = ToolResult(
+                    tool_name=step.tool_name or "",
+                    success=False,
+                    error="This action was declined and was not run.",
+                )
+                checkpoint_failure = self._observer_after_step(
+                    step_observer, workflow_id, step.number - 1, tool_result
+                )
+                if checkpoint_failure is not None:
+                    raise CompoundCheckpointError(checkpoint_failure)
+                return self._stop(
+                    paused.plan,
+                    workflow_id=workflow_id,
+                    session_id=resolved_session_id,
+                    completed_outcomes=paused.completed_outcomes,
+                    step=step,
+                    tool_result=tool_result,
+                )
+
+            # Phase 98, Batch 2: the trusted pre-execution checkpoint,
+            # called only when a caller has attached an observer -
+            # never for any existing workflow. A non-None return means
+            # the checkpoint itself (e.g. persisting the pre-execution
+            # observation and marking a step active) could not be
+            # durably recorded; the write tool is never invoked in
+            # that case, and this never becomes an ordinary
+            # WorkflowResult - see CompoundCheckpointError's own
+            # docstring for why.
+            before_reason = self._observer_before_step(
+                step_observer, workflow_id, step.number - 1
             )
-            return self._stop(
+            if before_reason is not None:
+                raise CompoundCheckpointError(before_reason)
+
+            self._emit_step_event(
+                _EVENT_STEP_STARTED,
+                EventOutcome.PENDING,
+                workflow_id=workflow_id,
+                plan=paused.plan,
+                step=step,
+                session_id=resolved_session_id,
+            )
+            self._record_history(
+                _EVENT_STEP_STARTED,
+                workflow_id=workflow_id,
+                session_id=resolved_session_id,
+                step_number=step.number,
+                step_total=len(paused.plan.steps),
+                tool_name=step.tool_name,
+            )
+            tool_result = self._executor.execute(
+                step.tool_name,
+                paused.resolved_tool_input,
+                session_id=resolved_session_id,
+                approval_decision=decision,
+            )
+
+            if not tool_result.success or tool_result.blocked:
+                checkpoint_failure = self._observer_after_step(
+                    step_observer, workflow_id, step.number - 1, tool_result
+                )
+                if checkpoint_failure is not None:
+                    raise CompoundCheckpointError(checkpoint_failure)
+                return self._stop(
+                    paused.plan,
+                    workflow_id=workflow_id,
+                    session_id=resolved_session_id,
+                    completed_outcomes=paused.completed_outcomes,
+                    step=step,
+                    tool_result=tool_result,
+                )
+
+            # Phase 98, Batch 2: the trusted post-execution checkpoint.
+            # A non-None return here means the tool itself succeeded,
+            # but its durable checkpoint could not be recorded - the
+            # engine never silently advances to the next step in that
+            # case, and (unlike Batch 2's original design) never
+            # converts this into an ordinary FAILED WorkflowResult
+            # either, since the tool's own success is real but not yet
+            # durably confirmed.
+            checkpoint_failure = self._observer_after_step(
+                step_observer, workflow_id, step.number - 1, tool_result
+            )
+            if checkpoint_failure is not None:
+                raise CompoundCheckpointError(checkpoint_failure)
+
+            outcome = WorkflowStepOutcome(
+                step=step, status=StepStatus.COMPLETED, tool_result=tool_result
+            )
+            self._emit_step_event(
+                _EVENT_STEP_COMPLETED,
+                EventOutcome.SUCCESS,
+                workflow_id=workflow_id,
+                plan=paused.plan,
+                step=step,
+                session_id=resolved_session_id,
+            )
+            self._record_history(
+                _EVENT_STEP_COMPLETED,
+                workflow_id=workflow_id,
+                session_id=resolved_session_id,
+                step_number=step.number,
+                step_total=len(paused.plan.steps),
+                tool_name=step.tool_name,
+            )
+            return self._run_from(
                 paused.plan,
                 workflow_id=workflow_id,
                 session_id=resolved_session_id,
-                completed_outcomes=paused.completed_outcomes,
-                step=step,
-                tool_result=tool_result,
+                start_index=paused.waiting_step_index + 1,
+                completed_outcomes=paused.completed_outcomes + (outcome,),
                 step_observer=step_observer,
             )
-
-        # Phase 98, Batch 2: the trusted per-step checkpoint, called only
-        # when a caller has attached an observer - never for any existing
-        # workflow. A non-None return means the checkpoint itself (e.g.
-        # persisting the pre-execution observation and marking a step
-        # active) could not be durably recorded; the write tool is never
-        # invoked in that case. Never called for the observer's own
-        # `after_step` counterpart above (decline) - nothing is about to
-        # be invoked there at all.
-        before_reason = self._observer_before_step(
-            step_observer, workflow_id, step.number - 1
-        )
-        if before_reason is not None:
-            blocked_result = ToolResult(
-                tool_name=step.tool_name or "", success=False, error=before_reason
-            )
-            return self._stop(
-                paused.plan,
-                workflow_id=workflow_id,
-                session_id=resolved_session_id,
-                completed_outcomes=paused.completed_outcomes,
-                step=step,
-                tool_result=blocked_result,
-            )
-
-        self._emit_step_event(
-            _EVENT_STEP_STARTED,
-            EventOutcome.PENDING,
-            workflow_id=workflow_id,
-            plan=paused.plan,
-            step=step,
-            session_id=resolved_session_id,
-        )
-        self._record_history(
-            _EVENT_STEP_STARTED,
-            workflow_id=workflow_id,
-            session_id=resolved_session_id,
-            step_number=step.number,
-            step_total=len(paused.plan.steps),
-            tool_name=step.tool_name,
-        )
-        tool_result = self._executor.execute(
-            step.tool_name,
-            paused.resolved_tool_input,
-            session_id=resolved_session_id,
-            approval_decision=decision,
-        )
-
-        if not tool_result.success or tool_result.blocked:
-            return self._stop(
-                paused.plan,
-                workflow_id=workflow_id,
-                session_id=resolved_session_id,
-                completed_outcomes=paused.completed_outcomes,
-                step=step,
-                tool_result=tool_result,
-                step_observer=step_observer,
-            )
-
-        # Phase 98, Batch 2: the trusted post-execution checkpoint. A
-        # non-None return here means the tool itself succeeded, but its
-        # durable checkpoint could not be recorded - the engine never
-        # silently advances to the next step in that case; it stops via
-        # the same STOP-only path an ordinary tool failure already uses.
-        checkpoint_failure = self._observer_after_step(
-            step_observer, workflow_id, step.number - 1, tool_result
-        )
-        if checkpoint_failure is not None:
-            failed_result = ToolResult(
-                tool_name=step.tool_name or "",
-                success=False,
-                error=(
-                    "This step's tool call succeeded, but its durable "
-                    f"checkpoint could not be recorded: {checkpoint_failure}"
-                ),
-            )
-            return self._stop(
-                paused.plan,
-                workflow_id=workflow_id,
-                session_id=resolved_session_id,
-                completed_outcomes=paused.completed_outcomes,
-                step=step,
-                tool_result=failed_result,
-            )
-
-        outcome = WorkflowStepOutcome(
-            step=step, status=StepStatus.COMPLETED, tool_result=tool_result
-        )
-        self._emit_step_event(
-            _EVENT_STEP_COMPLETED,
-            EventOutcome.SUCCESS,
-            workflow_id=workflow_id,
-            plan=paused.plan,
-            step=step,
-            session_id=resolved_session_id,
-        )
-        self._record_history(
-            _EVENT_STEP_COMPLETED,
-            workflow_id=workflow_id,
-            session_id=resolved_session_id,
-            step_number=step.number,
-            step_total=len(paused.plan.steps),
-            tool_name=step.tool_name,
-        )
-        return self._run_from(
-            paused.plan,
-            workflow_id=workflow_id,
-            session_id=resolved_session_id,
-            start_index=paused.waiting_step_index + 1,
-            completed_outcomes=paused.completed_outcomes + (outcome,),
-            step_observer=step_observer,
-        )
+        except CompoundCheckpointError:
+            # Restore this workflow's paused state exactly as it was
+            # before this resume() attempt - never left deleted the
+            # way a genuinely known outcome's paused state already is.
+            # A later, independent restart's compound-specific
+            # reconciliation is the only path that may ever advance
+            # this workflow further; this in-process attempt leaves no
+            # partial trace behind.
+            self._persist_paused_state(workflow_id, paused)
+            self._paused[workflow_id] = paused
+            raise
 
     # ----- internal sequential loop ------------------------------------------
 
@@ -962,7 +1043,6 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
-                    step_observer=step_observer,
                 )
 
             gate_failure_reason = self._verification_gate_failure_reason(
@@ -981,25 +1061,19 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
-                    step_observer=step_observer,
                 )
 
-            # Phase 98, Batch 2: the trusted pre-execution checkpoint -
-            # see resume()'s own identical comment. A non-None return
-            # stops before the tool is ever invoked.
+            # Phase 98, Batch 2 acceptance correction: the trusted
+            # pre-execution checkpoint - see resume()'s own identical
+            # comment. A non-None return means the checkpoint itself
+            # could not be durably recorded; the tool is never invoked,
+            # and this raises CompoundCheckpointError rather than
+            # stopping via _stop() - see that exception's own docstring
+            # for why a checkpoint infrastructure failure must never be
+            # represented as a known, terminal WorkflowResult.
             before_reason = self._observer_before_step(step_observer, workflow_id, index)
             if before_reason is not None:
-                blocked_result = ToolResult(
-                    tool_name=step.tool_name or "", success=False, error=before_reason
-                )
-                return self._stop(
-                    plan,
-                    workflow_id=workflow_id,
-                    session_id=session_id,
-                    completed_outcomes=tuple(outcomes),
-                    step=step,
-                    tool_result=blocked_result,
-                )
+                raise CompoundCheckpointError(before_reason)
 
             tool_result = self._executor.execute(
                 step.tool_name, tool_input, session_id=session_id
@@ -1061,6 +1135,11 @@ class WorkflowEngine:
                 )
 
             if not tool_result.success or tool_result.blocked:
+                checkpoint_failure = self._observer_after_step(
+                    step_observer, workflow_id, index, tool_result
+                )
+                if checkpoint_failure is not None:
+                    raise CompoundCheckpointError(checkpoint_failure)
                 return self._stop(
                     plan,
                     workflow_id=workflow_id,
@@ -1068,35 +1147,20 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
-                    step_observer=step_observer,
                 )
 
-            # Phase 98, Batch 2: the trusted post-execution checkpoint -
-            # see resume()'s own identical comment. A non-None return
-            # means the tool succeeded but its checkpoint could not be
-            # recorded; the loop never advances to the next step in
-            # that case.
+            # Phase 98, Batch 2 acceptance correction: the trusted
+            # post-execution checkpoint - see resume()'s own identical
+            # comment. A non-None return means the tool succeeded but
+            # its checkpoint could not be recorded; this raises
+            # CompoundCheckpointError - the loop never advances to the
+            # next step, and this is never represented as a known,
+            # terminal WorkflowResult.
             checkpoint_failure = self._observer_after_step(
                 step_observer, workflow_id, index, tool_result
             )
             if checkpoint_failure is not None:
-                failed_result = ToolResult(
-                    tool_name=step.tool_name or "",
-                    success=False,
-                    error=(
-                        "This step's tool call succeeded, but its "
-                        "durable checkpoint could not be recorded: "
-                        f"{checkpoint_failure}"
-                    ),
-                )
-                return self._stop(
-                    plan,
-                    workflow_id=workflow_id,
-                    session_id=session_id,
-                    completed_outcomes=tuple(outcomes),
-                    step=step,
-                    tool_result=failed_result,
-                )
+                raise CompoundCheckpointError(checkpoint_failure)
 
             outcome = WorkflowStepOutcome(
                 step=step, status=StepStatus.COMPLETED, tool_result=tool_result
@@ -1149,7 +1213,6 @@ class WorkflowEngine:
         completed_outcomes: tuple[WorkflowStepOutcome, ...],
         step: PlanStep,
         tool_result: ToolResult,
-        step_observer: _CompoundStepObserver | None = None,
     ) -> WorkflowResult:
         """Record a FAILED outcome for `step` and stop the workflow.
 
@@ -1158,6 +1221,20 @@ class WorkflowEngine:
         side effects, no SKIPPED outcome synthesised for later steps -
         they are simply absent from the returned step_outcomes.
 
+        Reserved exclusively for a genuinely *known* terminal outcome -
+        an ordinary tool failure, a RED block, a decline, a
+        verification-gate mismatch, or unusable previous-step input
+        (Phase 98, Batch 2 acceptance correction -
+        docs/phase_98_live_compound_reentry_plan.md). Every caller now
+        checkpoints a compound step_observer's own after_step() *before*
+        ever reaching this method, and raises CompoundCheckpointError
+        instead of calling this method if that checkpoint itself
+        fails - so this method itself no longer needs to know about
+        step_observer at all, and the workflow_stopped history entry
+        and returned WorkflowResult it always produces are only ever
+        reached for a genuinely known, already-durably-checkpointed
+        outcome.
+
         Args:
             plan: The Plan being executed.
             workflow_id: This workflow's correlation id.
@@ -1165,33 +1242,10 @@ class WorkflowEngine:
             completed_outcomes: Outcomes already recorded before this step.
             step: The step that did not cleanly succeed.
             tool_result: The unsuccessful/blocked/declined/unusable result.
-            step_observer: Optional, trusted, per-step lifecycle observer
-                (Phase 98, Batch 2). When present, notified once via its
-                after_step() hook with this exact tool_result - the one,
-                shared path every stop reason (decline, ordinary
-                failure, blocked, verification-gate failure, or an
-                already-reported pre-execution checkpoint failure)
-                flows through. Its return value is not used to alter
-                control flow here: this call is already terminal.
-                Deliberately omitted by the pre-execution checkpoint's
-                own _stop() call (before_step already reported its own
-                failure; calling after_step for the same synthetic
-                result would be redundant) and by the post-success
-                checkpoint-failure _stop() call (after_step already ran
-                once for the real tool_result immediately before this
-                call was made).
 
         Returns:
             A WorkflowResult with overall_status FAILED.
         """
-        # The return value is deliberately unused here: this call is
-        # already terminal, so a checkpoint failure at this point has
-        # nothing further to stop - the observer is still notified so
-        # it can durably record the terminal step outcome (e.g. a
-        # decline or an ordinary tool failure) via its own
-        # after_step() implementation.
-        self._observer_after_step(step_observer, workflow_id, step.number - 1, tool_result)
-
         outcome = WorkflowStepOutcome(
             step=step, status=StepStatus.FAILED, tool_result=tool_result
         )
