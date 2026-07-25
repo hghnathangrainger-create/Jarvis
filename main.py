@@ -83,6 +83,11 @@ from core.compound_workflow import (
     terminalize_declined_or_expired_compound_progress,
 )
 from core.orchestrator import JarvisOrchestrator
+from core.schedule_compound_workflow import (
+    reconcile_claimed_schedule_compound_workflows,
+    repair_or_isolate_pending_schedule_compound_progress,
+    terminalize_declined_or_expired_schedule_compound_progress,
+)
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler
 from memory.episodic_memory import EpisodicMemoryStore
@@ -150,6 +155,9 @@ from web.safe_web_fetcher import SafeWebFetcher
 from workflow.compound_workflow_progress_store import CompoundWorkflowProgressStore
 from workflow.engine import WorkflowEngine
 from workflow.paused_workflow_store import PausedWorkflowStore
+from workflow.schedule_compound_workflow_progress_store import (
+    ScheduleCompoundWorkflowProgressStore,
+)
 from workflow.workflow_history_store import WorkflowHistoryStore
 
 
@@ -426,6 +434,18 @@ def build_orchestrator() -> JarvisOrchestrator:
     # request path never touches it.
     compound_progress_store = CompoundWorkflowProgressStore(session_factory)
 
+    # Durable, per-step schedule-compound-workflow progress (Phase 99,
+    # Batch 3 - docs/phase_99_second_compound_template_planning.md): the
+    # sole checkpoint authority for the second trusted compound template
+    # (SCHEDULE_ENABLE -> internal enabled-state verification ->
+    # SCHEDULE_SHOW_ENABLED_STATE). A wholly separate table/store from
+    # compound_progress_store above - never shared. Passed into
+    # JarvisOrchestrator below so it can establish/validate progress for
+    # that one template; every other request path never touches it.
+    schedule_compound_progress_store = ScheduleCompoundWorkflowProgressStore(
+        session_factory
+    )
+
     # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same
     # ToolExecutor, ApprovalManager, and EventLogger instances already built
     # above - no duplicate execution, approval, or logging authority is ever
@@ -527,6 +547,11 @@ def build_orchestrator() -> JarvisOrchestrator:
         # progress-creation and approval-time-validation gates.
         paused_workflow_store=paused_workflows,
         compound_progress_store=compound_progress_store,
+        # Phase 99, Batch 3: the same ScheduleCompoundWorkflowProgressStore
+        # instance already built above (not a second one) powers the
+        # second trusted compound workflow's own progress-creation and
+        # approval-time-validation gates.
+        schedule_compound_progress_store=schedule_compound_progress_store,
     )
 
 
@@ -677,6 +702,14 @@ class ReconciliationSummary:
             found still pristine (never terminalized live - a crash,
             for a decline, or always, for an expiry) and was
             idempotently marked NOT_EXECUTED (Phase 98, Batch 3).
+        schedule_compound_progress_repaired: The second trusted
+            schedule compound template's own equivalent of
+            compound_progress_repaired (Phase 99, Batch 3 -
+            docs/phase_99_second_compound_template_planning.md).
+        schedule_compound_progress_isolated: The schedule compound
+            template's own equivalent of compound_progress_isolated.
+        schedule_compound_progress_terminalized: The schedule compound
+            template's own equivalent of compound_progress_terminalized.
     """
 
     history_repaired: int
@@ -685,6 +718,9 @@ class ReconciliationSummary:
     compound_progress_repaired: int = 0
     compound_progress_isolated: int = 0
     compound_progress_terminalized: int = 0
+    schedule_compound_progress_repaired: int = 0
+    schedule_compound_progress_isolated: int = 0
+    schedule_compound_progress_terminalized: int = 0
 
 
 def start_execution_session() -> tuple[JarvisOrchestrator, ExecutionProcessLock]:
@@ -811,6 +847,9 @@ def reconcile_claimed_handoffs(lock: ExecutionProcessLock) -> ReconciliationSumm
     history_store = ApprovalHistoryStore(session_factory)
     workflow_history = WorkflowHistoryStore(session_factory)
     compound_progress_store = CompoundWorkflowProgressStore(session_factory)
+    schedule_compound_progress_store = ScheduleCompoundWorkflowProgressStore(
+        session_factory
+    )
 
     history_repaired = _repair_approval_history_consistency(
         pending_store, history_store
@@ -867,6 +906,55 @@ def reconcile_claimed_handoffs(lock: ExecutionProcessLock) -> ReconciliationSumm
         claimed_status=PendingApprovalHandoffStatus.CLAIMED,
     )
 
+    # Phase 99, Batch 3 (docs/phase_99_second_compound_template_planning.md):
+    # the second trusted compound template's own small, dedicated stack -
+    # mirrors compound_registry/compound_executor/compound_workflow_engine
+    # above exactly, against the three schedule tools this one template
+    # uses. The same compound_invalidator instance is reused (it is a
+    # stateless, template-agnostic adapter over pending_store/history_store),
+    # never a second one.
+    schedule_compound_schedule_store = ScheduleStore(session_factory)
+    schedule_compound_registry = ToolRegistry()
+    schedule_compound_registry.register_tool(
+        ScheduleEnableTool(schedule_compound_schedule_store)
+    )
+    schedule_compound_registry.register_tool(
+        ScheduleVerifyEnabledStateTool(schedule_compound_schedule_store)
+    )
+    schedule_compound_registry.register_tool(
+        ScheduleShowEnabledStateTool(schedule_compound_schedule_store)
+    )
+    schedule_compound_security = SecurityManager()
+    schedule_compound_executor = ToolExecutor(
+        registry=schedule_compound_registry,
+        security_manager=schedule_compound_security,
+        logger=None,
+    )
+    # Read-only reconstruct_claimed_compound_plan() accessor only - never
+    # run()/resume() - mirrors compound_workflow_engine above exactly.
+    schedule_compound_workflow_engine = WorkflowEngine(
+        executor=schedule_compound_executor, approvals=ApprovalManager()
+    )
+
+    schedule_compound_repair = repair_or_isolate_pending_schedule_compound_progress(
+        pending_store=pending_store,
+        paused_workflow_store=PausedWorkflowStore(session_factory),
+        progress_store=schedule_compound_progress_store,
+        approval_invalidator=compound_invalidator,
+        pending_status=PendingApprovalHandoffStatus.PENDING,
+    )
+
+    schedule_compound_claimed = reconcile_claimed_schedule_compound_workflows(
+        pending_store=pending_store,
+        paused_workflow_store=PausedWorkflowStore(session_factory),
+        progress_store=schedule_compound_progress_store,
+        workflow_engine=schedule_compound_workflow_engine,
+        tool_registry=schedule_compound_registry,
+        security_manager=schedule_compound_security,
+        tool_executor=schedule_compound_executor,
+        claimed_status=PendingApprovalHandoffStatus.CLAIMED,
+    )
+
     # Phase 98, Batch 3: the dedicated non-execution terminalization
     # path's own crash-recovery backstop - a declined compound row a
     # crash prevented from being terminalized live, or (its only
@@ -882,20 +970,42 @@ def reconcile_claimed_handoffs(lock: ExecutionProcessLock) -> ReconciliationSumm
         expired_status=PendingApprovalHandoffStatus.EXPIRED,
     )
 
+    # Phase 99, Batch 3: the schedule compound template's own equivalent
+    # crash-recovery backstop - never touches a row already resolved by
+    # the ProjectState pass above, since the two templates' own trusted
+    # fingerprints are structurally disjoint (a persisted plan can only
+    # ever match one of the two).
+    schedule_compound_terminalized = terminalize_declined_or_expired_schedule_compound_progress(
+        pending_store=pending_store,
+        progress_store=schedule_compound_progress_store,
+        declined_status=PendingApprovalHandoffStatus.DECLINED,
+        expired_status=PendingApprovalHandoffStatus.EXPIRED,
+    )
+
     # Only now does the existing, unchanged generic CLAIMED fallback
-    # run - it will only ever see rows the compound-specific pass above
-    # did not already resolve (left_for_generic), since every resolved
-    # compound row has already transitioned out of CLAIMED.
+    # run - it will only ever see rows neither compound-specific pass
+    # above already resolved (left_for_generic), since every resolved
+    # compound row (either template) has already transitioned out of
+    # CLAIMED.
     claimed_consumed, claimed_interrupted = _reconcile_claimed_rows(
         pending_store, history_store, workflow_history
     )
     return ReconciliationSummary(
         history_repaired=history_repaired,
-        claimed_consumed=claimed_consumed + compound_claimed.consumed,
-        claimed_interrupted=claimed_interrupted + compound_claimed.interrupted,
+        claimed_consumed=(
+            claimed_consumed + compound_claimed.consumed + schedule_compound_claimed.consumed
+        ),
+        claimed_interrupted=(
+            claimed_interrupted
+            + compound_claimed.interrupted
+            + schedule_compound_claimed.interrupted
+        ),
         compound_progress_repaired=compound_repair.repaired,
         compound_progress_isolated=compound_repair.isolated,
         compound_progress_terminalized=compound_terminalized,
+        schedule_compound_progress_repaired=schedule_compound_repair.repaired,
+        schedule_compound_progress_isolated=schedule_compound_repair.isolated,
+        schedule_compound_progress_terminalized=schedule_compound_terminalized,
     )
 
 

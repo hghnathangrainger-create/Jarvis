@@ -69,12 +69,13 @@ _PLANNING_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
         "select_tool",
         "_select_compound_tool_sequence",
         "_build_phase_update_verify_show_workflow_plan",
-        # Phase 99, Batch 1: the second, dormant compound template's
-        # own plan builder - its own docstring names it a "compound
-        # template" for documentation purposes, exactly mirroring its
-        # ProjectState sibling above; never called live (see
-        # test_phase99_batch1_isolation.py's own confinement proof).
+        # Phase 99, Batch 3: the second compound template is now live,
+        # dispatched from _select_compound_tool_sequence() through its
+        # own two named delegates, mirroring the ProjectState template's
+        # own one-delegate shape.
         "_build_schedule_enable_verify_show_workflow_plan",
+        "_build_project_state_compound_outcome",
+        "_build_schedule_compound_outcome",
     }
 )
 
@@ -90,6 +91,9 @@ _ORCHESTRATOR_ALLOWED_COMPOUND_REFERENCING_FUNCTIONS = frozenset(
         "_start_compound_update_phase_and_show_workflow",
         "_handle_ask_jarvis_to_request",
         "_terminalize_declined_compound_progress",
+        # Phase 99, Batch 3: the schedule compound's own sibling methods.
+        "_start_schedule_enable_and_show_workflow",
+        "_terminalize_declined_schedule_compound_progress",
     }
 )
 
@@ -194,31 +198,42 @@ class TestExistingLiveParserIsolation:
         assert not issubclass(CompoundToolSelectionParseError, ToolSelectionParseError)
         assert not issubclass(ToolSelectionParseError, CompoundToolSelectionParseError)
 
-    def test_trusted_instruction_describes_exactly_one_compound_shape(self) -> None:
-        """Phase 98, Batch 3: the trusted instruction now teaches
-        exactly one compound decision, for exactly one fixed two-step
-        sequence, never a general multi-step facility. Proven
+    def test_trusted_instruction_describes_exactly_two_compound_shapes(self) -> None:
+        """Phase 99, Batch 3: the trusted instruction now teaches
+        exactly two compound decisions, for exactly two fixed two-step
+        sequences, never a general multi-step facility. Proven
         structurally: every "steps" array the instruction's own JSON
-        examples contain names exactly these two capability ids, in
-        exactly this order - never any other pair, never reversed."""
+        examples contain names exactly one of these two allowed
+        capability-id pairs, in exactly its own fixed order - never any
+        other pair, never reversed."""
         instruction = live_planning._TRUSTED_PLANNING_INSTRUCTION
         assert "execute_sequence" in instruction
         assert '"and then"' in instruction
-        assert "Exactly one compound decision exists" in instruction
+        assert "Exactly two compound decisions exist" in instruction
         assert "never invent a third step" in instruction
-        assert "never reverse this order" in instruction
+        assert "never reverse either order" in instruction
         assert 'never use "execute_sequence" for any other pair' in (
             instruction.casefold()
         )
 
         steps_arrays = re.findall(r'"steps":\s*\[(.*?)\]\}', instruction, re.DOTALL)
         assert steps_arrays, "expected at least one execute_sequence steps array"
+        # Each of the two fixed shapes appears at least twice (once in
+        # its own descriptive paragraph, once in its own worked
+        # example) - every occurrence must match one of exactly the
+        # two allowed pairs, never a third.
         for steps_blob in steps_arrays:
-            assert '"project_state_update_phase"' in steps_blob
-            assert '"project_state_show"' in steps_blob
-            assert steps_blob.index("project_state_update_phase") < steps_blob.index(
-                "project_state_show"
-            ), "the fixed compound shape must always update phase before showing"
+            if "project_state_update_phase" in steps_blob:
+                assert '"project_state_show"' in steps_blob
+                assert steps_blob.index("project_state_update_phase") < steps_blob.index(
+                    "project_state_show"
+                ), "the ProjectState compound shape must always update phase before showing"
+            else:
+                assert '"schedule_enable"' in steps_blob
+                assert '"schedule_show_enabled_state"' in steps_blob
+                assert steps_blob.index("schedule_enable") < steps_blob.index(
+                    "schedule_show_enabled_state"
+                ), "the schedule compound shape must always enable before checking state"
 
 
 def _functions_referencing(source: str, needle: str) -> set[str]:

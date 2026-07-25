@@ -1,22 +1,29 @@
 """
 test_phase99_batch1_isolation.py
 
-Structural proof that Phase 99, Batch 1's dormant second compound
-foundation (docs/phase_99_second_compound_template_planning.md) adds
-zero live compound wiring and zero change to Phase 98's own
-ProjectState compound - while proving, behaviourally, that the new
-SCHEDULE_SHOW_ENABLED_STATE capability genuinely IS reachable through
-the existing, unmodified generic "ask jarvis to:" single-capability
-path (never claimed inaccessible when it is not).
+Structural proof that Phase 99, Batch 1's second compound foundation
+(docs/phase_99_second_compound_template_planning.md) added zero live
+compound wiring and zero change to Phase 98's own ProjectState compound
+AT THE TIME - and, now that Phase 99, Batch 3 has atomically activated
+the schedule compound live, that every reference this batch's own
+modules/functions gained is confined exactly to the intended call
+sites, never a broader, uncontrolled sprawl.
+
+Every assertion below that concerned a module Batch 3 legitimately
+wired (intelligence/planning.py, core/orchestrator.py, main.py) is
+revised, not removed, to prove the reference is confined exactly there
+- mirroring test_phase98_batch1_isolation.py's own revision when Phase
+98's Batch 3 activated its compound the same way. ui/cli.py and
+core/command_router.py remain fully unaffected (the schedule compound
+is only ever reachable through the existing "ask jarvis to:" AI path,
+never a new CLI/router grammar) and keep their original, unchanged
+"must never reference this" bar.
 
 Deliberately avoids fragile blanket assertions like "the symbol name
 appears nowhere" - every check here either (a) proves a specific,
-named function is never called from a specific, named live call site
-(AST-based, permitting the dormant definition to exist and be directly
-tested elsewhere), or (b) behaviourally exercises the real, live,
-generic single-capability dispatch to prove genuine reachability,
-mirroring test_phase98_batch1_isolation.py's/
-test_phase98_batch2_dormant_isolation.py's own established conventions.
+named function/method is the only live call site referencing a given
+name (AST-based), or (b) behaviourally exercises the real, live,
+generic single-capability dispatch to prove genuine reachability.
 """
 
 from __future__ import annotations
@@ -29,6 +36,29 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Phase 99, Batch 3: the only functions/methods in each live module
+#: allowed to reference the schedule-compound machinery by name.
+_PLANNING_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS = frozenset(
+    {
+        "_select_compound_tool_sequence",
+        "_build_schedule_compound_outcome",
+        "_build_schedule_enable_verify_show_workflow_plan",
+    }
+)
+_ORCHESTRATOR_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS = frozenset(
+    {
+        "__init__",
+        "validate_pending_approval_for_transition",
+        "_claim_and_resume_workflow",
+        "_compound_step_observer_for",
+        "_terminalize_declined_schedule_compound_progress",
+        "_start_schedule_enable_and_show_workflow",
+    }
+)
+_MAIN_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS = frozenset(
+    {"build_orchestrator", "reconcile_claimed_handoffs"}
+)
 
 
 def _module_source(relative_path: str) -> str:
@@ -45,6 +75,18 @@ def _referenced_module_names(source: str) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.update(node.module.split("."))
     return names
+
+
+def _functions_referencing(source: str, needle: str) -> set[str]:
+    tree = ast.parse(source)
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if needle in segment:
+            hits.add(node.name)
+    return hits
 
 
 class TestProjectStateCompoundUnchanged:
@@ -66,23 +108,22 @@ class TestProjectStateCompoundUnchanged:
             CapabilityId.PROJECT_STATE_SHOW,
         )
 
-    def test_trusted_instruction_still_describes_exactly_one_compound_shape(
+    def test_trusted_instruction_now_describes_exactly_two_compound_shapes(
         self,
     ) -> None:
-        """The trusted instruction's own compound paragraph is
-        unchanged: it still names only the ProjectState pair, never
-        the new schedule pair, in an execute_sequence context."""
+        """Phase 99, Batch 3 activation: the trusted instruction's own
+        compound paragraph is revised, not merely left alone - it now
+        legitimately names both the ProjectState pair and the schedule
+        pair, and no other capability pairing, inside its own bounded
+        execute_sequence description."""
         from intelligence.planning import _TRUSTED_PLANNING_INSTRUCTION
 
         assert (
-            'Exactly one compound decision exists, for exactly one fixed'
+            "Exactly two compound decisions exist, for exactly two fixed"
             in _TRUSTED_PLANNING_INSTRUCTION
         )
-        # The new capability appears only in its own single-capability
-        # numbered entry and its own "Execute" example - never inside
-        # an execute_sequence-shaped steps array.
         compound_paragraph_start = _TRUSTED_PLANNING_INSTRUCTION.index(
-            "Exactly one compound decision exists"
+            "Exactly two compound decisions exist"
         )
         compound_paragraph_end = _TRUSTED_PLANNING_INSTRUCTION.index(
             "If no capability above can satisfy"
@@ -90,24 +131,23 @@ class TestProjectStateCompoundUnchanged:
         compound_paragraph = _TRUSTED_PLANNING_INSTRUCTION[
             compound_paragraph_start:compound_paragraph_end
         ]
-        assert "schedule_show_enabled_state" not in compound_paragraph
-        assert "schedule_enable" not in compound_paragraph
+        assert "project_state_update_phase" in compound_paragraph
+        assert "project_state_show" in compound_paragraph
+        assert "schedule_enable" in compound_paragraph
+        assert "schedule_show_enabled_state" in compound_paragraph
+        # Never a third pairing, never SCHEDULE_DISABLE, never SCHEDULE_LIST.
+        assert "schedule_disable" not in compound_paragraph
+        assert "schedule_list" not in compound_paragraph
 
 
-class TestScheduleCompoundModulesAreNeverImportedLive:
-    """The three new Batch 1 dormant modules/functions are never
-    imported or called by any live runtime module - only their own
-    dedicated tests exercise them."""
+class TestScheduleCompoundReferencesConfinedToExpectedCallSites:
+    """Phase 99, Batch 3 activation: intelligence/planning.py,
+    core/orchestrator.py, and main.py now legitimately reference the
+    schedule-compound modules - proven confined to exactly the intended
+    functions/methods, never a broader, uncontrolled sprawl. ui/cli.py
+    and core/command_router.py remain fully unaffected."""
 
-    @pytest.mark.parametrize(
-        "relative_path",
-        (
-            "intelligence/planning.py",
-            "core/orchestrator.py",
-            "main.py",
-            "ui/cli.py",
-        ),
-    )
+    @pytest.mark.parametrize("relative_path", ("ui/cli.py", "core/command_router.py"))
     def test_schedule_compound_grounding_module_never_imported(
         self, relative_path: str
     ) -> None:
@@ -115,15 +155,7 @@ class TestScheduleCompoundModulesAreNeverImportedLive:
         referenced = _referenced_module_names(source)
         assert "schedule_compound_grounding" not in referenced
 
-    @pytest.mark.parametrize(
-        "relative_path",
-        (
-            "intelligence/planning.py",
-            "core/orchestrator.py",
-            "main.py",
-            "ui/cli.py",
-        ),
-    )
+    @pytest.mark.parametrize("relative_path", ("ui/cli.py", "core/command_router.py"))
     def test_schedule_compound_workflow_module_never_imported(
         self, relative_path: str
     ) -> None:
@@ -136,7 +168,7 @@ class TestScheduleCompoundModulesAreNeverImportedLive:
     ) -> None:
         """The two allowlists stay wholly separate - the live
         ProjectState grounding module never merges in, or reads from,
-        the new dormant schedule allowlist."""
+        the schedule allowlist."""
         source = _module_source("intelligence/compound_grounding.py")
         referenced = _referenced_module_names(source)
         assert "schedule_compound_grounding" not in referenced
@@ -146,9 +178,62 @@ class TestScheduleCompoundModulesAreNeverImportedLive:
         referenced = _referenced_module_names(source)
         assert "schedule_compound_workflow" not in referenced
 
+    def test_planning_module_imports_schedule_compound_grounding(self) -> None:
+        source = _module_source("intelligence/planning.py")
+        referenced = _referenced_module_names(source)
+        assert "schedule_compound_grounding" in referenced
 
-class TestDormantBuilderNeverCalledLive:
-    def test_select_tool_never_calls_the_dormant_schedule_builder(self) -> None:
+    def test_planning_schedule_compound_reference_confined_to_named_functions(
+        self,
+    ) -> None:
+        source = _module_source("intelligence/planning.py")
+        hits = _functions_referencing(source, "ground_schedule_compound_decision") | (
+            _functions_referencing(source, "_build_schedule_enable_verify_show_workflow_plan")
+        )
+        assert hits <= _PLANNING_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS, (
+            f"unexpected schedule-compound reference inside: "
+            f"{hits - _PLANNING_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS}"
+        )
+
+    def test_orchestrator_imports_schedule_compound_workflow(self) -> None:
+        source = _module_source("core/orchestrator.py")
+        referenced = _referenced_module_names(source)
+        assert "schedule_compound_workflow" in referenced
+
+    def test_orchestrator_schedule_compound_reference_confined_to_named_methods(
+        self,
+    ) -> None:
+        source = _module_source("core/orchestrator.py")
+        hits = _functions_referencing(source, "schedule_compound_workflow") | (
+            _functions_referencing(source, "ScheduleCompoundStepObserver")
+        )
+        assert hits <= _ORCHESTRATOR_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS, (
+            f"unexpected schedule-compound reference inside: "
+            f"{hits - _ORCHESTRATOR_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS}"
+        )
+
+    def test_main_imports_schedule_compound_workflow(self) -> None:
+        source = _module_source("main.py")
+        referenced = _referenced_module_names(source)
+        assert "schedule_compound_workflow" in referenced
+
+    def test_main_schedule_compound_reference_confined_to_named_functions(self) -> None:
+        source = _module_source("main.py")
+        hits = _functions_referencing(source, "schedule_compound")
+        assert hits <= _MAIN_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS, (
+            f"unexpected schedule_compound reference inside: "
+            f"{hits - _MAIN_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS}"
+        )
+
+
+class TestDormantBuilderNowCalledOnlyThroughItsOwnDelegate:
+    def test_select_tool_never_calls_the_schedule_builder_directly(self) -> None:
+        """select_tool() itself must never call
+        _build_schedule_enable_verify_show_workflow_plan() directly -
+        only _select_compound_tool_sequence() (via its own
+        _build_schedule_compound_outcome() delegate) may, keeping the
+        delegation chain exactly as deep as the ProjectState template's
+        own."""
         import intelligence.planning as module
 
         source = inspect.getsource(module.select_tool)
@@ -159,27 +244,13 @@ class TestDormantBuilderNeverCalledLive:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         assert "_build_schedule_enable_verify_show_workflow_plan" not in called_names
+        assert "_select_compound_tool_sequence" in called_names
 
-    def test_select_compound_tool_sequence_never_calls_the_dormant_schedule_builder(
+    def test_no_live_function_outside_the_expected_set_references_the_builder(
         self,
     ) -> None:
-        import intelligence.planning as module
-
-        source = inspect.getsource(module._select_compound_tool_sequence)
-        tree = ast.parse(source)
-        called_names = {
-            node.func.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
-        assert "_build_schedule_enable_verify_show_workflow_plan" not in called_names
-
-    def test_no_live_function_in_planning_module_references_the_dormant_builder(
-        self,
-    ) -> None:
-        """Only the dormant builder's own definition may reference its
-        own name (a function does not call itself in this codebase's
-        established style) - no other function in the module does."""
+        """Only the dormant builder's own definition, and its one
+        expected caller, may reference its name."""
         import intelligence.planning as module
 
         source = inspect.getsource(module)
@@ -193,63 +264,53 @@ class TestDormantBuilderNeverCalledLive:
             segment = ast.get_source_segment(source, node) or ""
             if "_build_schedule_enable_verify_show_workflow_plan" in segment:
                 referencing_functions.add(node.name)
-        assert referencing_functions == set()
+        assert referencing_functions <= _PLANNING_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS
 
 
-class TestNoLiveProgressApprovalObserverOrDispatchWiring:
-    """Batch 1 must not create a ScheduleCompoundWorkflowProgress row
-    during requests, show a compound approval, attach a compound
-    observer, call a new _start_schedule_enable_and_show_workflow()
-    path, change JarvisOrchestrator's live dispatch, or change main.py
-    startup reconciliation."""
+class TestLiveProgressApprovalObserverAndDispatchWiring:
+    """Phase 99, Batch 3 activation: the schedule compound now
+    legitimately creates progress, shows an approval, attaches an
+    observer, and dispatches through its own named start-method -
+    proven confined to exactly the intended call sites."""
 
-    def test_schedule_compound_progress_store_adds_no_live_wiring(self) -> None:
-        """Batch 1 itself added no new ORM table/store at all - proven
-        at the time by an import failure. Phase 99, Batch 2
-        (docs/phase_99_second_compound_template_planning.md) now
-        legitimately adds workflow/schedule_compound_workflow_progress_store.py
-        as its own dormant foundation - this assertion is revised, not
-        removed, to prove the module now exists but still adds zero
-        live wiring (see test_phase99_batch2_dormant_isolation.py for
-        the complete Batch 2 dormancy proof)."""
+    def test_schedule_compound_progress_store_confined_to_named_call_sites(
+        self,
+    ) -> None:
         import workflow.schedule_compound_workflow_progress_store as module
 
         assert hasattr(module, "ScheduleCompoundWorkflowProgressStore")
-        for relative_path in (
-            "intelligence/planning.py",
-            "core/orchestrator.py",
-            "main.py",
-            "ui/cli.py",
+        for relative_path, allowed in (
+            ("core/orchestrator.py", _ORCHESTRATOR_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS),
+            ("main.py", _MAIN_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS),
         ):
+            source = _module_source(relative_path)
+            hits = _functions_referencing(source, "ScheduleCompoundWorkflowProgressStore")
+            assert hits <= allowed, f"{relative_path}: unexpected hits {hits - allowed}"
+        for relative_path in ("ui/cli.py", "core/command_router.py"):
             source = _module_source(relative_path)
             referenced = _referenced_module_names(source)
             assert "schedule_compound_workflow_progress_store" not in referenced
 
-    def test_schedule_compound_progress_observer_adds_no_live_wiring(self) -> None:
-        """Revised for the same reason as the store test immediately
-        above - Phase 99, Batch 2 adds
-        workflow/schedule_compound_progress_observer.py dormantly."""
+    def test_schedule_compound_progress_observer_confined_to_named_call_sites(
+        self,
+    ) -> None:
         import workflow.schedule_compound_progress_observer as module
 
         assert hasattr(module, "ScheduleCompoundStepObserver")
-        for relative_path in (
-            "intelligence/planning.py",
-            "core/orchestrator.py",
-            "main.py",
-            "ui/cli.py",
-        ):
+        source = _module_source("core/orchestrator.py")
+        hits = _functions_referencing(source, "ScheduleCompoundStepObserver")
+        assert hits <= _ORCHESTRATOR_ALLOWED_SCHEDULE_COMPOUND_FUNCTIONS
+        for relative_path in ("ui/cli.py", "core/command_router.py"):
             source = _module_source(relative_path)
             referenced = _referenced_module_names(source)
             assert "schedule_compound_progress_observer" not in referenced
 
-    def test_orchestrator_has_no_schedule_compound_start_method(self) -> None:
+    def test_orchestrator_now_has_the_schedule_compound_start_method(self) -> None:
         from core.orchestrator import JarvisOrchestrator
 
-        assert not hasattr(
-            JarvisOrchestrator, "_start_schedule_enable_and_show_workflow"
-        )
+        assert hasattr(JarvisOrchestrator, "_start_schedule_enable_and_show_workflow")
 
-    def test_orchestrator_constructor_gains_no_new_schedule_compound_collaborator(
+    def test_orchestrator_constructor_gains_exactly_one_new_schedule_compound_param(
         self,
     ) -> None:
         import inspect as _inspect
@@ -257,27 +318,31 @@ class TestNoLiveProgressApprovalObserverOrDispatchWiring:
         from core.orchestrator import JarvisOrchestrator
 
         params = _inspect.signature(JarvisOrchestrator.__init__).parameters
-        assert not any("schedule_compound" in name for name in params)
+        schedule_params = {name for name in params if "schedule_compound" in name}
+        assert schedule_params == {"schedule_compound_progress_store"}
 
-    def test_reconcile_claimed_handoffs_source_never_mentions_schedule_compound(
-        self,
-    ) -> None:
-        source = inspect.getsource(
-            __import__("main").reconcile_claimed_handoffs
-        )
-        assert "schedule_compound" not in source.casefold()
+    def test_reconcile_claimed_handoffs_now_mentions_schedule_compound(self) -> None:
+        source = inspect.getsource(__import__("main").reconcile_claimed_handoffs)
+        assert "schedule_compound" in source.casefold()
 
-    def test_ui_cli_source_is_unaffected(self) -> None:
+    def test_ui_cli_source_remains_unaffected(self) -> None:
         source = _module_source("ui/cli.py")
+        assert "schedule_compound" not in source.casefold()
+        # SCHEDULE_SHOW_ENABLED_STATE itself (Batch 1's own standalone
+        # capability) was never a CLI/router concern either - unaffected.
+        assert "schedule_show_enabled_state" not in source
+
+    def test_command_router_source_remains_unaffected(self) -> None:
+        source = _module_source("core/command_router.py")
         assert "schedule_compound" not in source.casefold()
         assert "schedule_show_enabled_state" not in source
 
 
 class TestNewCapabilityIsGenuinelyReachableNotAccidentallyHidden:
-    """Behavioural, not merely structural, proof: the new capability
-    really is selectable through the existing, unmodified generic
-    single-capability "ask jarvis to:" dispatch - it must never be
-    described as inaccessible when it is not."""
+    """Behavioural, not merely structural, proof: the new standalone
+    capability really is selectable through the existing, unmodified
+    generic single-capability "ask jarvis to:" dispatch - it must never
+    be described as inaccessible when it is not."""
 
     def test_a_standalone_execute_decision_for_the_new_capability_is_accepted(
         self,

@@ -770,3 +770,63 @@ two-branch (never registry-based) dispatch extensions in
 places true code-sharing across templates is introduced.
 
 **Waiting for approval before starting Phase 99 Batch 1.**
+
+## 16. Batch 3 closure — final live architecture and repository-discovered corrections
+
+Phase 99 is formally closed as of Batch 3 (commit recorded in
+`docs/phase_99_completion_report.md`). This section records the final,
+as-built architecture and every place real implementation diverged from
+this document's own earlier, illustrative sketches.
+
+**Corrected grammar.** Sections 5-6's illustrative phrasing ("show
+whether schedule `<id>` is enabled") was superseded during Batch 1 by
+the actual, shipped grammar: `check the enabled state of schedule
+<id>` (standalone) and `enable schedule <id> and then check the
+enabled state of schedule <id>` (compound) — required by
+`intelligence.grounding`'s numeric-argument-span extractor, which
+requires the id to trail its clause.
+
+**Two-template dispatch, exactly as Section 9 anticipated.**
+`intelligence/planning.py`'s `_select_compound_tool_sequence()` tries
+`ground_compound_decision()` (ProjectState) first; only when it reports
+`CompoundUngroundedReason.TEMPLATE_NOT_ALLOWED` (the declared capability
+pair does not match the ProjectState steps at all) does it attempt
+`ground_schedule_compound_decision()` (schedule). Since the two
+templates' declared pairs are disjoint by construction, this is
+provably never ambiguous. `PlanningOutcomeKind.EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW`
+is a new, distinct enum member (never a reused/overloaded
+`EXECUTABLE_COMPOUND_WORKFLOW`), letting `core/orchestrator.py`'s
+`handle_request()` dispatch to the correct named start-method without
+re-inspecting the Plan's own shape.
+
+**`core/orchestrator.py`'s own two-template discriminator.**
+`_compound_step_observer_for()` returns `(observer, _RecognizedCompoundKind)`
+— `NONE`/`PROJECT_STATE`/`SCHEDULE` — checking the ProjectState
+fingerprint first, the schedule fingerprint second, structurally unable
+to match both for one workflow. `_claim_and_resume_workflow()`,
+`validate_pending_approval_for_transition()`, and the decline path all
+branch on this same discriminator.
+
+**No changes to Phase 98's own live behaviour, ever.** Every
+ProjectState-specific function, class, table, and test remained
+untouched; every new schedule-specific counterpart is its own,
+independent module or method, reusing only genuinely generic,
+already-shared infrastructure (`workflow.engine.CompoundCheckpointError`,
+the `_CompoundStepObserver` Protocol, `_DurableCompoundApprovalInvalidator`).
+
+**One pre-existing observation, not fixed here (explicitly out of
+scope per the Batch 3 mandate):** `terminalize_declined_or_expired_compound_progress()`
+(Phase 98's own ProjectState function) does not guard against
+recounting an already-`NOT_EXECUTED` row on a repeated call, so its own
+docstring's "always returns 0 on every call after the first" claim does
+not hold for the bare function in isolation (only the underlying
+progress state is genuinely idempotent). The new schedule sibling,
+`terminalize_declined_or_expired_schedule_compound_progress()`, was
+written to guard against this from the start. Phase 98's own function
+was deliberately left unmodified.
+
+**Non-goals confirmed at closure:** no third compound template exists
+or was started; no generic compound registry, discovery mechanism, or
+generalized multi-step planner was introduced; `SCHEDULE_LIST` was
+never touched; the verification engine's string-only contract was
+never generalized; `dashboard_test.txt` was never touched.

@@ -206,14 +206,28 @@ _HELP_LINES: tuple[str, ...] = (
     "real result is only ever shown after the real, unmodified tool "
     "actually runs.",
     "  ask jarvis to: update my project phase to <value> and then show my "
-    "project state - the one fixed exception to the single-capability rule "
-    "above: updates the phase field (approval required, verified as above), "
-    "and - only if that verification succeeds - also shows the resulting "
-    "project state in the same reply. The words 'and then' must join "
-    "exactly this one pair, in exactly this order; no other pair, order, "
-    "repetition, or count of steps is ever recognized this way. A decline, "
-    "an approval timeout, or a verification failure or mismatch ends the "
-    "request with an honest explanation and never shows project state.",
+    "project state - the first fixed exception to the single-capability "
+    "rule above: updates the phase field (approval required, verified as "
+    "above), and - only if that verification succeeds - also shows the "
+    "resulting project state in the same reply. The words 'and then' must "
+    "join exactly this one pair, in exactly this order; no other pair, "
+    "order, repetition, or count of steps is ever recognized this way. A "
+    "decline, an approval timeout, or a verification failure or mismatch "
+    "ends the request with an honest explanation and never shows project "
+    "state.",
+    "  ask jarvis to: enable schedule <id> and then check the enabled "
+    "state of schedule <same id> - the second, and only other, fixed "
+    "exception to the single-capability rule above: enables the exact "
+    "schedule by id (approval required, verified as above), and - only if "
+    "that verification succeeds - also shows that exact schedule's "
+    "resulting enabled state in the same reply. The schedule id must be "
+    "identical in both clauses - a mismatched id is never accepted, and "
+    "the id is never inferred or substituted. The words 'and then' must "
+    "join exactly this one pair, in exactly this order; no other pair "
+    "(never disable, never list), order, repetition, or count of steps is "
+    "ever recognized this way. A decline, an approval timeout, or a "
+    "verification failure or mismatch ends the request with an honest "
+    "explanation and never shows the schedule's state.",
 )
 
 

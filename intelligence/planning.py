@@ -86,6 +86,7 @@ from intelligence.capability_catalog import (
 )
 from intelligence.compound_grounding import (
     CompoundGroundingResult,
+    CompoundUngroundedReason,
     ground_compound_decision,
 )
 from intelligence.compound_structured_output import (
@@ -96,6 +97,7 @@ from intelligence.compound_structured_output import (
 )
 from intelligence.context import AssembledContext, build_ai_context_block
 from intelligence.grounding import ground_decision
+from intelligence.schedule_compound_grounding import ground_schedule_compound_decision
 from intelligence.structured_output import (
     ToolSelectionDecision,
     ToolSelectionParseError,
@@ -197,21 +199,37 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     "output, and must never appear in your response under any "
     "circumstances.\n"
     "\n"
-    "Exactly one compound decision exists, for exactly one fixed "
-    "request shape: the request explicitly asks you to update the "
-    'project phase and then show the project state, in that exact '
-    'order, joined by the exact words "and then". Only for that exact '
-    'shape, respond with {"decision": "execute_sequence", "steps": '
-    '[{"capability_id": "project_state_update_phase", "arguments": '
-    '{"value": "the requested new phase"}}, {"capability_id": '
-    '"project_state_show", "arguments": {}}]} - always these same two '
-    "steps, in this exact order, and no others. Never use "
-    '"execute_sequence" for any other pair of capabilities, never '
-    "reverse this order, never include more than these two steps, "
-    "never repeat a step, and never invent a third step - if the "
-    "request does not exactly match this one shape, use a single "
-    '"execute"/"unsupported" decision instead, exactly as described '
-    "above.\n"
+    "Exactly two compound decisions exist, for exactly two fixed "
+    "request shapes:\n"
+    "\n"
+    "(a) the request explicitly asks you to update the project phase "
+    'and then show the project state, in that exact order, joined by '
+    'the exact words "and then". Only for that exact shape, respond '
+    'with {"decision": "execute_sequence", "steps": [{"capability_id": '
+    '"project_state_update_phase", "arguments": {"value": "the '
+    'requested new phase"}}, {"capability_id": "project_state_show", '
+    '"arguments": {}}]} - always these same two steps, in this exact '
+    "order, and no others.\n"
+    "\n"
+    "(b) the request explicitly asks you to enable a specific schedule "
+    "by id and then check that same schedule's enabled state, in that "
+    'exact order, joined by the exact words "and then", naming the '
+    "identical schedule id in both clauses. Only for that exact shape, "
+    'respond with {"decision": "execute_sequence", "steps": '
+    '[{"capability_id": "schedule_enable", "arguments": {"schedule_id": '
+    'the exact schedule id}}, {"capability_id": '
+    '"schedule_show_enabled_state", "arguments": {"schedule_id": the '
+    'identical schedule id}}]} - always these same two steps, in this '
+    "exact order, using the identical schedule id in both, and no "
+    "others.\n"
+    "\n"
+    'Never use "execute_sequence" for any other pair of capabilities, '
+    "never reverse either order, never include more than two steps in "
+    "either sequence, never repeat a step, never invent a third step, "
+    "and never use two different schedule ids between the schedule "
+    "pair's own two steps - if the request does not exactly match one "
+    'of these two shapes, use a single "execute"/"unsupported" '
+    "decision instead, exactly as described above.\n"
     "\n"
     "If no capability above can satisfy the request, you must return "
     "the exact unsupported object.\n"
@@ -268,12 +286,20 @@ _TRUSTED_PLANNING_INSTRUCTION = (
     '{"decision": "execute", "capability_id": '
     '"schedule_show_enabled_state", "arguments": {"schedule_id": 5}}\n'
     "\n"
-    "Execute sequence (update phase, then show - the one fixed "
+    "Execute sequence (update phase, then show - the first fixed "
     "compound shape):\n"
     '{"decision": "execute_sequence", "steps": [{"capability_id": '
     '"project_state_update_phase", "arguments": {"value": "the '
     'requested new phase"}}, {"capability_id": "project_state_show", '
     '"arguments": {}}]}\n'
+    "\n"
+    "Execute sequence (enable schedule, then check its enabled state - "
+    "the second fixed compound shape, using the identical schedule id "
+    "in both steps):\n"
+    '{"decision": "execute_sequence", "steps": [{"capability_id": '
+    '"schedule_enable", "arguments": {"schedule_id": 5}}, '
+    '{"capability_id": "schedule_show_enabled_state", "arguments": '
+    '{"schedule_id": 5}}]}\n'
     "\n"
     "Unsupported:\n"
     '{"decision": "unsupported", "capability_id": null, "arguments": {}}\n'
@@ -319,11 +345,22 @@ class PlanningOutcomeKind(Enum):
     #: values (Phase 92, Batch 1). No preflight, approval, execution,
     #: or verification of any kind is ever attempted for this outcome.
     UNGROUNDED_SELECTION = "ungrounded_selection"
-    #: A valid "execute_sequence" decision for the one trusted compound
+    #: A valid "execute_sequence" decision for the first trusted compound
     #: template (Phase 98, Batch 3 - docs/phase_98_live_compound_reentry_plan.md),
     #: parsed, grounded, and built into the exact trusted three-step
     #: Plan - `workflow_plan` is set, ready for WorkflowEngine.run().
     EXECUTABLE_COMPOUND_WORKFLOW = "executable_compound_workflow"
+    #: A valid "execute_sequence" decision for the second trusted
+    #: compound template (Phase 99, Batch 3 -
+    #: docs/phase_99_second_compound_template_planning.md): SCHEDULE_ENABLE
+    #: -> SCHEDULE_VERIFY_ENABLED_STATE -> SCHEDULE_SHOW_ENABLED_STATE,
+    #: parsed, grounded, and built into the exact trusted three-step
+    #: Plan - `workflow_plan` is set, ready for WorkflowEngine.run(). A
+    #: distinct kind from EXECUTABLE_COMPOUND_WORKFLOW (never reused for
+    #: both) so a caller can dispatch to the correct one of the two
+    #: small, explicit, named start-methods without re-inspecting the
+    #: Plan's own shape.
+    EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW = "executable_schedule_compound_workflow"
     #: peek_compound_decision() identified "execute_sequence", but the
     #: compound parser/plan builder rejected it (malformed schema,
     #: duplicate key, wrong step count/capability/order, invalid
@@ -394,9 +431,11 @@ class PlanningOutcome:
         plan: Set only when kind is EXECUTABLE - a flat, single-step
             StructuredPlan for the caller to run directly through
             ToolExecutor.
-        workflow_plan: Set only when kind is EXECUTABLE_WORKFLOW - a
-            real, exactly-two-step planner.plan_models.Plan for the
-            caller to run through WorkflowEngine.
+        workflow_plan: Set when kind is EXECUTABLE_WORKFLOW (a real,
+            exactly-two-step planner.plan_models.Plan), or when kind is
+            EXECUTABLE_COMPOUND_WORKFLOW/EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW
+            (a real, exactly-three-step Plan) - ready for
+            WorkflowEngine.run() in every case.
         detail: A short, bounded, non-sensitive reason, set when kind
             is INVALID_OUTPUT (a raw ToolSelectionParseError.reason or
             preflight-mismatch string) or UNGROUNDED_SELECTION (one of
@@ -585,16 +624,32 @@ def _select_compound_tool_sequence(
     session_id: int | None,
     catalog: Mapping[CapabilityId, CapabilityAdapter],
 ) -> PlanningOutcome:
-    """Parse, ground, and build the one trusted compound plan for a
-    response select_tool() has already committed to as
-    "execute_sequence" (Phase 98, Batch 3 -
-    docs/phase_98_live_compound_reentry_plan.md).
+    """Parse, then ground and build against exactly one of the two
+    trusted compound plans, for a response select_tool() has already
+    committed to as "execute_sequence" (Phase 98, Batch 3 -
+    docs/phase_98_live_compound_reentry_plan.md; Phase 99, Batch 3 -
+    docs/phase_99_second_compound_template_planning.md).
 
     Never called except from select_tool() itself, immediately after
     peek_compound_decision() returns True for this exact `raw_text` -
     there is no other call site, and no fallback: any failure here
     (parse, ground, or build) terminates as its own distinct,
-    non-fallback outcome.
+    non-fallback outcome; there is never a fallback to a single-
+    capability interpretation.
+
+    Two-template dispatch, small and explicit (never a registry or
+    discovery mechanism): the parsed decision's own declared, ordered
+    capability-id pair is first checked against the first (ProjectState)
+    template via ground_compound_decision(). Since the two templates'
+    declared pairs are entirely disjoint (different capability ids at
+    both positions), ground_compound_decision() can only ever refuse a
+    schedule-shaped decision with CompoundUngroundedReason.TEMPLATE_NOT_ALLOWED
+    - so that specific, bounded reason (and only that one) triggers a
+    second attempt against the schedule template via
+    ground_schedule_compound_decision(); any other ProjectState grounding
+    failure (negation, connector, clause, argument) is conclusive on its
+    own and never triggers a second attempt, since it already proves the
+    declared pair matched the ProjectState template's own steps.
 
     Args:
         raw_text: The raw, untrimmed model response text (identical to
@@ -611,11 +666,12 @@ def _select_compound_tool_sequence(
         catalog: The capability catalog to validate against.
 
     Returns:
-        A PlanningOutcome. EXECUTABLE_COMPOUND_WORKFLOW with
+        A PlanningOutcome. EXECUTABLE_COMPOUND_WORKFLOW (ProjectState)
+        or EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW (schedule) with
         `workflow_plan` set on success. INVALID_COMPOUND_OUTPUT (a
         bounded `detail`) for a parse or plan-construction failure.
-        UNGROUNDED_COMPOUND_SELECTION (a bounded `detail`) if
-        ground_compound_decision() refuses the request.
+        UNGROUNDED_COMPOUND_SELECTION (a bounded `detail`) if neither
+        template's own grounding function accepts the request.
     """
     try:
         parsed: ParsedCompoundToolSelection = parse_compound_tool_selection(
@@ -626,16 +682,67 @@ def _select_compound_tool_sequence(
             kind=PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT, detail=exc.reason
         )
 
-    grounding: CompoundGroundingResult = ground_compound_decision(
+    project_state_grounding: CompoundGroundingResult = ground_compound_decision(
         request_text=request_text, parsed=parsed
     )
-    if not grounding.grounded:
-        assert grounding.reason is not None  # guaranteed when not grounded
-        return PlanningOutcome(
-            kind=PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION,
-            detail=grounding.reason.value,
+    if project_state_grounding.grounded:
+        return _build_project_state_compound_outcome(
+            parsed,
+            request_text,
+            tool_registry=tool_registry,
+            security_manager=security_manager,
+            session_id=session_id,
+            catalog=catalog,
         )
 
+    assert project_state_grounding.reason is not None  # guaranteed when not grounded
+    if project_state_grounding.reason is not CompoundUngroundedReason.TEMPLATE_NOT_ALLOWED:
+        # The declared pair matched the ProjectState template's own
+        # steps, but some other grounding check failed - conclusive on
+        # its own; the schedule template's declared pair could never
+        # have matched here too (the two templates are disjoint), so a
+        # second attempt would be pointless and is never made.
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION,
+            detail=project_state_grounding.reason.value,
+        )
+
+    schedule_grounding: CompoundGroundingResult = ground_schedule_compound_decision(
+        request_text=request_text, parsed=parsed
+    )
+    if not schedule_grounding.grounded:
+        assert schedule_grounding.reason is not None  # guaranteed when not grounded
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.UNGROUNDED_COMPOUND_SELECTION,
+            detail=schedule_grounding.reason.value,
+        )
+
+    return _build_schedule_compound_outcome(
+        parsed,
+        request_text,
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+        catalog=catalog,
+    )
+
+
+def _build_project_state_compound_outcome(
+    parsed: ParsedCompoundToolSelection,
+    request_text: str,
+    *,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> PlanningOutcome:
+    """Build the first trusted compound template's PlanningOutcome,
+    once ground_compound_decision() has already accepted `parsed`.
+
+    Extracted from _select_compound_tool_sequence() unchanged in
+    behaviour - only moved into its own named function so that function
+    can dispatch to either template symmetrically.
+    """
     # Guaranteed by ground_compound_decision()'s own template match: the
     # first step is exactly PROJECT_STATE_UPDATE_PHASE, whose own
     # declared, already-validated argument is a bounded, non-empty
@@ -660,6 +767,50 @@ def _select_compound_tool_sequence(
 
     return PlanningOutcome(
         kind=PlanningOutcomeKind.EXECUTABLE_COMPOUND_WORKFLOW,
+        workflow_plan=workflow_plan,
+    )
+
+
+def _build_schedule_compound_outcome(
+    parsed: ParsedCompoundToolSelection,
+    request_text: str,
+    *,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> PlanningOutcome:
+    """Build the second trusted compound template's PlanningOutcome,
+    once ground_schedule_compound_decision() has already accepted
+    `parsed` (Phase 99, Batch 3).
+
+    Never called except from _select_compound_tool_sequence() itself,
+    immediately after the schedule template's own grounding accepted
+    the request - there is no other call site.
+    """
+    # Guaranteed by ground_schedule_compound_decision()'s own template
+    # match and cross-step identity check: the first step is exactly
+    # SCHEDULE_ENABLE, whose own declared, already-validated
+    # schedule_id agrees exactly with the second step's own declared
+    # schedule_id.
+    approved_schedule_id = parsed.steps[0].arguments["schedule_id"]
+    assert isinstance(approved_schedule_id, int)
+
+    workflow_plan = _build_schedule_enable_verify_show_workflow_plan(
+        request_text,
+        approved_schedule_id=approved_schedule_id,
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+        catalog=catalog,
+    )
+    if isinstance(workflow_plan, str):
+        return PlanningOutcome(
+            kind=PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT, detail=workflow_plan
+        )
+
+    return PlanningOutcome(
+        kind=PlanningOutcomeKind.EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW,
         workflow_plan=workflow_plan,
     )
 

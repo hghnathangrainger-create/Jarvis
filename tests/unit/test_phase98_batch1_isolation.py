@@ -53,6 +53,11 @@ _ORCHESTRATOR_ALLOWED_PROGRESS_STORE_FUNCTIONS = frozenset(
         "_compound_step_observer_for",
         "_start_compound_update_phase_and_show_workflow",
         "_terminalize_declined_compound_progress",
+        # Phase 99, Batch 3: this substring search also matches
+        # ScheduleCompoundWorkflowProgressError/Store (both literally
+        # contain "CompoundWorkflowProgress") - the schedule compound's
+        # own sibling terminalization method legitimately references it.
+        "_terminalize_declined_schedule_compound_progress",
     }
 )
 

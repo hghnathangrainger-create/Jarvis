@@ -32,6 +32,7 @@ a way around them.
 from __future__ import annotations
 
 from dataclasses import replace
+from enum import Enum
 from typing import Callable, Protocol
 
 from approval.approval_manager import ApprovalManager
@@ -68,6 +69,13 @@ from core.compound_workflow import (
     validate_compound_approval_before_transition,
 )
 from core.request_models import JarvisRequest, JarvisResponse, WorkflowTraceStep
+from core.schedule_compound_workflow import (
+    establish_schedule_compound_progress_or_isolate,
+    matches_schedule_compound_plan_shape,
+    schedule_compound_progress_identity_matches,
+    translate_schedule_compound_workflow_result,
+    validate_schedule_compound_approval_before_transition,
+)
 from inbox.inbox_store import InboxStore
 from intelligence.capability_catalog import (
     CAPABILITY_CATALOG,
@@ -112,6 +120,11 @@ from workflow.compound_workflow_progress_store import (
 )
 from workflow.engine import CompoundCheckpointError, WorkflowEngine
 from workflow.paused_workflow_store import PausedWorkflowStore
+from workflow.schedule_compound_progress_observer import ScheduleCompoundStepObserver
+from workflow.schedule_compound_workflow_progress_store import (
+    ScheduleCompoundWorkflowProgressError,
+    ScheduleCompoundWorkflowProgressStore,
+)
 from workflow.workflow_models import WorkflowResult
 from workflow.workflow_plan_factory import (
     build_create_and_read_plan,
@@ -359,6 +372,33 @@ _ASK_JARVIS_TO_COMPOUND_PROGRESS_FAILURE_MESSAGE = (
     "Jarvis could not safely prepare this request's durable tracking, "
     "so no approval was created and nothing was changed."
 )
+#: Shown for the schedule compound's own Foundation F infrastructure-
+#: failure case - mirrors _ASK_JARVIS_TO_COMPOUND_PROGRESS_FAILURE_MESSAGE
+#: exactly (Phase 99, Batch 3).
+_ASK_JARVIS_TO_SCHEDULE_COMPOUND_PROGRESS_FAILURE_MESSAGE = (
+    "Jarvis could not safely prepare this request's durable tracking, "
+    "so no approval was created and nothing was changed."
+)
+
+
+class _RecognizedCompoundKind(Enum):
+    """Which (if either) of the two trusted compound templates a
+    resumed workflow was recognized as (Phase 99, Batch 3 -
+    docs/phase_99_second_compound_template_planning.md).
+
+    A small, explicit, two-template discriminator - never a generic
+    registry - so _claim_and_resume_workflow() can dispatch to the
+    correct terminalization/translation logic for whichever template
+    (if any) _compound_step_observer_for() recognized. The two
+    templates' own trusted fingerprints are structurally disjoint
+    (different tool names at every position), so a given paused Plan
+    can never match both - NONE, PROJECT_STATE, and SCHEDULE are always
+    mutually exclusive for one workflow_id.
+    """
+
+    NONE = "none"
+    PROJECT_STATE = "project_state"
+    SCHEDULE = "schedule"
 
 #: Advisory label for a memory-summary response's message (Phase 9, Batch 2).
 #: Distinct from _FILE_SUMMARY_LABEL for the same reason that label is
@@ -642,6 +682,7 @@ class JarvisOrchestrator:
         tool_selection_router: AIRouter | None = None,
         paused_workflow_store: PausedWorkflowStore | None = None,
         compound_progress_store: CompoundWorkflowProgressStore | None = None,
+        schedule_compound_progress_store: ScheduleCompoundWorkflowProgressStore | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -743,6 +784,18 @@ class JarvisOrchestrator:
                 compound workflow fails honestly instead of running
                 live; every other request path is completely
                 unaffected.
+            schedule_compound_progress_store: An optional, already-
+                constructed ScheduleCompoundWorkflowProgressStore
+                (Phase 99, Batch 3 -
+                docs/phase_99_second_compound_template_planning.md) -
+                the sole per-step durable checkpoint authority for the
+                second trusted compound workflow (SCHEDULE_ENABLE ->
+                SCHEDULE_VERIFY_ENABLED_STATE -> SCHEDULE_SHOW_ENABLED_STATE).
+                A wholly separate store from compound_progress_store -
+                never shared. When omitted, the schedule compound
+                workflow fails honestly instead of running live; every
+                other request path, including the ProjectState
+                compound, is completely unaffected.
         """
         self._planner = planner
         self._executor = executor
@@ -760,6 +813,7 @@ class JarvisOrchestrator:
         self._tool_selection_router = tool_selection_router
         self._paused_workflow_store = paused_workflow_store
         self._compound_progress_store = compound_progress_store
+        self._schedule_compound_progress_store = schedule_compound_progress_store
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -784,12 +838,19 @@ class JarvisOrchestrator:
         earlier.
 
         A no-op (returns None) for every non-compound approval, or
-        when either durable store is not configured - existing
-        approvals remain completely unaffected. Only ever refuses a
-        request this orchestrator has already, independently
-        recognized (from persisted, non-model-controlled state) as the
-        one trusted compound template with a missing or mismatched
-        progress row.
+        when the relevant durable store(s) are not configured -
+        existing approvals remain completely unaffected. Only ever
+        refuses a request this orchestrator has already, independently
+        recognized (from persisted, non-model-controlled state) as one
+        of the two trusted compound templates with a missing or
+        mismatched progress row.
+
+        Phase 99, Batch 3: extended to also check the second, schedule
+        compound template, using the same two-template dispatch order
+        as _compound_step_observer_for() - the ProjectState check runs
+        first and is conclusive on its own the moment it recognizes the
+        workflow as its own template; the schedule check runs only when
+        the ProjectState check found this was not its template.
 
         Args:
             request: The pending ApprovalRequest about to be decided.
@@ -798,19 +859,33 @@ class JarvisOrchestrator:
             None if the transition may proceed. A short, bounded,
             honest reason if it must not.
         """
-        if self._paused_workflow_store is None or self._compound_progress_store is None:
-            return None
         workflow_id = request.metadata.get("workflow_id")
         if not workflow_id:
             return None
-        validation = validate_compound_approval_before_transition(
-            paused_workflow_store=self._paused_workflow_store,
-            progress_store=self._compound_progress_store,
-            request_id=request.request_id,
-            workflow_id=workflow_id,
-        )
-        if validation.is_compound_workflow and not validation.valid:
-            return validation.reason
+
+        if self._paused_workflow_store is not None and self._compound_progress_store is not None:
+            validation = validate_compound_approval_before_transition(
+                paused_workflow_store=self._paused_workflow_store,
+                progress_store=self._compound_progress_store,
+                request_id=request.request_id,
+                workflow_id=workflow_id,
+            )
+            if validation.is_compound_workflow:
+                return validation.reason if not validation.valid else None
+
+        if (
+            self._paused_workflow_store is not None
+            and self._schedule_compound_progress_store is not None
+        ):
+            schedule_validation = validate_schedule_compound_approval_before_transition(
+                paused_workflow_store=self._paused_workflow_store,
+                progress_store=self._schedule_compound_progress_store,
+                request_id=request.request_id,
+                workflow_id=workflow_id,
+            )
+            if schedule_validation.is_compound_workflow and not schedule_validation.valid:
+                return schedule_validation.reason
+
         return None
 
     def execute_approved(
@@ -972,28 +1047,35 @@ class JarvisOrchestrator:
                     plan=plan,
                 )
 
-        # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md):
-        # recognize the one trusted compound plan purely from already-
-        # durable, non-model-controlled state - never from decision or
-        # request content - and attach its trusted step_observer only
-        # when recognized. None/False for every existing, non-compound
-        # workflow: completely unaffected.
-        step_observer, is_compound = self._compound_step_observer_for(
+        # Phase 98, Batch 3 (docs/phase_98_live_compound_reentry_plan.md);
+        # extended to a small, explicit two-template dispatch in Phase
+        # 99, Batch 3: recognize one of the two trusted compound plans
+        # purely from already-durable, non-model-controlled state -
+        # never from decision or request content - and attach its
+        # trusted step_observer only when recognized. (None, NONE) for
+        # every existing, non-compound workflow: completely unaffected.
+        step_observer, compound_kind = self._compound_step_observer_for(
             workflow_id, decision, session_id
         )
+        is_compound = compound_kind is not _RecognizedCompoundKind.NONE
 
         if is_compound and not decision.is_approved:
             # Dedicated non-execution terminalization path (Phase 98,
-            # Batch 3): a decline must never attach the trusted
-            # step_observer at all - the existing, generic
+            # Batch 3; Phase 99, Batch 3): a decline must never attach
+            # the trusted step_observer at all - the existing, generic
             # WorkflowEngine decline contract (no before_step() call,
             # ToolExecutor/verifier/show all receive zero calls) runs
             # completely unaffected, exactly as for every other
-            # workflow. The compound progress row is instead
-            # terminalized separately, honestly, as NOT_EXECUTED -
-            # never by (mis)routing it through mark_step_1_failed(),
-            # which requires Step 1 to have actually started.
-            self._terminalize_declined_compound_progress(workflow_id)
+            # workflow. The recognized template's own progress row is
+            # instead terminalized separately, honestly, as
+            # NOT_EXECUTED - never by (mis)routing it through
+            # mark_step_1_failed(), which requires Step 1 to have
+            # actually started.
+            if compound_kind is _RecognizedCompoundKind.PROJECT_STATE:
+                self._terminalize_declined_compound_progress(workflow_id)
+            else:
+                assert compound_kind is _RecognizedCompoundKind.SCHEDULE
+                self._terminalize_declined_schedule_compound_progress(workflow_id)
             step_observer = None
 
         try:
@@ -1048,9 +1130,14 @@ class JarvisOrchestrator:
             # sole source of truth for what actually happened.
             self._approvals.mark_consumed(decision.request_id)
 
-        if is_compound:
+        if compound_kind is _RecognizedCompoundKind.PROJECT_STATE:
             response, _kind = translate_compound_workflow_result(result)
             return response
+        if compound_kind is _RecognizedCompoundKind.SCHEDULE:
+            schedule_response, _schedule_kind = translate_schedule_compound_workflow_result(
+                result
+            )
+            return schedule_response
 
         # Phase 90, Batch 3; generalized Phase 94, Batch 2: each real
         # verified-workflow shape is recognised purely structurally
@@ -1064,16 +1151,24 @@ class JarvisOrchestrator:
         workflow_id: str,
         decision: ApprovalDecision,
         session_id: int | None,
-    ) -> tuple[CompoundStepObserver | None, bool]:
-        """Recognize the one trusted compound plan purely from already-
-        durable, non-model-controlled state, and build its trusted
-        step_observer only when recognized (Phase 98, Batch 3).
+    ) -> tuple[CompoundStepObserver | ScheduleCompoundStepObserver | None, _RecognizedCompoundKind]:
+        """Recognize one of the two trusted compound plans purely from
+        already-durable, non-model-controlled state, and build its
+        trusted step_observer only when recognized (Phase 98, Batch 3;
+        extended for the second template in Phase 99, Batch 3).
 
         Never selects or configures anything from `decision`/model
         output - only the already-paused Plan's own structural
-        fingerprint and the linked CompoundWorkflowProgress row's own
-        identity (both entirely trusted, persisted state) decide
-        recognition.
+        fingerprint and the linked progress row's own identity (both
+        entirely trusted, persisted state) decide recognition.
+
+        Small, explicit two-template dispatch: the ProjectState
+        template is checked first (unchanged from Phase 98); the
+        schedule template is checked only if the ProjectState check did
+        not recognize this workflow - never both, since the two
+        templates' own trusted fingerprints are structurally disjoint
+        (matches_compound_plan_shape()/matches_schedule_compound_plan_shape()
+        can never both be True for the same Plan).
 
         Args:
             workflow_id: The workflow about to be resumed - already
@@ -1085,36 +1180,65 @@ class JarvisOrchestrator:
                 into the observer's own pre-execution observation read.
 
         Returns:
-            (observer, True) if recognized; (None, False) otherwise -
-            including when compound_progress_store is not configured
-            at all, which always means "not this template" for this
-            orchestrator instance.
+            (observer, kind) where kind is PROJECT_STATE or SCHEDULE if
+            recognized as that template, or (None, NONE) otherwise -
+            including when the relevant progress store is not
+            configured at all, which always means "not this template"
+            for this orchestrator instance.
         """
-        if self._compound_progress_store is None:
-            return None, False
         peeked_plan = self._workflow_engine.peek_paused_plan(workflow_id)
-        if peeked_plan is None or not matches_compound_plan_shape(peeked_plan):
-            return None, False
-        progress_record = self._compound_progress_store.get(workflow_id)
-        if progress_record is None or not compound_progress_identity_matches(
-            peeked_plan,
-            progress_record,
-            request_id=decision.request_id,
-            workflow_id=workflow_id,
+        if peeked_plan is None:
+            return None, _RecognizedCompoundKind.NONE
+
+        if self._compound_progress_store is not None and matches_compound_plan_shape(
+            peeked_plan
         ):
-            return None, False
-        observer = CompoundStepObserver(
-            plan=peeked_plan,
-            progress_store=self._compound_progress_store,
-            executor=self._executor,
-            session_id=session_id,
-        )
-        return observer, True
+            progress_record = self._compound_progress_store.get(workflow_id)
+            if progress_record is not None and compound_progress_identity_matches(
+                peeked_plan,
+                progress_record,
+                request_id=decision.request_id,
+                workflow_id=workflow_id,
+            ):
+                observer = CompoundStepObserver(
+                    plan=peeked_plan,
+                    progress_store=self._compound_progress_store,
+                    executor=self._executor,
+                    session_id=session_id,
+                )
+                return observer, _RecognizedCompoundKind.PROJECT_STATE
+
+        if (
+            self._schedule_compound_progress_store is not None
+            and matches_schedule_compound_plan_shape(peeked_plan)
+        ):
+            schedule_progress_record = self._schedule_compound_progress_store.get(
+                workflow_id
+            )
+            if (
+                schedule_progress_record is not None
+                and schedule_compound_progress_identity_matches(
+                    peeked_plan,
+                    schedule_progress_record,
+                    request_id=decision.request_id,
+                    workflow_id=workflow_id,
+                )
+            ):
+                schedule_observer = ScheduleCompoundStepObserver(
+                    plan=peeked_plan,
+                    progress_store=self._schedule_compound_progress_store,
+                    executor=self._executor,
+                    session_id=session_id,
+                )
+                return schedule_observer, _RecognizedCompoundKind.SCHEDULE
+
+        return None, _RecognizedCompoundKind.NONE
 
     def _terminalize_declined_compound_progress(self, workflow_id: str) -> None:
-        """Best-effort, idempotent: mark a recognized compound
-        workflow's progress row honestly NOT_EXECUTED when its Step 1
-        approval is declined before ever starting (Phase 98, Batch 3).
+        """Best-effort, idempotent: mark a recognized ProjectState
+        compound workflow's progress row honestly NOT_EXECUTED when its
+        Step 1 approval is declined before ever starting (Phase 98,
+        Batch 3).
 
         Never raises, and never blocks or alters the decline's own
         generic WorkflowEngine outcome - this is a side concern (the
@@ -1135,6 +1259,24 @@ class JarvisOrchestrator:
         try:
             self._compound_progress_store.mark_not_executed_before_start(workflow_id)
         except CompoundWorkflowProgressError:
+            pass
+
+    def _terminalize_declined_schedule_compound_progress(self, workflow_id: str) -> None:
+        """The schedule compound's own sibling to
+        _terminalize_declined_compound_progress() (Phase 99, Batch 3) -
+        identical contract, against the wholly separate schedule
+        progress store.
+
+        Args:
+            workflow_id: The workflow about to be declined.
+        """
+        if self._schedule_compound_progress_store is None:
+            return
+        try:
+            self._schedule_compound_progress_store.mark_not_executed_before_start(
+                workflow_id
+            )
+        except ScheduleCompoundWorkflowProgressError:
             pass
 
     def resume_approved_unconsumed_workflow(
@@ -2376,6 +2518,11 @@ class JarvisOrchestrator:
                 plan, outcome, session_id
             )
 
+        if outcome.kind is PlanningOutcomeKind.EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW:
+            return self._start_schedule_enable_and_show_workflow(
+                plan, outcome, session_id
+            )
+
         if outcome.kind is PlanningOutcomeKind.INVALID_COMPOUND_OUTPUT:
             # Phase 98, Batch 3: peek_compound_decision() already
             # committed to the compound path for this response - no
@@ -2572,6 +2719,107 @@ class JarvisOrchestrator:
             return JarvisResponse(
                 success=False,
                 message=_ASK_JARVIS_TO_COMPOUND_PROGRESS_FAILURE_MESSAGE,
+                plan=plan,
+            )
+
+        return self._workflow_result_to_response(result)
+
+    def _start_schedule_enable_and_show_workflow(
+        self,
+        plan: Plan,
+        outcome: PlanningOutcome,
+        session_id: int | None,
+    ) -> JarvisResponse:
+        """Run the exact trusted three-step schedule compound Plan
+        (SCHEDULE_ENABLE -> internal enabled-state verification ->
+        SCHEDULE_SHOW_ENABLED_STATE) through the real, unmodified
+        WorkflowEngine, then establish its durable progress row before
+        returning an actionable approval (Phase 99, Batch 3 -
+        docs/phase_99_second_compound_template_planning.md, atomic
+        activation).
+
+        Mirrors _start_compound_update_phase_and_show_workflow()'s
+        exact shape, against the wholly separate schedule progress
+        store - the second half of the small, explicit two-template
+        dispatch (handle_request()'s own EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW
+        branch is this method's only call site).
+
+        Args:
+            plan: The generic Plan built for the raw "ask jarvis to:"
+                request text (used only for an early-exit failure
+                response - the real workflow response otherwise carries
+                its own, internal three-step Plan instead).
+            outcome: The EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW
+                PlanningOutcome carrying the real, already-preflighted,
+                already-fingerprint-eligible three-step workflow_plan.
+            session_id: Optional session identifier for the audit trail.
+
+        Returns:
+            A JarvisResponse. An honest failure if WorkflowEngine or
+            either durable schedule-compound store is not configured,
+            if the first run() call does not pause for approval (a
+            genuine safety mismatch), or if progress could not be
+            established (in which case the pending approval/paused
+            workflow have already been terminally isolated by
+            establish_schedule_compound_progress_or_isolate() itself -
+            never left showable). Otherwise, the honest WAITING-
+            translated response, now backed by a durable, identity-
+            validated progress row.
+        """
+        if self._workflow_engine is None:
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+        if (
+            self._paused_workflow_store is None
+            or self._schedule_compound_progress_store is None
+        ):
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_WORKFLOW_NOT_AVAILABLE_MESSAGE,
+                plan=plan,
+            )
+
+        assert outcome.workflow_plan is not None  # guaranteed by EXECUTABLE_SCHEDULE_COMPOUND_WORKFLOW
+        schedule_compound_plan = outcome.workflow_plan
+        result = self._workflow_engine.run(schedule_compound_plan, session_id=session_id)
+
+        if result.overall_status is not StepStatus.WAITING:
+            # Step 1 was preflighted YELLOW but did not pause for
+            # approval at real execution time - refuse honestly,
+            # exactly mirroring the ProjectState compound's own
+            # safety-mismatch contract. Never reaches progress creation
+            # at all in this case.
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_SAFETY_MISMATCH_MESSAGE,
+                plan=plan,
+                intelligence_trace=(
+                    "Step 1/3: safety mismatch - the expected approval "
+                    "requirement was not applied.",
+                ),
+            )
+
+        assert result.pending_approval_request is not None  # guaranteed by WAITING
+        established = establish_schedule_compound_progress_or_isolate(
+            plan=schedule_compound_plan,
+            workflow_id=result.workflow_id,
+            request_id=result.pending_approval_request.request_id,
+            progress_store=self._schedule_compound_progress_store,
+            approval_invalidator=self._approvals,
+            paused_workflow_store=self._paused_workflow_store,
+        )
+        if isinstance(established, str):
+            # Foundation F: the pending approval and paused workflow
+            # have already been terminally isolated (invalidated/
+            # deleted) by establish_schedule_compound_progress_or_isolate()
+            # itself, using only existing, bounded APIs - never left
+            # showable without valid progress.
+            return JarvisResponse(
+                success=False,
+                message=_ASK_JARVIS_TO_SCHEDULE_COMPOUND_PROGRESS_FAILURE_MESSAGE,
                 plan=plan,
             )
 
