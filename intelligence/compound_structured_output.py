@@ -181,6 +181,59 @@ class CompoundToolSelectionParseError(Exception):
         self.reason = reason
 
 
+def peek_compound_decision(raw_text: str) -> bool:
+    """Trusted, dormant discriminator peek (Phase 98, Batch 2 -
+    docs/phase_98_live_compound_reentry_plan.md, Foundation A).
+
+    Inspects only the top-level "decision" key of `raw_text`, reusing
+    the exact same fence-stripping and duplicate-key-safe JSON parsing
+    both this module's own parse_compound_tool_selection() and
+    intelligence.structured_output.parse_tool_selection() already use
+    (imported here unchanged) - so this peek can never see a different
+    JSON shape than whichever parser subsequently acts on its answer.
+
+    Never called by any live code path in Batch 2 - no request path,
+    CLI, help output, or prompt instruction wires this in. A future,
+    separately-approved batch is the only place this may be given a
+    real call site, and even then: this function only ever decides
+    *routing* (peek True -> the Phase 97 compound parser; peek False ->
+    the existing, byte-for-byte-unchanged single-decision parser). It
+    never itself validates a compound response's full shape - that
+    remains parse_compound_tool_selection()'s own job - and a
+    malformed "execute_sequence" response must never be routed back to
+    the single-decision parser once this peek returns True for it.
+
+    Args:
+        raw_text: The raw, untrimmed candidate text.
+
+    Returns:
+        True only if the text parses (after the one permitted fence is
+        stripped) as a JSON object whose "decision" key is present and
+        exactly equal to the string "execute_sequence". False for
+        every other case - malformed JSON, a non-object, a missing
+        key, or any other decision value - never raises.
+    """
+    if len(raw_text) > _MAX_RAW_OUTPUT_CHARS:
+        return False
+
+    try:
+        text = _live_strip_single_outer_fence(raw_text)
+    except _LiveToolSelectionParseError:
+        return False
+    if not text:
+        return False
+
+    try:
+        parsed_json = json.loads(text, object_pairs_hook=_live_reject_duplicate_keys)
+    except (_LiveToolSelectionParseError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(parsed_json, dict):
+        return False
+
+    return parsed_json.get("decision") == _EXECUTE_SEQUENCE_LITERAL
+
+
 def _parse_json_object(text: str) -> dict[str, object]:
     """Strictly parse `text` as a single JSON object, rejecting any
     duplicate key at any nesting depth (reusing

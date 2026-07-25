@@ -24,14 +24,13 @@ import inspect
 import pytest
 
 from approval.approval_manager import ApprovalManager
-from config.constants import EventOutcome, SecurityTier, StepStatus
+from config.constants import SecurityTier, StepStatus
 from planner.plan_models import Plan, PlanStep
 from security.security_manager import SecurityManager
 from tools.base_tool import BaseTool, ToolRequest, ToolResult
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
 from workflow.engine import WorkflowEngine, WorkflowError
-from workflow.workflow_models import WorkflowStepOutcome
 
 # --- Fake tools (deliberately not the concrete MemoryTool implementation) ---
 
@@ -970,13 +969,25 @@ def test_classify_action_and_get_tool_appear_only_in_reload_revalidation() -> No
     eligible to sit back in self._paused as ordinary pending state; it
     never runs a tool itself, and the real execution gate
     (ToolExecutor.execute, called only from resume()/_run_from(), proven
-    by the test above) is completely unchanged."""
+    by the test above) is completely unchanged.
+
+    Phase 98, Batch 2: _try_reconstruct_paused_workflow()'s own
+    classify_action()/get_tool() calls were extracted into a shared
+    helper, _reconstruct_plan_and_outcomes(), reused unchanged by the
+    new, narrow reconstruct_claimed_compound_plan() (the inherited-
+    CLAIMED compound recovery path) - added to allowed_functions since
+    it is the identical reload-revalidation logic, not a new execution
+    gate."""
     import workflow.engine as module
 
     with open(module.__file__, encoding="utf-8") as f:
         tree = ast.parse(f.read())
 
-    allowed_functions = {"reload_paused", "_try_reconstruct_paused_workflow"}
+    allowed_functions = {
+        "reload_paused",
+        "_try_reconstruct_paused_workflow",
+        "_reconstruct_plan_and_outcomes",
+    }
     offending: set[str] = set()
 
     for func_node in ast.walk(tree):
@@ -1004,15 +1015,19 @@ def test_engine_has_no_async_threading_or_persistence_code() -> None:
         assert forbidden not in source
 
 
-def test_every_except_exception_wraps_only_emit_or_history() -> None:
-    """Every bare `except Exception` block in this module is a single Pass
-    statement - the identical narrow observability-isolation pattern used
-    both by _emit() (the audit logger) and, since the Durable Workflow
-    Lifecycle Foundation turn, _record_history() (the durable history
-    store). Neither is ever wrapped around classify_action, execute, or
-    any other authoritative call - only around its own optional-observer
-    call, so a failing logger or a failing history store can never alter
-    an authoritative workflow outcome."""
+def test_every_except_exception_wraps_only_emit_history_or_observer() -> None:
+    """Every bare `except Exception` block in this module follows one of
+    exactly two patterns. _emit() (the audit logger) and _record_history()
+    (the durable history store) each swallow with a single Pass statement
+    - the narrow observability-isolation pattern proving a failing logger
+    or history store can never alter an authoritative workflow outcome.
+
+    Phase 98, Batch 2 adds a second, deliberately different pattern:
+    _observer_before_step()/_observer_after_step() each catch a raised
+    exception from the optional, trusted compound step_observer and
+    convert it into a single Return of a bounded, honest reason string -
+    never silently swallowed like emit/history, since a checkpoint
+    failure must fail closed (stop the workflow), not be ignored."""
     import workflow.engine as module
 
     tree = ast.parse(inspect.getsource(module))
@@ -1023,11 +1038,21 @@ def test_every_except_exception_wraps_only_emit_or_history() -> None:
         and node.type is not None
         and getattr(node.type, "id", None) == "Exception"
     ]
-    assert len(except_bodies) == 2
-    for body in except_bodies:
+    assert len(except_bodies) == 4
+
+    swallowing = [body for body in except_bodies if isinstance(body[0], ast.Pass)]
+    fail_closed = [body for body in except_bodies if isinstance(body[0], ast.Return)]
+
+    assert len(swallowing) == 2
+    for body in swallowing:
         # A single Pass statement (after the comment, which is not an AST node).
         assert len(body) == 1
-        assert isinstance(body[0], ast.Pass)
+
+    assert len(fail_closed) == 2
+    for body in fail_closed:
+        # A single Return statement - never a Pass, never a re-raise -
+        # converting the exception into a bounded reason string.
+        assert len(body) == 1
 
 
 # --- Paused-workflow timeout leak (Phase 15, Batch 4) -------------------------

@@ -679,3 +679,167 @@ def _build_write_and_verify_workflow_plan(
         ),
     )
     return Plan(user_request=request_text, steps=steps)
+
+
+def _build_phase_update_verify_show_workflow_plan(
+    request_text: str,
+    *,
+    approved_phase_value: str,
+    tool_registry: ToolRegistry,
+    security_manager: SecurityManager,
+    session_id: int | None,
+    catalog: Mapping[CapabilityId, CapabilityAdapter],
+) -> Plan | str:
+    """Deterministically construct the fixed, exactly-three-step trusted
+    Plan for the one Phase 98 compound template (Batch 2, dormant -
+    docs/phase_98_live_compound_reentry_plan.md, Foundation B):
+    PROJECT_STATE_UPDATE_PHASE -> PROJECT_STATE_VERIFY_FOCUS (trusted,
+    model-invisible) -> PROJECT_STATE_SHOW, with Step 3 gated on Step
+    2's own real VerificationResult via
+    PlanStep.requires_verified_predecessor (Phase 98, Batch 1).
+
+    Never called by select_tool() or any other live path in Batch 2 -
+    only this module's own dedicated tests, and a future, separately-
+    approved Batch 3 wiring, ever call this function. The AI never
+    selects, orders, or configures Steps 2/3: both are always this
+    function's own fixed, trusted insertion, exactly mirroring
+    _build_write_and_verify_workflow_plan()'s own "AI never selects
+    the verifier" contract, extended by one further, equally trusted,
+    read-only step.
+
+    Args:
+        request_text: The verbatim natural request (becomes
+            Plan.user_request).
+        approved_phase_value: The exact, already-validated phase value
+            (from a ParsedCompoundToolSelection's own step 1 argument,
+            already passed through intelligence.structured_output's
+            shared _validate_arguments() by the compound parser -
+            never re-validated or re-read from model output here).
+        tool_registry: Used only for has_tool()/get_tool() during
+            preflight.
+        security_manager: Used only for classify_action() during
+            preflight.
+        session_id: Optional session identifier for the preflight
+            ToolRequest only.
+        catalog: The capability catalog to resolve
+            PROJECT_STATE_UPDATE_PHASE, its paired verifier, and
+            PROJECT_STATE_SHOW from.
+
+    Returns:
+        A real, three-step Plan ready for WorkflowEngine.run(), or a
+        short, bounded failure reason string if any of the three
+        capabilities is not configured, not present in the catalog, or
+        fails its own preflight - never an exception, matching this
+        module's existing "expected, describable outcome" convention.
+    """
+    write_adapter = catalog.get(CapabilityId.PROJECT_STATE_UPDATE_PHASE)
+    if write_adapter is None:
+        return "the phase-update capability is not configured"
+
+    write_preflight = _preflight_capability(
+        write_adapter,
+        arguments={"value": approved_phase_value},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(write_preflight, str):
+        return write_preflight
+    write_tool_input, write_decision = write_preflight
+
+    if write_adapter.paired_verify_capability_id is None:
+        return "the internal verification capability is not configured"
+    verify_adapter = catalog.get(write_adapter.paired_verify_capability_id)
+    if verify_adapter is None:
+        return "the internal verification capability is not configured"
+
+    verify_preflight = _preflight_capability(
+        verify_adapter,
+        arguments={},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(verify_preflight, str):
+        return f"internal verification capability preflight failed: {verify_preflight}"
+    verify_tool_input, verify_decision = verify_preflight
+
+    show_adapter = catalog.get(CapabilityId.PROJECT_STATE_SHOW)
+    if show_adapter is None:
+        return "the project-state show capability is not configured"
+
+    show_preflight = _preflight_capability(
+        show_adapter,
+        arguments={},
+        tool_registry=tool_registry,
+        security_manager=security_manager,
+        session_id=session_id,
+    )
+    if isinstance(show_preflight, str):
+        return f"project-state show capability preflight failed: {show_preflight}"
+    show_tool_input, show_decision = show_preflight
+
+    write_tool = tool_registry.get_tool(write_adapter.tool_name)
+    assert write_tool is not None  # guaranteed by this function's own preflight
+    write_action = write_tool.action_for(
+        ToolRequest(
+            tool_name=write_adapter.tool_name,
+            input_data=write_tool_input,
+            session_id=session_id,
+        )
+    )
+    write_reason = security_manager.classify_action(write_action).reason
+
+    verify_tool = tool_registry.get_tool(verify_adapter.tool_name)
+    assert verify_tool is not None
+    verify_action = verify_tool.action_for(
+        ToolRequest(
+            tool_name=verify_adapter.tool_name,
+            input_data=verify_tool_input,
+            session_id=session_id,
+        )
+    )
+
+    show_tool = tool_registry.get_tool(show_adapter.tool_name)
+    assert show_tool is not None
+    show_action = show_tool.action_for(
+        ToolRequest(
+            tool_name=show_adapter.tool_name,
+            input_data=show_tool_input,
+            session_id=session_id,
+        )
+    )
+
+    steps = (
+        PlanStep(
+            number=1,
+            description=write_adapter.description,
+            action=write_action,
+            tier=write_decision.tier,
+            reason=write_reason,
+            tool_name=write_adapter.tool_name,
+            tool_input=write_tool_input,
+        ),
+        PlanStep(
+            number=2,
+            description=verify_adapter.description,
+            action=verify_action,
+            tier=verify_decision.tier,
+            reason=verify_decision.reason,
+            tool_name=verify_adapter.tool_name,
+            tool_input=verify_tool_input,
+        ),
+        PlanStep(
+            number=3,
+            description=show_adapter.description,
+            action=show_action,
+            tier=show_decision.tier,
+            reason=show_decision.reason,
+            tool_name=show_adapter.tool_name,
+            tool_input=show_tool_input,
+            requires_verified_predecessor=True,
+            verification_field_name="phase",
+            verification_expected_value=approved_phase_value,
+        ),
+    )
+    return Plan(user_request=request_text, steps=steps)

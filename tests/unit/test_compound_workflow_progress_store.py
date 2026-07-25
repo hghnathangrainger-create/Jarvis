@@ -350,6 +350,88 @@ class TestRestartSurvival:
         assert {r.workflow_id for r in records} == {"wf-1", "wf-2"}
 
 
+class TestMarkStep1Failed:
+    """Phase 98, Batch 2 (docs/phase_98_live_compound_reentry_plan.md,
+    Foundation D) - the one new store primitive the amended plan
+    identified as missing: a write-step-failure counterpart to
+    mark_step_3_failed(), reused for both an ordinary tool failure and
+    a user decline."""
+
+    def test_marks_step_1_failed_and_overall_failed(self, store) -> None:
+        _create(store)
+        store.record_pre_execution_observation(
+            "wf-1", phase_value="planning", last_updated=None
+        )
+        final = store.mark_step_1_failed("wf-1")
+        assert final.step_1_status is CompoundStepStatus.FAILED
+        assert final.overall_status is CompoundOverallStatus.FAILED
+
+    def test_step_2_can_never_legally_start_afterward(self, store) -> None:
+        _create(store)
+        store.record_pre_execution_observation(
+            "wf-1", phase_value="planning", last_updated=None
+        )
+        store.mark_step_1_failed("wf-1")
+        with pytest.raises(CompoundWorkflowProgressError):
+            store.start_step_2("wf-1")
+
+    def test_illegal_from_pending_state(self, store) -> None:
+        _create(store)
+        with pytest.raises(CompoundWorkflowProgressError):
+            store.mark_step_1_failed("wf-1")
+
+    def test_illegal_a_second_time_once_already_failed(self, store) -> None:
+        _create(store)
+        store.record_pre_execution_observation(
+            "wf-1", phase_value="planning", last_updated=None
+        )
+        store.mark_step_1_failed("wf-1")
+        with pytest.raises(CompoundWorkflowProgressError):
+            store.mark_step_1_failed("wf-1")
+
+    def test_illegal_once_step_1_already_completed(self, store) -> None:
+        _create(store)
+        store.record_pre_execution_observation(
+            "wf-1", phase_value="planning", last_updated=None
+        )
+        store.mark_step_1_completed("wf-1")
+        with pytest.raises(CompoundWorkflowProgressError):
+            store.mark_step_1_failed("wf-1")
+
+    def test_wrong_workflow_id_rejected(self, store) -> None:
+        _create(store)
+        with pytest.raises(CompoundWorkflowProgressError):
+            store.mark_step_1_failed("no-such-workflow")
+
+    def test_no_unrestricted_output_field_exists_on_the_record(self, store) -> None:
+        """Only the bounded fields the record already declares are
+        ever populated - no free-text/unrestricted column is added by
+        this transition."""
+        _create(store)
+        store.record_pre_execution_observation(
+            "wf-1", phase_value="planning", last_updated=None
+        )
+        import dataclasses
+
+        final = store.mark_step_1_failed("wf-1")
+        assert {f.name for f in dataclasses.fields(final)} == {
+            "id",
+            "workflow_id",
+            "template_id",
+            "request_id",
+            "approved_phase_value",
+            "pre_execution_phase_value",
+            "pre_execution_last_updated",
+            "step_1_status",
+            "step_2_status",
+            "step_2_verification_outcome",
+            "step_3_status",
+            "overall_status",
+            "created_at",
+            "updated_at",
+        }
+
+
 class TestReconciliation:
     _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _T1 = _T0 + timedelta(minutes=1)

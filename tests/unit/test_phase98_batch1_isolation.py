@@ -54,9 +54,52 @@ class TestNoLiveCompoundParserDispatch:
         assert not (referenced & _NEW_BATCH1_MODULE_NAMES)
 
     def test_planning_module_source_has_no_compound_progress_reference(self) -> None:
+        """Phase 98, Batch 1 built zero consumer of its own new
+        verification-gate/progress foundations, so this test originally
+        asserted planning.py referenced neither at all. Phase 98,
+        Batch 2 (docs/phase_98_live_compound_reentry_plan.md,
+        Foundation B) adds exactly one, dormant consumer:
+        _build_phase_update_verify_show_workflow_plan(), a private
+        helper never called by select_tool() or any other live entry
+        point (see the companion test immediately below). This test is
+        updated, not weakened: it now proves the verification-gate
+        reference is confined entirely to that one function, and that
+        CompoundWorkflowProgress itself is still never referenced by
+        this module at all - progress persistence lives entirely in
+        core/compound_workflow.py, never here."""
         source = _module_source("intelligence/planning.py")
         assert "CompoundWorkflowProgress" not in source
-        assert "requires_verified_predecessor" not in source
+
+        tree = ast.parse(source)
+        functions_referencing_gate: set[str] = set()
+        for func_node in ast.walk(tree):
+            if isinstance(func_node, ast.FunctionDef):
+                segment = ast.get_source_segment(source, func_node) or ""
+                if "requires_verified_predecessor" in segment:
+                    functions_referencing_gate.add(func_node.name)
+
+        assert functions_referencing_gate == {
+            "_build_phase_update_verify_show_workflow_plan"
+        }
+
+    def test_select_tool_never_calls_the_dormant_compound_plan_builder(self) -> None:
+        """select_tool() is the one live entry point every "ask jarvis
+        to:" request reaches; the dormant Batch 2 compound-plan builder
+        must never be reachable from it (Foundation B's own "no live
+        call site in Batch 2" requirement)."""
+        source = _module_source("intelligence/planning.py")
+        tree = ast.parse(source)
+        select_tool_node = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "select_tool"
+        )
+        called_names = {
+            call.func.id
+            for call in ast.walk(select_tool_node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        assert "_build_phase_update_verify_show_workflow_plan" not in called_names
 
     def test_structured_output_unchanged_by_this_batch(self) -> None:
         source = _module_source("intelligence/structured_output.py")

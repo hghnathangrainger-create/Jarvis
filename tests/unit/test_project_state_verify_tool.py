@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from datetime import datetime
 
 import pytest
 
@@ -95,7 +96,14 @@ def test_focus_missing_but_other_fields_set_still_reports_empty_focus() -> None:
 def test_metadata_contains_only_focus_phase_and_last_updated() -> None:
     """Data minimization (Batch 3 planning prompt; Phase 96 added
     "phase" once a second real consumer, PROJECT_STATE_UPDATE_PHASE,
-    existed): no branch, commit, or suite_result metadata is returned."""
+    existed): no branch, commit, or suite_result metadata is returned.
+
+    Phase 98, Batch 2 (docs/phase_98_live_compound_reentry_plan.md,
+    §18 item 5) adds one further, additive key: "last_updated_at" (the
+    raw datetime, alongside the existing formatted "last_updated"
+    string) - needed by the dormant compound-lifecycle observer's own
+    pre-execution checkpoint, which requires a real datetime rather
+    than a human-readable string. Still no branch/commit/suite_result."""
     store = _store()
     store.update("branch", "main")
     store.update("phase", "Phase 90")
@@ -103,8 +111,14 @@ def test_metadata_contains_only_focus_phase_and_last_updated() -> None:
     store.update("suite_result", "1 passed")
     store.update("focus", "test")
     result = _run(ProjectStateVerifyTool(store))
-    assert set(result.metadata) == {"focus", "phase", "last_updated"}
+    assert set(result.metadata) == {
+        "focus",
+        "phase",
+        "last_updated",
+        "last_updated_at",
+    }
     assert result.metadata["phase"] == "Phase 90"
+    assert isinstance(result.metadata["last_updated_at"], datetime)
 
 
 def test_output_is_short_and_honest() -> None:

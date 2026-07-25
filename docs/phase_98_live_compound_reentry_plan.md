@@ -644,3 +644,114 @@ Batch 2/3 tests use direct construction and a fake provider throughout.
 - No production or test file changed by this amendment.
 - Phase 98 implementation not started; no live compound behaviour
   exists after this commit.
+
+## 27. Batch 2 implementation evidence
+
+**The internal compound lifecycle described in Sections 1-26 above now
+exists.** It remains dormant and unreachable from any live request:
+`peek_compound_decision()` and the trusted plan builder are written and
+independently tested, but no call site attaches either to
+`select_tool()`; `core/compound_workflow.py` and
+`workflow/compound_progress_observer.py` are not imported by
+`core/orchestrator.py` or `main.py`; no help output, user guide, or
+prompt instruction mentions any of it (proven structurally in
+`tests/unit/test_phase98_batch2_dormant_isolation.py`). **Batch 3 is
+still required** for atomic live activation. **No user-visible
+compound behaviour exists.**
+
+### Foundations implemented exactly as designed
+
+- **A** - `peek_compound_decision()` added to
+  `intelligence/compound_structured_output.py`, reusing the existing
+  fence/duplicate-key helpers unchanged.
+- **B** - `_build_phase_update_verify_show_workflow_plan()` added to
+  `intelligence/planning.py` as a private, unwired helper alongside the
+  existing two-step builder.
+- **C** - `matches_compound_plan_shape()` /
+  `compound_progress_identity_matches()` /
+  `is_recognized_compound_workflow()` in the new `core/compound_workflow.py`
+  - the full 14-point fingerprint, exactly as specified.
+- **D** - `CompoundWorkflowProgressStore.mark_step_1_failed()` - the
+  one new store primitive; all 11 pre-existing methods reused
+  unchanged.
+- **E** - `_CompoundStepObserver` Protocol added to `workflow/engine.py`;
+  `resume()`/`_run_from()`/`_stop()` gained an optional, keyword-only
+  `step_observer` parameter (defaulting to `None`, never accepted by
+  `run()`); `peek_paused_plan()` and `reconstruct_claimed_compound_plan()`
+  added as new, read-only public accessors; the pre-existing
+  `_try_reconstruct_paused_workflow()` was refactored (its
+  approval-status-independent reconstruction extracted into
+  `_reconstruct_plan_and_outcomes()`) so the new
+  `reconstruct_claimed_compound_plan()` reuses it rather than
+  duplicating it. The concrete observer
+  (`workflow/compound_progress_observer.py:CompoundStepObserver`)
+  implements the Protocol structurally (no inheritance), performing the
+  pre-execution observation via one extra, audited
+  `project_state_verify` call and computing `VerificationOutcome`
+  from Step 3's own trusted, already-durable expected value.
+- **F** - `establish_compound_progress_or_isolate()` (synchronous
+  creation-failure path: terminally isolates via the existing
+  `ApprovalManager.invalidate_pending()` + `PausedWorkflowStore.delete()`,
+  never lazily left) and
+  `repair_or_isolate_pending_compound_progress()` (the dormant,
+  hard-crash repair pass over PENDING rows) in `core/compound_workflow.py`.
+- **G** - `validate_compound_approval_before_transition()` in
+  `core/compound_workflow.py` - re-fetches progress fresh at validation
+  time, never trusting an earlier creation attempt; reports
+  `is_compound_workflow=False, valid=True` for every non-compound
+  approval, leaving it provably unaffected.
+- **H** - `reconcile_claimed_compound_workflows()` and the narrow
+  `resume_claimed_compound_workflow()` in `core/compound_workflow.py`,
+  implementing the full crash-state matrix; structurally proven to
+  never call `claim_for_resume()` (the Protocol it depends on does not
+  even expose that method).
+- **I** - `translate_compound_workflow_result()` in
+  `core/compound_workflow.py`, producing exactly the six
+  `CompoundResultKind` outcomes.
+
+### One production-code correction made during implementation
+
+`establish_compound_progress_or_isolate()`/
+`repair_or_isolate_pending_compound_progress()` originally caught only
+`CompoundWorkflowProgressError` around `CompoundWorkflowProgressStore.create()`.
+Since a duplicate `workflow_id` raises a raw `IntegrityError` (the
+column is unique), not that typed exception, this was widened to catch
+`Exception` generally - discovered and fixed while writing
+`test_compound_progress_creation_gating.py`'s own duplicate-workflow-id
+test, before any commit.
+
+### Test suite added (11 new files, 4 existing files extended)
+
+- `tests/unit/test_phase98_batch2_dormant_isolation.py` (22 tests)
+- `tests/unit/test_peek_compound_decision.py` (16)
+- `tests/unit/test_compound_plan_builder.py` (11)
+- `tests/unit/test_compound_workflow_recognizer.py` (23)
+- `tests/unit/test_compound_workflow_progress_store.py` (+7, `mark_step_1_failed`)
+- `tests/unit/test_workflow_engine_compound_checkpoints.py` (18)
+- `tests/unit/test_compound_progress_creation_gating.py` (10)
+- `tests/unit/test_compound_approval_time_validation.py` (8)
+- `tests/integration/test_compound_claimed_recovery.py` (14)
+- `tests/unit/test_compound_result_translator.py` (10)
+- `tests/integration/test_compound_lifecycle_dormant_end_to_end.py` (3)
+- `tests/unit/test_phase98_batch1_isolation.py` (+1, `select_tool` never
+  calls the new builder; the Batch 1 "no verification-gate reference in
+  planning.py" test narrowed to "only in the one dormant builder")
+- `tests/unit/test_project_state_verify_tool.py` (updated for the
+  additive `last_updated_at` metadata key)
+- `tests/unit/test_workflow_engine.py` (its two structural invariant
+  tests updated to reflect the intentional refactor:
+  `_reconstruct_plan_and_outcomes` added to the reload-revalidation
+  allowlist, and the except-block census widened from 2 swallowing
+  `Pass` blocks to 2 swallowing + 2 fail-closed `Return` blocks)
+
+Each of the four above was updated to reflect Batch 2's own
+intentional, planned additions - never weakened.
+
+### Verification
+
+- Full suite: **5650 passed, 3 skipped, 0 failed**, identical under the
+  normal environment, `AI_REASONING_ENABLED=false`, and
+  `PYTHON_DOTENV_DISABLED=1`.
+- Git-derived Ruff scope (21 files: 9 modified, 12 new): **all checks
+  passed, exit 0**.
+- `git diff --check`: clean.

@@ -208,6 +208,78 @@ class _PausedWorkflowStateStore(Protocol):
         ...
 
 
+class _CompoundStepObserver(Protocol):
+    """The narrow, trusted, optional per-step lifecycle observer Phase
+    98, Batch 2 adds for exactly one recognized compound plan (Approval-
+    to-Resume Handoff Interlock's own dormant continuation -
+    docs/phase_98_live_compound_reentry_plan.md, Foundation E).
+
+    A pure structural Protocol - WorkflowEngine never imports a concrete
+    implementation, never knows about ProjectState, CompoundWorkflowProgress,
+    or any other domain concept, and never constructs one itself. It is
+    trusted application infrastructure only: a caller may attach one
+    only by passing it explicitly as the `step_observer` keyword
+    argument to resume() (never run() - see resume()'s own docstring),
+    and only after that caller has already, independently, recognized
+    the plan being resumed as the one trusted compound template from
+    persisted, non-model-controlled state. Nothing here is ever
+    selected, configured, or influenced by model output.
+
+    Both methods return an optional short, bounded stop reason -
+    exactly mirroring _verification_gate_failure_reason()'s own
+    existing "None means proceed, a string means stop" shape - so a
+    checkpoint-persistence failure is handled by this engine's own,
+    already-proven STOP-only mechanism, never a second, parallel
+    control-flow path.
+    """
+
+    def before_step(self, workflow_id: str, step_index: int) -> str | None:
+        """Called once, immediately before the step at `step_index` is
+        invoked (before self._executor.execute()). A non-None return
+        stops the workflow immediately, via the same _stop() path a
+        verification-gate failure already uses, without ever invoking
+        the step's own tool.
+
+        Args:
+            workflow_id: The workflow being resumed/continued.
+            step_index: The zero-based index of the step about to run.
+
+        Returns:
+            None to proceed, or a short, bounded reason to stop before
+            the tool is invoked.
+        """
+        ...
+
+    def after_step(
+        self, workflow_id: str, step_index: int, tool_result: ToolResult
+    ) -> str | None:
+        """Called once for every step outcome this engine ever produces
+        for the resumed workflow - a genuine success, an ordinary tool
+        failure, a decline, a blocked result, or a verification-gate
+        stop - via the one, already-shared path each of those already
+        flows through (_stop(), or the loop's own success-continuation
+        branch). A non-None return after an otherwise-successful
+        `tool_result` converts that step into a stop (the tool may have
+        succeeded, but its durable checkpoint could not be recorded) -
+        the engine never silently advances to the next step without a
+        confirmed checkpoint.
+
+        Args:
+            workflow_id: The workflow being resumed/continued.
+            step_index: The zero-based index of the step whose outcome
+                is now known.
+            tool_result: The real ToolResult for that step (including a
+                synthetic declined/gate-failure result for those
+                cases) - never unrestricted, unbounded output; callers
+                persist only the bounded fields they need.
+
+        Returns:
+            None if the checkpoint was recorded (or nothing needed
+            recording), or a short, bounded reason if it could not be.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowReloadReport:
     """A small, honest summary of what reload_paused() did (Phase 27,
@@ -359,6 +431,36 @@ class WorkflowEngine:
         self._reap_stale_paused()
         return workflow_id in self._paused
 
+    def peek_paused_plan(self, workflow_id: str) -> Plan | None:
+        """Return the Plan for a currently in-memory paused workflow, or
+        None (Phase 98, Batch 2 - docs/phase_98_live_compound_reentry_plan.md,
+        §18 item 2). Read-only: never mutates self._paused, never reaps
+        stale entries itself.
+
+        Added so a caller (the future, separately-approved Batch 3
+        wiring inside JarvisOrchestrator) can recognize whether a
+        live, not-yet-claimed-by-a-dead-process paused workflow matches
+        the one trusted compound template *before* deciding whether to
+        attach a step_observer to its own subsequent resume() call -
+        never to expose the Plan for any other purpose (this engine
+        still owns all execution).
+
+        Callers must already have confirmed has_paused(workflow_id) is
+        True immediately beforehand - this accessor deliberately does
+        not call _reap_stale_paused() itself, to avoid a second reap in
+        the same call sequence (the exact mid-claim deletion bug fixed
+        in the Approval-to-Resume Handoff Interlock, Batch 3).
+
+        Args:
+            workflow_id: The workflow identifier to look up.
+
+        Returns:
+            The paused workflow's own Plan, or None if workflow_id is
+            not currently in this instance's own in-memory _paused.
+        """
+        paused = self._paused.get(workflow_id)
+        return paused.plan if paused is not None else None
+
     def _reap_stale_paused(self) -> None:
         """Clear a paused workflow whose approval request has genuinely
         expired (Phase 15, Batch 4).
@@ -435,6 +537,62 @@ class WorkflowEngine:
             del self._paused[workflow_id]
             self._remove_paused_state(workflow_id)
 
+    @staticmethod
+    def _observer_before_step(
+        step_observer: _CompoundStepObserver | None, workflow_id: str, step_index: int
+    ) -> str | None:
+        """Call step_observer.before_step(), failing closed on any raised
+        exception (Phase 98, Batch 2 - checkpoint-failure semantics: a
+        database error must never be indistinguishable from "proceed").
+
+        Args:
+            step_observer: The optional observer to call, or None
+                (no-op).
+            workflow_id: The workflow being resumed/continued.
+            step_index: The zero-based index of the step about to run.
+
+        Returns:
+            None if step_observer is None or its own before_step()
+            returned None. Otherwise a short, bounded reason - either
+            the one before_step() itself returned, or a fixed, honest
+            description of an unexpected exception it raised.
+        """
+        if step_observer is None:
+            return None
+        try:
+            return step_observer.before_step(workflow_id, step_index)
+        except Exception as exc:  # noqa: BLE001 - fail closed; never propagate
+            return f"compound progress checkpoint failed: {exc}"
+
+    @staticmethod
+    def _observer_after_step(
+        step_observer: _CompoundStepObserver | None,
+        workflow_id: str,
+        step_index: int,
+        tool_result: ToolResult,
+    ) -> str | None:
+        """Call step_observer.after_step(), failing closed on any raised
+        exception. See _observer_before_step's own docstring.
+
+        Args:
+            step_observer: The optional observer to call, or None
+                (no-op).
+            workflow_id: The workflow being resumed/continued.
+            step_index: The zero-based index of the step whose outcome
+                is now known.
+            tool_result: The real ToolResult for that step.
+
+        Returns:
+            None if step_observer is None or its own after_step()
+            returned None. Otherwise a short, bounded reason.
+        """
+        if step_observer is None:
+            return None
+        try:
+            return step_observer.after_step(workflow_id, step_index, tool_result)
+        except Exception as exc:  # noqa: BLE001 - fail closed; never propagate
+            return f"compound progress checkpoint failed: {exc}"
+
     def run(self, plan: Plan, *, session_id: int | None = None) -> WorkflowResult:
         """Execute plan.steps in order, starting from the first step.
 
@@ -496,6 +654,7 @@ class WorkflowEngine:
         decision: ApprovalDecision,
         *,
         session_id: int | None = None,
+        step_observer: _CompoundStepObserver | None = None,
     ) -> WorkflowResult:
         """Continue a previously paused workflow after an approval decision.
 
@@ -514,6 +673,23 @@ class WorkflowEngine:
                 that was waiting.
             session_id: Optional session identifier. When omitted, the
                 session_id the workflow was originally run with is reused.
+            step_observer: Optional, trusted, per-step lifecycle observer
+                (Phase 98, Batch 2 - docs/phase_98_live_compound_reentry_plan.md,
+                Foundation E). Only ever attached by a caller that has
+                already, independently, recognized `workflow_id`'s own
+                plan as the one trusted compound template from
+                persisted, non-model-controlled state - never selected
+                or configured by model output. Defaults to None (no-op),
+                fully backward compatible with every existing caller:
+                omitting it leaves this method's behaviour byte-for-byte
+                unchanged. Deliberately never accepted by run() (see
+                that method's own signature) - this template's first
+                step is unconditionally YELLOW, so run() only ever
+                produces the initial pause without executing anything;
+                attaching an observer there would risk it capturing a
+                pre-execution baseline before the real execution
+                attempt, which may happen long after run() if approval
+                is delayed.
 
         Returns:
             A new WorkflowResult representing the progressed workflow
@@ -595,6 +771,31 @@ class WorkflowEngine:
                 completed_outcomes=paused.completed_outcomes,
                 step=step,
                 tool_result=tool_result,
+                step_observer=step_observer,
+            )
+
+        # Phase 98, Batch 2: the trusted per-step checkpoint, called only
+        # when a caller has attached an observer - never for any existing
+        # workflow. A non-None return means the checkpoint itself (e.g.
+        # persisting the pre-execution observation and marking a step
+        # active) could not be durably recorded; the write tool is never
+        # invoked in that case. Never called for the observer's own
+        # `after_step` counterpart above (decline) - nothing is about to
+        # be invoked there at all.
+        before_reason = self._observer_before_step(
+            step_observer, workflow_id, step.number - 1
+        )
+        if before_reason is not None:
+            blocked_result = ToolResult(
+                tool_name=step.tool_name or "", success=False, error=before_reason
+            )
+            return self._stop(
+                paused.plan,
+                workflow_id=workflow_id,
+                session_id=resolved_session_id,
+                completed_outcomes=paused.completed_outcomes,
+                step=step,
+                tool_result=blocked_result,
             )
 
         self._emit_step_event(
@@ -628,6 +829,33 @@ class WorkflowEngine:
                 completed_outcomes=paused.completed_outcomes,
                 step=step,
                 tool_result=tool_result,
+                step_observer=step_observer,
+            )
+
+        # Phase 98, Batch 2: the trusted post-execution checkpoint. A
+        # non-None return here means the tool itself succeeded, but its
+        # durable checkpoint could not be recorded - the engine never
+        # silently advances to the next step in that case; it stops via
+        # the same STOP-only path an ordinary tool failure already uses.
+        checkpoint_failure = self._observer_after_step(
+            step_observer, workflow_id, step.number - 1, tool_result
+        )
+        if checkpoint_failure is not None:
+            failed_result = ToolResult(
+                tool_name=step.tool_name or "",
+                success=False,
+                error=(
+                    "This step's tool call succeeded, but its durable "
+                    f"checkpoint could not be recorded: {checkpoint_failure}"
+                ),
+            )
+            return self._stop(
+                paused.plan,
+                workflow_id=workflow_id,
+                session_id=resolved_session_id,
+                completed_outcomes=paused.completed_outcomes,
+                step=step,
+                tool_result=failed_result,
             )
 
         outcome = WorkflowStepOutcome(
@@ -655,6 +883,7 @@ class WorkflowEngine:
             session_id=resolved_session_id,
             start_index=paused.waiting_step_index + 1,
             completed_outcomes=paused.completed_outcomes + (outcome,),
+            step_observer=step_observer,
         )
 
     # ----- internal sequential loop ------------------------------------------
@@ -667,6 +896,7 @@ class WorkflowEngine:
         session_id: int | None,
         start_index: int,
         completed_outcomes: tuple[WorkflowStepOutcome, ...],
+        step_observer: _CompoundStepObserver | None = None,
     ) -> WorkflowResult:
         """Execute plan.steps[start_index:] in order until the workflow
         stops, pauses, or completes.
@@ -683,6 +913,12 @@ class WorkflowEngine:
             start_index: The plan.steps index to begin at.
             completed_outcomes: Outcomes already recorded for steps before
                 start_index.
+            step_observer: Optional, trusted, per-step lifecycle observer
+                (Phase 98, Batch 2). Only ever non-None when resume()
+                forwards it here to execute the remaining steps of a
+                recognized compound plan - run()'s own call to this
+                method never supplies one. Defaults to None (no-op),
+                fully backward compatible.
 
         Returns:
             A WorkflowResult - COMPLETED, WAITING, or FAILED.
@@ -726,6 +962,7 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
+                    step_observer=step_observer,
                 )
 
             gate_failure_reason = self._verification_gate_failure_reason(
@@ -744,6 +981,24 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
+                    step_observer=step_observer,
+                )
+
+            # Phase 98, Batch 2: the trusted pre-execution checkpoint -
+            # see resume()'s own identical comment. A non-None return
+            # stops before the tool is ever invoked.
+            before_reason = self._observer_before_step(step_observer, workflow_id, index)
+            if before_reason is not None:
+                blocked_result = ToolResult(
+                    tool_name=step.tool_name or "", success=False, error=before_reason
+                )
+                return self._stop(
+                    plan,
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                    completed_outcomes=tuple(outcomes),
+                    step=step,
+                    tool_result=blocked_result,
                 )
 
             tool_result = self._executor.execute(
@@ -813,6 +1068,34 @@ class WorkflowEngine:
                     completed_outcomes=tuple(outcomes),
                     step=step,
                     tool_result=tool_result,
+                    step_observer=step_observer,
+                )
+
+            # Phase 98, Batch 2: the trusted post-execution checkpoint -
+            # see resume()'s own identical comment. A non-None return
+            # means the tool succeeded but its checkpoint could not be
+            # recorded; the loop never advances to the next step in
+            # that case.
+            checkpoint_failure = self._observer_after_step(
+                step_observer, workflow_id, index, tool_result
+            )
+            if checkpoint_failure is not None:
+                failed_result = ToolResult(
+                    tool_name=step.tool_name or "",
+                    success=False,
+                    error=(
+                        "This step's tool call succeeded, but its "
+                        "durable checkpoint could not be recorded: "
+                        f"{checkpoint_failure}"
+                    ),
+                )
+                return self._stop(
+                    plan,
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                    completed_outcomes=tuple(outcomes),
+                    step=step,
+                    tool_result=failed_result,
                 )
 
             outcome = WorkflowStepOutcome(
@@ -866,6 +1149,7 @@ class WorkflowEngine:
         completed_outcomes: tuple[WorkflowStepOutcome, ...],
         step: PlanStep,
         tool_result: ToolResult,
+        step_observer: _CompoundStepObserver | None = None,
     ) -> WorkflowResult:
         """Record a FAILED outcome for `step` and stop the workflow.
 
@@ -881,10 +1165,33 @@ class WorkflowEngine:
             completed_outcomes: Outcomes already recorded before this step.
             step: The step that did not cleanly succeed.
             tool_result: The unsuccessful/blocked/declined/unusable result.
+            step_observer: Optional, trusted, per-step lifecycle observer
+                (Phase 98, Batch 2). When present, notified once via its
+                after_step() hook with this exact tool_result - the one,
+                shared path every stop reason (decline, ordinary
+                failure, blocked, verification-gate failure, or an
+                already-reported pre-execution checkpoint failure)
+                flows through. Its return value is not used to alter
+                control flow here: this call is already terminal.
+                Deliberately omitted by the pre-execution checkpoint's
+                own _stop() call (before_step already reported its own
+                failure; calling after_step for the same synthetic
+                result would be redundant) and by the post-success
+                checkpoint-failure _stop() call (after_step already ran
+                once for the real tool_result immediately before this
+                call was made).
 
         Returns:
             A WorkflowResult with overall_status FAILED.
         """
+        # The return value is deliberately unused here: this call is
+        # already terminal, so a checkpoint failure at this point has
+        # nothing further to stop - the observer is still notified so
+        # it can durably record the terminal step outcome (e.g. a
+        # decline or an ordinary tool failure) via its own
+        # after_step() implementation.
+        self._observer_after_step(step_observer, workflow_id, step.number - 1, tool_result)
+
         outcome = WorkflowStepOutcome(
             step=step, status=StepStatus.FAILED, tool_result=tool_result
         )
@@ -1576,6 +1883,60 @@ class WorkflowEngine:
                     "reload)."
                 )
 
+        reconstructed, reason = self._reconstruct_plan_and_outcomes(
+            record, registry=registry, security=security
+        )
+        if reconstructed is None:
+            return None, reason
+        plan, completed_outcomes = reconstructed
+
+        paused = _PausedWorkflow(
+            plan=plan,
+            session_id=record.session_id,
+            completed_outcomes=tuple(completed_outcomes),
+            waiting_step_index=record.waiting_step_index,
+            resolved_tool_input=dict(record.resolved_tool_input or {}),
+            request_id=record.request_id,
+        )
+        return paused, None
+
+    @staticmethod
+    def _reconstruct_plan_and_outcomes(
+        record: PausedWorkflowRecord,
+        *,
+        registry: ToolRegistry,
+        security: SecurityManager,
+    ) -> tuple[tuple[Plan, list[WorkflowStepOutcome]] | None, str | None]:
+        """Decode the persisted plan, revalidate the waiting step's tool
+        registration and tier, and rebuild completed outcomes - the
+        shared, approval-status-independent reconstruction both
+        _try_reconstruct_paused_workflow() (the ordinary reload path)
+        and reconstruct_claimed_compound_plan() (the narrow, Phase 98,
+        Batch 2 inherited-CLAIMED compound recovery path) both need,
+        extracted so the two never drift out of sync (Approval-to-Resume
+        Handoff Interlock + Phase 98 Batch 2 -
+        docs/phase_98_live_compound_reentry_plan.md, §18 item 3).
+
+        Deliberately consults no approval/handoff status at all -
+        callers own that decision independently; this only answers
+        whether the plan *itself* (its JSON shape, and the waiting
+        step's own tool registration/tier) can still be safely trusted.
+
+        Args:
+            record: The already-fetched persisted row (already checked
+                for corrupt/schema_version/plan_steps/waiting_step_index
+                validity by the caller).
+            registry: The live ToolRegistry to resolve the waiting
+                step's tool_name against.
+            security: The live SecurityManager to reclassify against.
+
+        Returns:
+            ((plan, completed_outcomes), None) on success. (None,
+            reason) if the plan could not be reconstructed, the waiting
+            step's tool is no longer registered, its action no longer
+            classifies as exactly YELLOW, or a completed outcome could
+            not be rebuilt.
+        """
         try:
             steps = tuple(
                 PlanStep(
@@ -1633,7 +1994,7 @@ class WorkflowEngine:
             )
 
         try:
-            completed_outcomes = []
+            completed_outcomes: list[WorkflowStepOutcome] = []
             for entry in record.completed_outcomes or []:
                 step_number = entry["step_number"]
                 matching = [s for s in steps if s.number == step_number]
@@ -1662,15 +2023,70 @@ class WorkflowEngine:
         except (KeyError, TypeError, ValueError) as exc:
             return None, f"Persisted completed outcomes could not be reconstructed: {exc}"
 
-        paused = _PausedWorkflow(
-            plan=plan,
-            session_id=record.session_id,
-            completed_outcomes=tuple(completed_outcomes),
-            waiting_step_index=record.waiting_step_index,
-            resolved_tool_input=dict(record.resolved_tool_input or {}),
-            request_id=record.request_id,
+        return (plan, completed_outcomes), None
+
+    def reconstruct_claimed_compound_plan(
+        self,
+        record: PausedWorkflowRecord,
+        *,
+        registry: ToolRegistry,
+        security_manager: SecurityManager | None = None,
+    ) -> tuple[Plan | None, str | None]:
+        """Reconstruct and fully revalidate the Plan for an inherited
+        CLAIMED paused-workflow row, for the narrow Phase 98 compound
+        recovery path only (Approval-to-Resume Handoff Interlock +
+        Phase 98, Batch 2 - docs/phase_98_live_compound_reentry_plan.md,
+        §18 item 3).
+
+        Unlike reload_paused()/_try_reconstruct_paused_workflow(), this
+        never consults approval/handoff status at all - the caller
+        already knows, independently (from its own trusted, persisted-
+        state-only compound recognizer), that this exact row is CLAIMED
+        and owns its own recovery decision; this method only answers
+        whether the *plan itself* (tool still registered, tier still
+        exactly YELLOW, shape intact) can still be safely trusted.
+        Never adds the result to self._paused, never mutates approval
+        or paused-workflow state itself, and is never called for any
+        row this engine's own reload_paused() would otherwise have
+        reconstructed (a CLAIMED row is deliberately never loaded into
+        self._paused - see _RETAIN_WITHOUT_RESUME).
+
+        Args:
+            record: The row to reconstruct, already fetched by the
+                caller directly from PausedWorkflowStore (never from
+                self._paused).
+            registry: The live ToolRegistry to check the waiting step's
+                own tool_name against.
+            security_manager: The live SecurityManager to reclassify
+                against. Defaults to a new SecurityManager() if omitted
+                (stateless).
+
+        Returns:
+            (Plan, None) if the plan and its waiting step still
+            revalidate safely. (None, reason) otherwise - the caller
+            must fail closed (e.g. mark_claim_interrupted()) rather
+            than trust an unrevalidated plan.
+        """
+        if record.corrupt:
+            return None, "Persisted state could not be parsed."
+        if record.schema_version != SCHEMA_VERSION:
+            return None, (
+                "Persisted state uses an unsupported schema version "
+                f"({record.schema_version})."
+            )
+        if not record.plan_steps:
+            return None, "Persisted state has no plan steps."
+        if not (0 <= record.waiting_step_index < len(record.plan_steps)):
+            return None, "Persisted waiting_step_index is out of range."
+
+        security = security_manager or SecurityManager()
+        reconstructed, reason = self._reconstruct_plan_and_outcomes(
+            record, registry=registry, security=security
         )
-        return paused, None
+        if reconstructed is None:
+            return None, reason
+        plan, _completed_outcomes = reconstructed
+        return plan, None
 
     def _invalidate_reloaded_paused_workflow(
         self, record: PausedWorkflowRecord, *, reason: str

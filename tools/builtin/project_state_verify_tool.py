@@ -141,9 +141,8 @@ class ProjectStateVerifyTool(BaseTool):
         record = self._project_state_store.get()
         focus = record.focus if record and record.focus else ""
         phase = record.phase if record and record.phase else ""
-        last_updated = self._format_last_updated(
-            record.last_updated if record else None
-        )
+        last_updated_at = record.last_updated if record else None
+        last_updated = self._format_last_updated(last_updated_at)
 
         output = (
             f"Current focus: {focus or _NOT_RECORDED}; "
@@ -155,7 +154,21 @@ class ProjectStateVerifyTool(BaseTool):
             tool_name=self.name,
             success=True,
             output=output,
-            metadata={"focus": focus, "phase": phase, "last_updated": last_updated},
+            metadata={
+                "focus": focus,
+                "phase": phase,
+                "last_updated": last_updated,
+                # Phase 98, Batch 2 (docs/phase_98_live_compound_reentry_plan.md,
+                # §18 item 5): the raw datetime, alongside the existing
+                # formatted string above - needed so a trusted,
+                # dormant compound-lifecycle observer can persist a
+                # real datetime into CompoundWorkflowProgress's own
+                # pre_execution_last_updated column without parsing a
+                # human-readable string back apart. Purely additive: no
+                # existing consumer reads or depends on this key's
+                # absence.
+                "last_updated_at": last_updated_at,
+            },
         )
 
     @staticmethod

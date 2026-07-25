@@ -426,6 +426,45 @@ class CompoundWorkflowProgressStore:
             updates={"step_1_status": CompoundStepStatus.COMPLETED.value},
         )
 
+    def mark_step_1_failed(self, workflow_id: str) -> CompoundWorkflowProgressRecord:
+        """Mark the phase-update write step failed - and the whole
+        workflow failed - reached either by an ordinary write-tool
+        failure or by a user decline (both mean "the write never
+        happened and never will for this request"; Phase 98, Batch 2 -
+        docs/phase_98_live_compound_reentry_plan.md, Foundation D -
+        the one new primitive the amended plan identified as missing:
+        Batch 1 defined mark_step_3_failed() for the read-only final
+        step but never a write-step-failure counterpart).
+
+        Legal only from step_1_status=IN_PROGRESS (the same precondition
+        mark_step_1_completed() already requires) - never from PENDING
+        (nothing was ever attempted) and never a second time once
+        already FAILED or once step 1 has already been marked
+        COMPLETED. Mirrors mark_step_3_failed()'s own exact shape:
+        atomically sets both step_1_status and overall_status in one
+        CAS statement, so Step 2 can never legally begin afterward
+        (start_step_2()'s own precondition requires step_1_status
+        COMPLETED).
+
+        Args:
+            workflow_id: The workflow id to update.
+
+        Returns:
+            The record after the transition.
+
+        Raises:
+            CompoundWorkflowProgressError: If step_1_status is not
+                currently IN_PROGRESS.
+        """
+        return self._compare_and_set(
+            workflow_id,
+            expected={"step_1_status": CompoundStepStatus.IN_PROGRESS.value},
+            updates={
+                "step_1_status": CompoundStepStatus.FAILED.value,
+                "overall_status": CompoundOverallStatus.FAILED.value,
+            },
+        )
+
     def start_step_2(self, workflow_id: str) -> CompoundWorkflowProgressRecord:
         """Begin the internal phase-verification step (legal only once
         step 1 has completed).
