@@ -560,3 +560,142 @@ class TestReconciliation:
     def test_reconciliation_never_claims_exactly_once(self) -> None:
         for member in ReconciliationConfidence:
             assert "exactly" not in member.value
+
+
+class TestBoundedCategoryReads:
+    """Phase 100, Batch 1 bounded-read correction
+    (docs/phase_100_intelligence_core_gap_audit.md): direct, store-level
+    proof that each of the four new list_recent_*() methods is a real,
+    hard-limited SQL query - never "load everything, then slice" -
+    independent of intelligence.verified_action_context's own builder
+    tests.
+    """
+
+    def _drive_to_verified(self, store: CompoundWorkflowProgressStore, workflow_id: str) -> None:
+        store.record_pre_execution_observation(
+            workflow_id, phase_value="old", last_updated=None
+        )
+        store.mark_step_1_completed(workflow_id)
+        store.start_step_2(workflow_id)
+        store.mark_step_2_completed(
+            workflow_id, verification_outcome=CompoundVerificationOutcome.VERIFIED
+        )
+
+    def test_list_recent_verified_is_hard_limited_below_true_row_count(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(30):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                approved_phase_value=f"phase-{i}",
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=5)
+        assert len(result) == 5
+
+    def test_list_recent_verified_returns_the_newest_rows_first(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(10):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                approved_phase_value=f"phase-{i}",
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=5)
+        assert [record.workflow_id for record in result] == [
+            "wf-9", "wf-8", "wf-7", "wf-6", "wf-5",
+        ]
+
+    def test_requested_limit_beyond_the_hard_ceiling_is_clamped(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(30):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                approved_phase_value=f"phase-{i}",
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=10_000)
+        assert len(result) <= 25  # _MAX_CATEGORY_QUERY_LIMIT
+
+    def test_list_recent_pending_verification_excludes_verified_rows(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        _create(store, "wf-pending")
+        store.create(
+            workflow_id="wf-verified",
+            template_id=ALLOWED_TEMPLATE_ID,
+            request_id="req-verified",
+            approved_phase_value="x",
+        )
+        self._drive_to_verified(store, "wf-verified")
+
+        result = store.list_recent_pending_verification(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-pending"]
+
+    def test_list_recent_verification_problems_excludes_verified_rows(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        store.create(
+            workflow_id="wf-mismatch",
+            template_id=ALLOWED_TEMPLATE_ID,
+            request_id="req-mismatch",
+            approved_phase_value="x",
+        )
+        store.record_pre_execution_observation(
+            "wf-mismatch", phase_value="old", last_updated=None
+        )
+        store.mark_step_1_completed("wf-mismatch")
+        store.start_step_2("wf-mismatch")
+        store.mark_step_2_completed(
+            "wf-mismatch", verification_outcome=CompoundVerificationOutcome.FAILED
+        )
+        store.create(
+            workflow_id="wf-verified",
+            template_id=ALLOWED_TEMPLATE_ID,
+            request_id="req-verified",
+            approved_phase_value="x",
+        )
+        self._drive_to_verified(store, "wf-verified")
+
+        result = store.list_recent_verification_problems(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-mismatch"]
+
+    def test_list_recent_not_executed_only_returns_not_executed_rows(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        store.create(
+            workflow_id="wf-not-executed",
+            template_id=ALLOWED_TEMPLATE_ID,
+            request_id="req-1",
+            approved_phase_value="x",
+        )
+        store.mark_not_executed_before_start("wf-not-executed")
+        _create(store, "wf-pending")
+
+        result = store.list_recent_not_executed(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-not-executed"]
+
+    def test_list_all_is_unchanged_and_still_unbounded(
+        self, store: CompoundWorkflowProgressStore
+    ) -> None:
+        """The bounded-read correction adds new methods; it must never
+        change list_all()'s own existing, documented behaviour."""
+        for i in range(12):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                approved_phase_value=f"phase-{i}",
+            )
+        assert len(store.list_all()) == 12

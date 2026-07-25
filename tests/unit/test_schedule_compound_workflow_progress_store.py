@@ -373,3 +373,142 @@ class TestCrossModuleTemplateIdConsistency:
             _ALLOWED_SCHEDULE_COMPOUND_TEMPLATES[0].template_id
             == ALLOWED_SCHEDULE_TEMPLATE_ID
         )
+
+
+class TestBoundedCategoryReads:
+    """Phase 100, Batch 1 bounded-read correction
+    (docs/phase_100_intelligence_core_gap_audit.md): direct, store-level
+    proof that each of the four new list_recent_*() methods is a real,
+    hard-limited SQL query - mirrors
+    test_compound_workflow_progress_store.py's own equivalent class
+    exactly.
+    """
+
+    def _drive_to_verified(
+        self, store: ScheduleCompoundWorkflowProgressStore, workflow_id: str
+    ) -> None:
+        store.record_pre_execution_observation(workflow_id, enabled=False)
+        store.mark_step_1_completed(workflow_id)
+        store.start_step_2(workflow_id)
+        store.mark_step_2_completed(
+            workflow_id,
+            verification_outcome=ScheduleCompoundVerificationOutcome.VERIFIED,
+        )
+
+    def test_list_recent_verified_is_hard_limited_below_true_row_count(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(30):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                schedule_id=i,
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=5)
+        assert len(result) == 5
+
+    def test_list_recent_verified_returns_the_newest_rows_first(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(10):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                schedule_id=i,
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=5)
+        assert [record.workflow_id for record in result] == [
+            "wf-9", "wf-8", "wf-7", "wf-6", "wf-5",
+        ]
+
+    def test_requested_limit_beyond_the_hard_ceiling_is_clamped(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        for i in range(30):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                schedule_id=i,
+            )
+            self._drive_to_verified(store, f"wf-{i}")
+
+        result = store.list_recent_verified(limit=10_000)
+        assert len(result) <= 25  # _MAX_CATEGORY_QUERY_LIMIT
+
+    def test_list_recent_pending_verification_excludes_verified_rows(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        _create(store, "wf-pending")
+        store.create(
+            workflow_id="wf-verified",
+            template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+            request_id="req-verified",
+            schedule_id=99,
+        )
+        self._drive_to_verified(store, "wf-verified")
+
+        result = store.list_recent_pending_verification(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-pending"]
+
+    def test_list_recent_verification_problems_excludes_verified_rows(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        store.create(
+            workflow_id="wf-mismatch",
+            template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+            request_id="req-mismatch",
+            schedule_id=1,
+        )
+        store.record_pre_execution_observation("wf-mismatch", enabled=False)
+        store.mark_step_1_completed("wf-mismatch")
+        store.start_step_2("wf-mismatch")
+        store.mark_step_2_completed(
+            "wf-mismatch",
+            verification_outcome=ScheduleCompoundVerificationOutcome.FAILED,
+        )
+        store.create(
+            workflow_id="wf-verified",
+            template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+            request_id="req-verified",
+            schedule_id=2,
+        )
+        self._drive_to_verified(store, "wf-verified")
+
+        result = store.list_recent_verification_problems(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-mismatch"]
+
+    def test_list_recent_not_executed_only_returns_not_executed_rows(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        store.create(
+            workflow_id="wf-not-executed",
+            template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+            request_id="req-1",
+            schedule_id=1,
+        )
+        store.mark_not_executed_before_start("wf-not-executed")
+        _create(store, "wf-pending")
+
+        result = store.list_recent_not_executed(limit=5)
+        assert [record.workflow_id for record in result] == ["wf-not-executed"]
+
+    def test_list_all_is_unchanged_and_still_unbounded(
+        self, store: ScheduleCompoundWorkflowProgressStore
+    ) -> None:
+        """The bounded-read correction adds new methods; it must never
+        change list_all()'s own existing, documented behaviour."""
+        for i in range(12):
+            store.create(
+                workflow_id=f"wf-{i}",
+                template_id=ALLOWED_SCHEDULE_TEMPLATE_ID,
+                request_id=f"req-{i}",
+                schedule_id=i,
+            )
+        assert len(store.list_all()) == 12

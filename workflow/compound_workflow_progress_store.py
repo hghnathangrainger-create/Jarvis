@@ -70,6 +70,25 @@ from storage.models import CompoundWorkflowProgress
 #: test, not by a shared import.
 ALLOWED_TEMPLATE_ID = "project_state_update_phase_then_show"
 
+#: Hard ceiling Phase 100, Batch 1's bounded-read correction enforces on
+#: every list_recent_*() method's own `limit` parameter, regardless of
+#: what a caller requests - a fixed, trusted constant, never AI- or
+#: user-controlled (docs/phase_100_intelligence_core_gap_audit.md).
+_MAX_CATEGORY_QUERY_LIMIT = 25
+
+
+def _bounded_category_limit(limit: int) -> int:
+    """Clamp a requested row limit to a fixed, safe range.
+
+    Args:
+        limit: The caller's requested maximum row count.
+
+    Returns:
+        limit, clamped to at least 1 and at most
+        _MAX_CATEGORY_QUERY_LIMIT.
+    """
+    return max(1, min(limit, _MAX_CATEGORY_QUERY_LIMIT))
+
 
 class CompoundStepStatus(Enum):
     """The bounded status vocabulary for one trusted step of this one
@@ -314,6 +333,162 @@ class CompoundWorkflowProgressStore:
                     CompoundWorkflowProgress.created_at.asc(),
                     CompoundWorkflowProgress.id.asc(),
                 )
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    # ----- bounded, category-specific reads (Phase 100, Batch 1 bounded-
+    # read correction - docs/phase_100_intelligence_core_gap_audit.md) ---
+    #
+    # list_all() above loads this table's entire history unconditionally
+    # and is left completely unchanged (it has no other caller - verified
+    # by repository-wide grep). The four methods below exist solely for
+    # intelligence.verified_action_context's bounded builder: each is a
+    # single SQL query with its own WHERE clause matching one of that
+    # module's four priority categories, `ORDER BY updated_at DESC, id
+    # DESC`, and a `LIMIT` that can never exceed _MAX_CATEGORY_QUERY_LIMIT
+    # regardless of what the caller requests - so rebuilding context
+    # never becomes slower as this table's history grows without bound.
+    # The four WHERE clauses are mutually exclusive by construction (a
+    # row's overall_status/step_2_verification_outcome combination can
+    # only ever satisfy one), so a given row is never double-fetched
+    # across categories.
+
+    def list_recent_pending_verification(
+        self, *, limit: int
+    ) -> list[CompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification has not
+        yet completed and whose overall_status is still active -
+        PENDING, IN_PROGRESS, or NEEDS_RECONCILIATION - potential
+        awaiting-approval/interrupted evidence.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` CompoundWorkflowProgressRecord objects,
+            newest updated_at first, ties broken by id descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(CompoundWorkflowProgress)
+                .filter(
+                    CompoundWorkflowProgress.overall_status.in_(
+                        (
+                            CompoundOverallStatus.PENDING.value,
+                            CompoundOverallStatus.IN_PROGRESS.value,
+                            CompoundOverallStatus.NEEDS_RECONCILIATION.value,
+                        )
+                    ),
+                    CompoundWorkflowProgress.step_2_verification_outcome.is_(None),
+                )
+                .order_by(
+                    CompoundWorkflowProgress.updated_at.desc(),
+                    CompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_verification_problems(
+        self, *, limit: int
+    ) -> list[CompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification
+        completed with FAILED or UNAVAILABLE.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` CompoundWorkflowProgressRecord objects,
+            newest updated_at first, ties broken by id descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(CompoundWorkflowProgress)
+                .filter(
+                    CompoundWorkflowProgress.step_2_verification_outcome.in_(
+                        (
+                            CompoundVerificationOutcome.FAILED.value,
+                            CompoundVerificationOutcome.UNAVAILABLE.value,
+                        )
+                    )
+                )
+                .order_by(
+                    CompoundWorkflowProgress.updated_at.desc(),
+                    CompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_verified(
+        self, *, limit: int
+    ) -> list[CompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification
+        completed with VERIFIED - true regardless of the row's own
+        overall_status (a verified fact remains true even if a later
+        step in the same workflow subsequently failed).
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` CompoundWorkflowProgressRecord objects,
+            newest updated_at first, ties broken by id descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(CompoundWorkflowProgress)
+                .filter(
+                    CompoundWorkflowProgress.step_2_verification_outcome
+                    == CompoundVerificationOutcome.VERIFIED.value
+                )
+                .order_by(
+                    CompoundWorkflowProgress.updated_at.desc(),
+                    CompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_not_executed(
+        self, *, limit: int
+    ) -> list[CompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose overall_status is
+        NOT_EXECUTED - candidates for the declined/expired category
+        once correlated against handoff status.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` CompoundWorkflowProgressRecord objects,
+            newest updated_at first, ties broken by id descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(CompoundWorkflowProgress)
+                .filter(
+                    CompoundWorkflowProgress.overall_status
+                    == CompoundOverallStatus.NOT_EXECUTED.value
+                )
+                .order_by(
+                    CompoundWorkflowProgress.updated_at.desc(),
+                    CompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
                 .all()
             )
             return [_to_record(row) for row in rows]

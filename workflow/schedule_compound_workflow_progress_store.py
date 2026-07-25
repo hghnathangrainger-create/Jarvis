@@ -78,6 +78,25 @@ from storage.models import ScheduleCompoundWorkflowProgress
 #: test, not by a shared import.
 ALLOWED_SCHEDULE_TEMPLATE_ID = "schedule_enable_then_show_enabled_state"
 
+#: Hard ceiling Phase 100, Batch 1's bounded-read correction enforces on
+#: every list_recent_*() method's own `limit` parameter, regardless of
+#: what a caller requests - a fixed, trusted constant, never AI- or
+#: user-controlled (docs/phase_100_intelligence_core_gap_audit.md).
+_MAX_CATEGORY_QUERY_LIMIT = 25
+
+
+def _bounded_category_limit(limit: int) -> int:
+    """Clamp a requested row limit to a fixed, safe range.
+
+    Args:
+        limit: The caller's requested maximum row count.
+
+    Returns:
+        limit, clamped to at least 1 and at most
+        _MAX_CATEGORY_QUERY_LIMIT.
+    """
+    return max(1, min(limit, _MAX_CATEGORY_QUERY_LIMIT))
+
 
 class ScheduleCompoundStepStatus(Enum):
     """The bounded status vocabulary for one trusted step of this one
@@ -324,6 +343,156 @@ class ScheduleCompoundWorkflowProgressStore:
                     ScheduleCompoundWorkflowProgress.created_at.asc(),
                     ScheduleCompoundWorkflowProgress.id.asc(),
                 )
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    # ----- bounded, category-specific reads (Phase 100, Batch 1 bounded-
+    # read correction - docs/phase_100_intelligence_core_gap_audit.md) ---
+    #
+    # Mirrors CompoundWorkflowProgressStore's own four sibling methods
+    # exactly - see that class's own docstring for the shared rationale.
+    # list_all() above is left completely unchanged (no other caller -
+    # verified by repository-wide grep).
+
+    def list_recent_pending_verification(
+        self, *, limit: int
+    ) -> list[ScheduleCompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification has not
+        yet completed and whose overall_status is still active -
+        PENDING, IN_PROGRESS, or NEEDS_RECONCILIATION.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` ScheduleCompoundWorkflowProgressRecord
+            objects, newest updated_at first, ties broken by id
+            descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(ScheduleCompoundWorkflowProgress)
+                .filter(
+                    ScheduleCompoundWorkflowProgress.overall_status.in_(
+                        (
+                            ScheduleCompoundOverallStatus.PENDING.value,
+                            ScheduleCompoundOverallStatus.IN_PROGRESS.value,
+                            ScheduleCompoundOverallStatus.NEEDS_RECONCILIATION.value,
+                        )
+                    ),
+                    ScheduleCompoundWorkflowProgress.step_2_verification_outcome.is_(
+                        None
+                    ),
+                )
+                .order_by(
+                    ScheduleCompoundWorkflowProgress.updated_at.desc(),
+                    ScheduleCompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_verification_problems(
+        self, *, limit: int
+    ) -> list[ScheduleCompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification
+        completed with FAILED or UNAVAILABLE.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` ScheduleCompoundWorkflowProgressRecord
+            objects, newest updated_at first, ties broken by id
+            descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(ScheduleCompoundWorkflowProgress)
+                .filter(
+                    ScheduleCompoundWorkflowProgress.step_2_verification_outcome.in_(
+                        (
+                            ScheduleCompoundVerificationOutcome.FAILED.value,
+                            ScheduleCompoundVerificationOutcome.UNAVAILABLE.value,
+                        )
+                    )
+                )
+                .order_by(
+                    ScheduleCompoundWorkflowProgress.updated_at.desc(),
+                    ScheduleCompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_verified(
+        self, *, limit: int
+    ) -> list[ScheduleCompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose step 2 verification
+        completed with VERIFIED - true regardless of the row's own
+        overall_status.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` ScheduleCompoundWorkflowProgressRecord
+            objects, newest updated_at first, ties broken by id
+            descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(ScheduleCompoundWorkflowProgress)
+                .filter(
+                    ScheduleCompoundWorkflowProgress.step_2_verification_outcome
+                    == ScheduleCompoundVerificationOutcome.VERIFIED.value
+                )
+                .order_by(
+                    ScheduleCompoundWorkflowProgress.updated_at.desc(),
+                    ScheduleCompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
+                .all()
+            )
+            return [_to_record(row) for row in rows]
+
+    def list_recent_not_executed(
+        self, *, limit: int
+    ) -> list[ScheduleCompoundWorkflowProgressRecord]:
+        """Return up to `limit` rows whose overall_status is
+        NOT_EXECUTED.
+
+        Args:
+            limit: The maximum number of rows to return - hard-capped
+                at _MAX_CATEGORY_QUERY_LIMIT regardless of this value.
+
+        Returns:
+            Up to `limit` ScheduleCompoundWorkflowProgressRecord
+            objects, newest updated_at first, ties broken by id
+            descending.
+        """
+        bounded = _bounded_category_limit(limit)
+        with session_scope(self._session_factory) as db:
+            rows = (
+                db.query(ScheduleCompoundWorkflowProgress)
+                .filter(
+                    ScheduleCompoundWorkflowProgress.overall_status
+                    == ScheduleCompoundOverallStatus.NOT_EXECUTED.value
+                )
+                .order_by(
+                    ScheduleCompoundWorkflowProgress.updated_at.desc(),
+                    ScheduleCompoundWorkflowProgress.id.desc(),
+                )
+                .limit(bounded)
                 .all()
             )
             return [_to_record(row) for row in rows]

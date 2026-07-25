@@ -537,7 +537,14 @@ class TestConflictHandling:
 
 
 class TestBoundsAndOrdering:
-    def test_total_limit_enforced(self, sched_store, approval_store) -> None:
+    def test_total_limit_enforced_within_a_single_bounded_category(
+        self, sched_store, approval_store
+    ) -> None:
+        """Each category query is itself capped at
+        _MAX_CANDIDATES_PER_CATEGORY_QUERY (5), so 7 verified rows in
+        one category alone already yields only 5 fetched candidates -
+        the category-level bound, not the final cross-category
+        truncation step, is what limits this case."""
         for i in range(7):
             request_id = f"req-{i}"
             _save_approval(approval_store, request_id)
@@ -548,7 +555,46 @@ class TestBoundsAndOrdering:
 
         context = _build(sched_store=sched_store, approval_store=approval_store)
         assert len(context.entries) == 5
+
+    def test_total_limit_enforced_across_categories(
+        self, sched_store, approval_store
+    ) -> None:
+        """5 verified-success rows (filling the "verified" category's
+        own bound) plus 4 awaiting-approval rows (filling the
+        "pending_verification" category's own bound) together exceed
+        the final 5-entry total - proving the cross-category
+        truncated=True path is still real once combined candidates
+        from multiple bounded categories overflow the total."""
+        for i in range(5):
+            request_id = f"verified-req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"verified-wf-{i}",
+                request_id=request_id,
+                schedule_id=i,
+            )
+            _drive_sched_to_verified_success(sched_store, f"verified-wf-{i}")
+
+        for i in range(4):
+            request_id = f"pending-req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"pending-wf-{i}",
+                request_id=request_id,
+                schedule_id=100 + i,
+            )
+
+        context = _build(sched_store=sched_store, approval_store=approval_store)
+        assert len(context.entries) == 5
         assert context.truncated is True
+        # priority tier 0 (awaiting approval) must fill every slot it can
+        # before tier 2 (verified) contributes any - never starved by
+        # the larger settled-success history.
+        statuses = [entry.status for entry in context.entries]
+        assert statuses.count(VerifiedActionStatus.AWAITING_APPROVAL) == 4
+        assert statuses.count(VerifiedActionStatus.VERIFIED_SUCCESS) == 1
 
     def test_priority_tier_ordering(self) -> None:
         import datetime
@@ -904,7 +950,11 @@ class TestSafeFailureBehavior:
         self, sched_store
     ) -> None:
         """VERIFIED_SUCCESS/mismatch/unavailable need no handoff evidence
-        at all, so a broken approval store must not remove them."""
+        at all, so a broken approval store must not remove them - and,
+        since the builder never even attempts a handoff lookup for a
+        row whose step_2_verification_outcome is already set, a broken
+        approval store contributes no note here either (it was never
+        actually consulted)."""
         _make_sched_row(sched_store, workflow_id="wf-1", request_id="req-1", schedule_id=5)
         _drive_sched_to_verified_success(sched_store, "wf-1")
 
@@ -915,7 +965,7 @@ class TestSafeFailureBehavior:
         )
         assert len(context.entries) == 1
         assert context.entries[0].status is VerifiedActionStatus.VERIFIED_SUCCESS
-        assert any("approval/handoff" in note for note in context.notes)
+        assert context.notes == ()
 
     def test_pending_approval_store_failure_omits_handoff_dependent_rows(
         self, sched_store
@@ -929,6 +979,270 @@ class TestSafeFailureBehavior:
             pending_approval_store=_BrokenApprovalStore(),
         )
         assert context.entries == ()
+
+
+# --------------------------------------------------------------------------
+# Bounded-read correction: adversarial, large-history proofs
+# (docs/phase_100_intelligence_core_gap_audit.md, Phase 100 Batch 1
+# bounded-read audit/correction). These prove the builder's own work is
+# bounded, not merely that its final output happens to be small -
+# store-level bounding is proven independently in
+# test_compound_workflow_progress_store.py/
+# test_schedule_compound_workflow_progress_store.py's own
+# TestBoundedCategoryReads classes.
+# --------------------------------------------------------------------------
+
+
+class _CountingApprovalStore:
+    """Wraps a real PendingApprovalStore, counting every
+    get_handoff_status() call so a test can assert the total stays
+    within a small, fixed maximum regardless of table size."""
+
+    def __init__(self, real_store: PendingApprovalStore) -> None:
+        self._real_store = real_store
+        self.call_count = 0
+
+    def get_handoff_status(self, request_id: str):
+        self.call_count += 1
+        return self._real_store.get_handoff_status(request_id)
+
+
+class TestBoundedReadCorrection:
+    def test_interrupted_evidence_is_not_starved_by_many_newer_successes(
+        self, sched_store, approval_store
+    ) -> None:
+        """One older interrupted row must still surface even when 50
+        newer verified-success rows exist - proving the interrupted/
+        awaiting-approval category is read through its own dedicated
+        bounded query, never crowded out by an unrelated category's
+        own volume."""
+        _save_approval(approval_store, "req-interrupted")
+        approval_store.mark_approved_unconsumed("req-interrupted")
+        approval_store.claim_for_resume("req-interrupted")
+        _make_sched_row(
+            sched_store,
+            workflow_id="wf-interrupted",
+            request_id="req-interrupted",
+            schedule_id=999,
+        )
+        sched_store.record_pre_execution_observation("wf-interrupted", enabled=False)
+
+        for i in range(50):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=i
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        context = _build(sched_store=sched_store, approval_store=approval_store)
+        statuses_by_target = {entry.target_id: entry.status for entry in context.entries}
+        assert statuses_by_target.get("999") is VerifiedActionStatus.INTERRUPTED
+
+    def test_awaiting_approval_is_not_starved_by_many_declined_rows(
+        self, sched_store, approval_store
+    ) -> None:
+        _save_approval(approval_store, "req-pending")
+        _make_sched_row(
+            sched_store, workflow_id="wf-pending", request_id="req-pending", schedule_id=999
+        )
+
+        for i in range(50):
+            request_id = f"declined-req-{i}"
+            _save_approval(approval_store, request_id)
+            approval_store.mark_declined(request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"declined-wf-{i}",
+                request_id=request_id,
+                schedule_id=i,
+            )
+            sched_store.mark_not_executed_before_start(f"declined-wf-{i}")
+
+        context = _build(sched_store=sched_store, approval_store=approval_store)
+        statuses_by_target = {entry.target_id: entry.status for entry in context.entries}
+        assert statuses_by_target.get("999") is VerifiedActionStatus.AWAITING_APPROVAL
+
+    def test_handoff_lookup_count_stays_bounded_with_a_large_table(
+        self, sched_store, approval_store
+    ) -> None:
+        """Only the pending_verification and not_executed categories
+        ever need a handoff lookup; each is independently capped at
+        _MAX_CANDIDATES_PER_CATEGORY_QUERY (5), so one store's total
+        lookups per build can never exceed 10, regardless of how many
+        rows exist."""
+        for i in range(30):
+            request_id = f"pending-req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"pending-wf-{i}",
+                request_id=request_id,
+                schedule_id=i,
+            )
+        for i in range(30):
+            request_id = f"declined-req-{i}"
+            _save_approval(approval_store, request_id)
+            approval_store.mark_declined(request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"declined-wf-{i}",
+                request_id=request_id,
+                schedule_id=100 + i,
+            )
+            sched_store.mark_not_executed_before_start(f"declined-wf-{i}")
+
+        counting_store = _CountingApprovalStore(approval_store)
+        build_verified_action_context(
+            project_state_progress_store=None,
+            schedule_progress_store=sched_store,
+            pending_approval_store=counting_store,
+        )
+        assert counting_store.call_count <= 10
+
+    def test_verified_success_and_mismatch_categories_need_no_handoff_lookup(
+        self, sched_store, approval_store
+    ) -> None:
+        for i in range(20):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=i
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        counting_store = _CountingApprovalStore(approval_store)
+        build_verified_action_context(
+            project_state_progress_store=None,
+            schedule_progress_store=sched_store,
+            pending_approval_store=counting_store,
+        )
+        assert counting_store.call_count == 0
+
+    def test_duplicate_heavy_history_still_collapses_to_the_true_newest(
+        self, sched_store, approval_store
+    ) -> None:
+        """10 verified-success rows for the SAME schedule id - more
+        than the per-category fetch bound of 5 alone - must still
+        collapse to exactly one entry, and it must be the genuinely
+        newest one (the category query's own newest-first ordering
+        guarantees the true newest row is always among the fetched
+        set, even though only the 5 most recent of the 10 are ever
+        read)."""
+        for i in range(10):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=5
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        context = _build(sched_store=sched_store, approval_store=approval_store)
+        verified = [
+            e for e in context.entries if e.status is VerifiedActionStatus.VERIFIED_SUCCESS
+        ]
+        assert len(verified) == 1
+
+    def test_malformed_heavy_history_is_bounded_and_safely_omitted(
+        self, sched_store
+    ) -> None:
+        """50 rows whose request_id names no PendingApprovalRecord at
+        all (never saved) - a genuinely missing-evidence case for every
+        single row - must still be processed in bounded time and
+        produce zero entries, never guessed."""
+        for i in range(50):
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"wf-{i}",
+                request_id=f"req-does-not-exist-{i}",
+                schedule_id=i,
+            )
+
+        context = _build(sched_store=sched_store, approval_store=None)
+        assert context.entries == ()
+
+    def test_stable_repeat_build_with_a_large_table(
+        self, sched_store, approval_store
+    ) -> None:
+        for i in range(40):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=i
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        first = _build(sched_store=sched_store, approval_store=approval_store)
+        second = _build(sched_store=sched_store, approval_store=approval_store)
+        assert first == second
+
+    def test_reconstruction_through_new_store_instance_with_a_large_table(
+        self, session_factory, sched_store, approval_store
+    ) -> None:
+        for i in range(40):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=i
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        original = _build(sched_store=sched_store, approval_store=approval_store)
+
+        fresh_sched_store = ScheduleCompoundWorkflowProgressStore(session_factory)
+        fresh_approval_store = PendingApprovalStore(session_factory)
+        rebuilt = _build(sched_store=fresh_sched_store, approval_store=fresh_approval_store)
+
+        assert original == rebuilt
+
+    def test_final_entry_limit_unchanged_at_five(
+        self, sched_store, approval_store
+    ) -> None:
+        for i in range(40):
+            request_id = f"req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store, workflow_id=f"wf-{i}", request_id=request_id, schedule_id=i
+            )
+            _drive_sched_to_verified_success(sched_store, f"wf-{i}")
+
+        context = _build(sched_store=sched_store, approval_store=approval_store)
+        assert len(context.entries) == 5
+
+    def test_recency_window_trade_off_is_deterministic_and_documented(
+        self, sched_store, approval_store
+    ) -> None:
+        """Section 12A.7 deliberately uses count-based recency, not a
+        calendar cutoff: once more than
+        _MAX_CANDIDATES_PER_CATEGORY_QUERY newer rows exist in the same
+        category, an older fact legitimately falls outside the bounded
+        read window - a documented, deterministic trade-off, not
+        starvation of a *different*, higher-priority category (proven
+        separately above). This test locks in that the oldest row in an
+        over-full single category is the one to be excluded, and that
+        the result is exactly reproducible."""
+        _save_approval(approval_store, "req-oldest")
+        _make_sched_row(
+            sched_store, workflow_id="wf-oldest", request_id="req-oldest", schedule_id=7
+        )
+        _drive_sched_to_verified_success(sched_store, "wf-oldest")
+
+        for i in range(10):
+            request_id = f"newer-req-{i}"
+            _save_approval(approval_store, request_id)
+            _make_sched_row(
+                sched_store,
+                workflow_id=f"newer-wf-{i}",
+                request_id=request_id,
+                schedule_id=1000 + i,
+            )
+            _drive_sched_to_verified_success(sched_store, f"newer-wf-{i}")
+
+        first = _build(sched_store=sched_store, approval_store=approval_store)
+        second = _build(sched_store=sched_store, approval_store=approval_store)
+        target_ids = {entry.target_id for entry in first.entries}
+        assert "7" not in target_ids  # scrolled out of the bounded window
+        assert first == second  # still fully deterministic
 
 
 # --------------------------------------------------------------------------

@@ -13,11 +13,19 @@ Responsibilities:
     - Define the bounded VerifiedActionDomain/VerifiedActionStatus
       vocabularies and the VerifiedActionEntry/VerifiedActionContext
       dataclasses exactly as Section 12A.4 specifies.
-    - Read, deterministically and read-only, through the two existing
-      compound progress stores' own list_all() and
+    - Read, deterministically and read-only, through each compound
+      progress store's four bounded, category-specific
+      list_recent_*() methods (Phase 100, Batch 1's own bounded-read
+      correction - the original list_all()-based reads loaded a
+      store's entire history unconditionally, so every read here now
+      uses a hard-limited, indexed-by-category query instead) and
       PendingApprovalStore's own get_handoff_status() - never a new
       table, never a new write method, never WorkflowHistoryStore or
       ApprovalHistoryStore (Section 12A.5/12A.6).
+    - Keep every stage of one build bounded by a fixed constant,
+      independent of how much durable history exists: rows fetched per
+      category per store, candidates classified, handoff lookups
+      performed, deduplication input size, and final entries.
     - Derive each entry's VerifiedActionStatus by the exact
       source-of-truth precedence in Section 12A.5, failing closed
       (omitting the row) whenever the evidence is missing, malformed,
@@ -77,6 +85,18 @@ _PROJECT_STATE_TARGET_ID = "project_state"
 
 #: Section 12A.7's exact hard total-entry limit.
 _MAX_TOTAL_ENTRIES = 5
+
+#: Phase 100, Batch 1 bounded-read correction
+#: (docs/phase_100_intelligence_core_gap_audit.md): the per-category,
+#: per-store row limit passed to each progress store's four
+#: list_recent_*() methods. Equal to _MAX_TOTAL_ENTRIES because no
+#: single category, from a single store, can ever legitimately
+#: contribute more than the final total-entry bound to the finished
+#: context - fetching more would never change the output, only the
+#: amount of unnecessary work performed. A fixed, trusted constant,
+#: never AI- or user-controlled; each store also independently
+#: hard-caps the value it receives.
+_MAX_CANDIDATES_PER_CATEGORY_QUERY = _MAX_TOTAL_ENTRIES
 
 #: Bound on the one free-text, user-authored field this module ever
 #: renders (the ProjectState approved_phase_value).
@@ -337,13 +357,47 @@ def _classify_status(
     return None
 
 
+def _fetch_bounded_candidate_rows(store: object) -> list[object]:
+    """Fetch this build's entire bounded row set from one progress
+    store, using its four category-specific, hard-limited read
+    methods instead of list_all() (Phase 100, Batch 1 bounded-read
+    correction).
+
+    Each category query is independently bounded to
+    _MAX_CANDIDATES_PER_CATEGORY_QUERY (itself hard-capped again inside
+    the store), so the total number of rows fetched from one store is
+    never more than four times that constant, regardless of how much
+    history the table holds. The four WHERE clauses are mutually
+    exclusive by construction (Section 8 of the bounded-read audit), so
+    a row is never returned by more than one call here.
+
+    Args:
+        store: A CompoundWorkflowProgressStore or
+            ScheduleCompoundWorkflowProgressStore instance - both
+            expose an identical four-method bounded-read surface.
+
+    Returns:
+        The concatenation of all four category reads' own records.
+    """
+    return [
+        *store.list_recent_pending_verification(
+            limit=_MAX_CANDIDATES_PER_CATEGORY_QUERY
+        ),
+        *store.list_recent_verification_problems(
+            limit=_MAX_CANDIDATES_PER_CATEGORY_QUERY
+        ),
+        *store.list_recent_verified(limit=_MAX_CANDIDATES_PER_CATEGORY_QUERY),
+        *store.list_recent_not_executed(limit=_MAX_CANDIDATES_PER_CATEGORY_QUERY),
+    ]
+
+
 def _project_state_candidates(
     store: CompoundWorkflowProgressStore,
     pending_approval_store: PendingApprovalStore | None,
     handoff_failures: list[bool],
 ) -> list[_Candidate]:
-    """Build every eligible ProjectState-domain candidate from durable
-    progress rows.
+    """Build every eligible ProjectState-domain candidate from a
+    bounded read of durable progress rows.
 
     Args:
         store: The real CompoundWorkflowProgressStore to read.
@@ -358,16 +412,25 @@ def _project_state_candidates(
         could be derived for.
     """
     candidates: list[_Candidate] = []
-    for record in store.list_all():
-        handoff = _lookup_handoff_status(
-            pending_approval_store, record.request_id, handoff_failures
+    for record in _fetch_bounded_candidate_rows(store):
+        outcome_value = (
+            record.step_2_verification_outcome.value
+            if record.step_2_verification_outcome is not None
+            else None
+        )
+        # _classify_status() never consults handoff_status once an
+        # outcome is already set (Section 12A.5: the verification
+        # outcome is authoritative and decisive on its own) - skip the
+        # lookup entirely rather than performing one it can't use.
+        handoff = (
+            _lookup_handoff_status(
+                pending_approval_store, record.request_id, handoff_failures
+            )
+            if outcome_value is None
+            else None
         )
         status = _classify_status(
-            step_2_verification_outcome_value=(
-                record.step_2_verification_outcome.value
-                if record.step_2_verification_outcome is not None
-                else None
-            ),
+            step_2_verification_outcome_value=outcome_value,
             overall_status_value=record.overall_status.value,
             step_1_status_value=record.step_1_status.value,
             handoff_status=handoff,
@@ -392,10 +455,10 @@ def _schedule_candidates(
     pending_approval_store: PendingApprovalStore | None,
     handoff_failures: list[bool],
 ) -> list[_Candidate]:
-    """Build every eligible schedule-domain candidate from durable
-    progress rows. Mirrors _project_state_candidates exactly, using
-    the trusted integer schedule_id as target identity and no
-    detail_value (Section 12A.8).
+    """Build every eligible schedule-domain candidate from a bounded
+    read of durable progress rows. Mirrors _project_state_candidates
+    exactly, using the trusted integer schedule_id as target identity
+    and no detail_value (Section 12A.8).
 
     Args:
         store: The real ScheduleCompoundWorkflowProgressStore to read.
@@ -409,16 +472,25 @@ def _schedule_candidates(
         could be derived for.
     """
     candidates: list[_Candidate] = []
-    for record in store.list_all():
-        handoff = _lookup_handoff_status(
-            pending_approval_store, record.request_id, handoff_failures
+    for record in _fetch_bounded_candidate_rows(store):
+        outcome_value = (
+            record.step_2_verification_outcome.value
+            if record.step_2_verification_outcome is not None
+            else None
+        )
+        # _classify_status() never consults handoff_status once an
+        # outcome is already set (Section 12A.5: the verification
+        # outcome is authoritative and decisive on its own) - skip the
+        # lookup entirely rather than performing one it can't use.
+        handoff = (
+            _lookup_handoff_status(
+                pending_approval_store, record.request_id, handoff_failures
+            )
+            if outcome_value is None
+            else None
         )
         status = _classify_status(
-            step_2_verification_outcome_value=(
-                record.step_2_verification_outcome.value
-                if record.step_2_verification_outcome is not None
-                else None
-            ),
+            step_2_verification_outcome_value=outcome_value,
             overall_status_value=record.overall_status.value,
             step_1_status_value=record.step_1_status.value,
             handoff_status=handoff,
