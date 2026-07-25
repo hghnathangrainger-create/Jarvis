@@ -1013,3 +1013,99 @@ class CompoundWorkflowProgress(Base):
             f"<CompoundWorkflowProgress workflow_id={self.workflow_id!r} "
             f"overall_status={self.overall_status!r}>"
         )
+
+
+class ScheduleCompoundWorkflowProgress(Base):
+    """Durable, authoritative step-progress state for exactly one
+    second, still-dormant compound workflow template (Phase 99, Batch 2 -
+    docs/phase_99_second_compound_template_planning.md): SCHEDULE_ENABLE
+    -> SCHEDULE_VERIFY_ENABLED_STATE -> SCHEDULE_SHOW_ENABLED_STATE.
+
+    A wholly separate, parallel table to CompoundWorkflowProgress -
+    never a shared or generalised progress schema. Every column here is
+    specific to this one template's own three trusted steps, mirroring
+    CompoundWorkflowProgress's own shape exactly, except that the
+    write step's trusted, immutable payload is an integer `schedule_id`
+    (never a string value), and there is no `pre_execution_*_last_updated`
+    counterpart - ScheduleEntry has no updated_at/version column, so
+    reconciliation here has one fewer piece of tie-breaking evidence
+    than reconcile_phase_update() (see
+    workflow.schedule_compound_workflow_progress_store.reconcile_schedule_enable()'s
+    own docstring for the honest, narrower consequence of that).
+
+    No code in this phase reads or writes this table from any live
+    request path - it exists only so its own dedicated tests can prove
+    the mechanism correct ahead of a later, separately-approved batch
+    that wires it into live execution.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        workflow_id: The workflow id this row describes (matches
+            WorkflowEngine's own per-run correlation id). Unique - at
+            most one row per workflow.
+        template_id: The trusted, static compound-template identity
+            this workflow was built from. Immutable once set.
+        request_id: The id of the linked approval/paused-workflow this
+            compound workflow began from, if any.
+        schedule_id: The exact, already-approved schedule id this
+            workflow was authorized to enable. Immutable once set.
+        pre_execution_enabled: The real ScheduleEntry.enabled value
+            observed immediately before the enable step was attempted,
+            or None if never recorded. Used only for honest, bounded
+            reconciliation - never to claim execution occurred by itself.
+        step_1_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the schedule-enable write step.
+        step_2_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the internal enabled-state-verification step.
+        step_2_verification_outcome: One of "verified" / "failed" /
+            "unavailable", or None before step 2 completes.
+        step_3_status: One of "pending" / "in_progress" / "completed" /
+            "failed" - the SCHEDULE_SHOW_ENABLED_STATE read step.
+        overall_status: One of "pending" / "in_progress" /
+            "needs_reconciliation" / "completed" / "failed" /
+            "not_executed".
+        created_at: UTC timestamp this row was first written.
+        updated_at: UTC timestamp this row was last written.
+    """
+
+    __tablename__ = "schedule_compound_workflow_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    template_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    request_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    schedule_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    pre_execution_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
+    step_1_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    step_2_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    step_2_verification_outcome: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+    step_3_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    overall_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        """Return an unambiguous representation for debugging.
+
+        Returns:
+            A string identifying the row by workflow_id and overall_status.
+        """
+        return (
+            f"<ScheduleCompoundWorkflowProgress workflow_id={self.workflow_id!r} "
+            f"overall_status={self.overall_status!r}>"
+        )

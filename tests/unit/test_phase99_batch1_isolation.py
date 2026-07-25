@@ -203,15 +203,44 @@ class TestNoLiveProgressApprovalObserverOrDispatchWiring:
     path, change JarvisOrchestrator's live dispatch, or change main.py
     startup reconciliation."""
 
-    def test_no_schedule_compound_progress_store_class_exists_yet(self) -> None:
-        """Batch 1 deliberately adds no new ORM table/store - proven
-        by import failure, not a substring search."""
-        with pytest.raises(ImportError):
-            import workflow.schedule_compound_workflow_progress_store  # noqa: F401
+    def test_schedule_compound_progress_store_adds_no_live_wiring(self) -> None:
+        """Batch 1 itself added no new ORM table/store at all - proven
+        at the time by an import failure. Phase 99, Batch 2
+        (docs/phase_99_second_compound_template_planning.md) now
+        legitimately adds workflow/schedule_compound_workflow_progress_store.py
+        as its own dormant foundation - this assertion is revised, not
+        removed, to prove the module now exists but still adds zero
+        live wiring (see test_phase99_batch2_dormant_isolation.py for
+        the complete Batch 2 dormancy proof)."""
+        import workflow.schedule_compound_workflow_progress_store as module
 
-    def test_no_schedule_compound_progress_observer_module_exists_yet(self) -> None:
-        with pytest.raises(ImportError):
-            import workflow.schedule_compound_progress_observer  # noqa: F401
+        assert hasattr(module, "ScheduleCompoundWorkflowProgressStore")
+        for relative_path in (
+            "intelligence/planning.py",
+            "core/orchestrator.py",
+            "main.py",
+            "ui/cli.py",
+        ):
+            source = _module_source(relative_path)
+            referenced = _referenced_module_names(source)
+            assert "schedule_compound_workflow_progress_store" not in referenced
+
+    def test_schedule_compound_progress_observer_adds_no_live_wiring(self) -> None:
+        """Revised for the same reason as the store test immediately
+        above - Phase 99, Batch 2 adds
+        workflow/schedule_compound_progress_observer.py dormantly."""
+        import workflow.schedule_compound_progress_observer as module
+
+        assert hasattr(module, "ScheduleCompoundStepObserver")
+        for relative_path in (
+            "intelligence/planning.py",
+            "core/orchestrator.py",
+            "main.py",
+            "ui/cli.py",
+        ):
+            source = _module_source(relative_path)
+            referenced = _referenced_module_names(source)
+            assert "schedule_compound_progress_observer" not in referenced
 
     def test_orchestrator_has_no_schedule_compound_start_method(self) -> None:
         from core.orchestrator import JarvisOrchestrator
