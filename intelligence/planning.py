@@ -554,18 +554,17 @@ def select_tool(
     try:
         parsed = parse_tool_selection(response.text, active_catalog)
     except ToolSelectionParseError as exc:
-        # Phase 101, Batch 1: never trusts exc.reason or the raw model
-        # text alone - classify_actionable_issue_from_invalid_output()
-        # gates on the exact eligible reason strings, then independently
-        # re-confirms capability identity against request_text through
-        # the real, unmodified ground_decision(). Populates
-        # actionable_issue only for this feature's own tests; the
-        # live-facing kind/detail below are completely unchanged.
+        # Phase 101, Batch 2: never trusts exc.reason (a human-readable
+        # string that may be edited for wording at any time) or the raw
+        # model text alone - classify_actionable_issue_from_invalid_output()
+        # gates on exc.kind, the stable, machine-readable discriminator,
+        # then independently re-confirms capability identity against
+        # request_text through the real, unmodified ground_decision().
         return PlanningOutcome(
             kind=PlanningOutcomeKind.INVALID_OUTPUT,
             detail=exc.reason,
             actionable_issue=classify_actionable_issue_from_invalid_output(
-                raw_text=response.text, request_text=request_text, reason=exc.reason
+                raw_text=response.text, request_text=request_text, kind=exc.kind
             ),
         )
 

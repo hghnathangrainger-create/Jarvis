@@ -77,6 +77,7 @@ from enum import Enum
 from intelligence.capability_catalog import CAPABILITY_CATALOG, CapabilityId
 from intelligence.grounding import UngroundedReason, ground_decision
 from intelligence.structured_output import ToolSelectionParseError as _LiveToolSelectionParseError
+from intelligence.structured_output import ToolSelectionParseErrorKind
 from intelligence.structured_output import (
     _reject_duplicate_keys as _live_reject_duplicate_keys,
 )
@@ -110,27 +111,31 @@ _MISSING_REASONS = frozenset({UngroundedReason.MISSING_ARGUMENT_SPAN})
 _INVALID_REASONS = frozenset({UngroundedReason.AMBIGUOUS_ARGUMENT_SPAN})
 
 #: The exact, closed set of intelligence.structured_output.
-#: ToolSelectionParseError.reason strings that describe the required
-#: argument itself being absent or invalid - and nothing else. Every
-#: other reason (malformed JSON, an unknown decision value, an unknown
-#: or non-catalog capability id, an internal-only capability, an
-#: unexpected top-level key set, an unknown argument *name*, a NUL/
-#: control character, an oversized string, or oversized raw output) is
-#: a genuinely different, non-argument-content defect and must never be
-#: reinterpreted as "the argument was missing/invalid" merely because a
-#: capability_id also happens to be peekable from the same raw text.
-_ELIGIBLE_INVALID_OUTPUT_REASONS = frozenset(
+#: ToolSelectionParseErrorKind members that describe the required
+#: argument itself being absent or invalid - and nothing else. Stable
+#: and machine-readable (Phase 101, Batch 2 - the human-readable
+#: .reason string is never used for this gate, since edited wording
+#: must never silently change eligibility). Every other kind -
+#: OTHER, which covers malformed JSON, an unknown decision value, an
+#: unknown or non-catalog capability id, an internal-only capability,
+#: an unexpected top-level key set, an unknown argument *name*, a NUL/
+#: control character, an oversized string, or oversized raw output -
+#: is a genuinely different, non-argument-content defect and must
+#: never be reinterpreted as "the argument was missing/invalid" merely
+#: because a capability_id also happens to be peekable from the same
+#: raw text.
+_ELIGIBLE_INVALID_OUTPUT_KINDS = frozenset(
     {
-        "missing required argument",
-        "invalid argument type",
+        ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
+        ToolSelectionParseErrorKind.INVALID_ARGUMENT_TYPE,
         # Section 6 of the accepted planning amendment: a whitespace-
         # only string value should normally count as missing - this is
         # still an argument-content defect on the one declared
         # argument, so it is eligible for the same independent-
-        # evidence probe as the two reasons above; the probe's own
-        # fresh ground_decision() call (never this string) decides the
+        # evidence probe as the two kinds above; the probe's own
+        # fresh ground_decision() call (never this kind) decides the
         # final MISSING-vs-INVALID classification.
-        "empty or whitespace-only string argument",
+        ToolSelectionParseErrorKind.EMPTY_STRING_ARGUMENT,
     }
 )
 
@@ -403,19 +408,23 @@ def _peek_allowlisted_capability_id(raw_text: str) -> CapabilityId | None:
 
 
 def classify_actionable_issue_from_invalid_output(
-    *, raw_text: str, request_text: str, reason: str
+    *, raw_text: str, request_text: str, kind: ToolSelectionParseErrorKind
 ) -> ActionableDecisionIssue | None:
     """Classify an INVALID_OUTPUT failure that may still have a
     trustworthy capability identity.
 
-    Gates on `reason` first: only the closed set of
-    ToolSelectionParseError.reason strings that describe the required
+    Gates on `kind` first: only the closed set of
+    ToolSelectionParseErrorKind members that describe the required
     argument itself being absent/invalid are eligible at all
-    (_ELIGIBLE_INVALID_OUTPUT_REASONS) - a genuinely unrelated schema
+    (_ELIGIBLE_INVALID_OUTPUT_KINDS) - a genuinely unrelated schema
     defect (malformed JSON, an unknown decision value, an unknown
-    capability id, an unexpected key set, ...) must never be
-    reinterpreted as user ambiguity merely because a capability_id
-    also happens to be peekable from the same raw text.
+    capability id, an unexpected key set, ...) always carries
+    ToolSelectionParseErrorKind.OTHER and must never be reinterpreted
+    as user ambiguity merely because a capability_id also happens to be
+    peekable from the same raw text. `kind` is Phase 101, Batch 2's own
+    stable, machine-readable discriminator - deliberately never the
+    human-readable `.reason` string, which may be edited for wording
+    at any time without changing eligibility.
 
     Never trusts the model's own claimed capability_id alone: after
     peeking it (read-only, never validated), this calls the real,
@@ -432,18 +441,17 @@ def classify_actionable_issue_from_invalid_output(
         raw_text: The raw, untrimmed provider text that failed
             intelligence.structured_output.parse_tool_selection().
         request_text: The live, verbatim request text.
-        reason: The real ToolSelectionParseError.reason string that
-            was raised.
+        kind: The real ToolSelectionParseError.kind the parser raised.
 
     Returns:
-        An ActionableDecisionIssue only when reason is one of the
-        eligible argument-content strings, the peeked capability id is
+        An ActionableDecisionIssue only when kind is one of the
+        eligible argument-content kinds, the peeked capability id is
         allowlisted, and the real ground_decision() call - probed with
         a sentinel argument - reaches exactly a missing or invalid-
         format argument span. None for every other case, including
         malformed JSON with no trustworthy capability identity at all.
     """
-    if reason not in _ELIGIBLE_INVALID_OUTPUT_REASONS:
+    if kind not in _ELIGIBLE_INVALID_OUTPUT_KINDS:
         return None
     capability_id = _peek_allowlisted_capability_id(raw_text)
     if capability_id is None:

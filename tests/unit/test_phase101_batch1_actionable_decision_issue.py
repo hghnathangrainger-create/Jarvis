@@ -41,6 +41,7 @@ from intelligence.actionable_decision_issue import (
 from intelligence.capability_catalog import CapabilityId
 from intelligence.context import AssembledContext
 from intelligence.grounding import UngroundedReason
+from intelligence.structured_output import ToolSelectionParseErrorKind
 from intelligence.planning import PlanningOutcome, PlanningOutcomeKind, select_tool
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -280,7 +281,7 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="enable schedule",
-            reason="missing required argument",
+            kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
         )
         assert issue is not None
         assert issue.capability_id is CapabilityId.SCHEDULE_ENABLE
@@ -294,7 +295,7 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="do something with my schedules",
-            reason="missing required argument",
+            kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
         )
         assert issue is None
 
@@ -305,7 +306,7 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="enable schedule",
-            reason="missing required argument",
+            kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
         )
         assert issue is None
 
@@ -318,7 +319,7 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text="not even json{{{",
             request_text="enable schedule",
-            reason="malformed JSON in model output",
+            kind=ToolSelectionParseErrorKind.OTHER,
         )
         assert issue is None
 
@@ -329,21 +330,22 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="enable schedule",
-            reason="missing required argument",
+            kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
         )
         assert issue is None
 
-    def test_unrelated_reason_string_never_reinterpreted(self) -> None:
+    def test_unrelated_kind_never_reinterpreted(self) -> None:
         """A capability_id that peeks successfully must not be enough
         on its own - the original failure must actually have been
-        about the argument."""
+        about the argument (kind must be one of the eligible three,
+        never OTHER)."""
         raw = json.dumps(
             {"decision": "bogus", "capability_id": "schedule_enable", "arguments": {}}
         )
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="enable schedule",
-            reason="unknown decision value",
+            kind=ToolSelectionParseErrorKind.OTHER,
         )
         assert issue is None
 
@@ -354,7 +356,7 @@ class TestIndependentEvidence:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text=raw,
             request_text="show my project state",
-            reason="missing required argument",
+            kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
         )
         assert issue is None
 
@@ -424,7 +426,7 @@ class TestSafety:
         issue = classify_actionable_issue_from_invalid_output(
             raw_text="{completely malformed",
             request_text="enable schedule",
-            reason="malformed JSON in model output",
+            kind=ToolSelectionParseErrorKind.OTHER,
         )
         assert issue is None
 
@@ -641,12 +643,16 @@ def _empty_context() -> AssembledContext:
 
 
 class TestDormancy:
-    def test_actionable_issue_populated_but_response_message_unchanged(self) -> None:
-        """select_tool() itself now populates actionable_issue for an
-        eligible unsupported decision, but this must have zero effect
-        on the outcome's own kind/message contract - core/orchestrator.py
-        is never touched by this batch and still renders the exact
-        same fixed UNSUPPORTED_CAPABILITY_MESSAGE regardless."""
+    def test_select_tool_itself_populates_actionable_issue_but_changes_nothing_else(
+        self,
+    ) -> None:
+        """select_tool() populates actionable_issue for an eligible
+        unsupported decision, but this has zero effect on the
+        outcome's own kind or on select_tool()'s own behaviour - the
+        substitution into a different user-facing message string is
+        entirely core/orchestrator.py's own responsibility (Phase 101,
+        Batch 2), proven separately in
+        test_phase101_batch2_live_actionable_guidance_integration.py."""
         provider = _FakeAIProvider(
             json.dumps({"decision": "unsupported", "capability_id": None, "arguments": {}})
         )
@@ -671,11 +677,23 @@ class TestDormancy:
         assert outcome.actionable_issue is not None
         assert outcome.actionable_issue.capability_id is CapabilityId.SCHEDULE_ENABLE
 
-    def test_orchestrator_does_not_reference_actionable_issue(self) -> None:
+    def test_orchestrator_reference_confined_to_the_three_named_branches(self) -> None:
+        """Phase 101, Batch 2 activated exactly one legitimate live
+        consumer of this module: core/orchestrator.py's own
+        INVALID_OUTPUT/UNSUPPORTED/UNGROUNDED_SELECTION message
+        construction. Proves the reference is confined there - never
+        spread into approval, execution, workflow, or recovery code -
+        the same confinement-not-absence convention already
+        established for Phase 98/99/100's own live activations."""
         source = (_REPO_ROOT / "core/orchestrator.py").read_text(encoding="utf-8")
-        assert "actionable_issue" not in source
-        assert "actionable_decision_issue" not in source
-        assert "ActionableDecisionIssue" not in source
+        tree = ast.parse(source)
+        functions_referencing: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                segment = ast.get_source_segment(source, node) or ""
+                if "actionable_issue" in segment or "actionable_decision_issue" in segment:
+                    functions_referencing.add(node.name)
+        assert functions_referencing == {"_handle_ask_jarvis_to_request"}
 
     def test_prompt_studio_does_not_reference_actionable_issue(self) -> None:
         source = (_REPO_ROOT / "ai/prompt_studio.py").read_text(encoding="utf-8")

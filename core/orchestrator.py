@@ -83,6 +83,7 @@ from intelligence.capability_catalog import (
     ExecutionStrategy,
     fixed_arguments_for,
 )
+from intelligence.actionable_decision_issue import format_actionable_decision_issue
 from intelligence.context import ContextAssembler, build_ai_context_block
 from intelligence.grounding import UngroundedReason
 from intelligence.planning import (
@@ -2497,18 +2498,29 @@ class JarvisOrchestrator:
             )
 
         if outcome.kind is PlanningOutcomeKind.INVALID_OUTPUT:
-            return JarvisResponse(
-                success=False,
-                message=f"{_ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX} {outcome.detail}.",
-                plan=plan,
+            # Phase 101, Batch 2: outcome.actionable_issue is populated
+            # only for the narrow, independently-confirmed missing/
+            # invalid-required-argument case (Section 4's binding
+            # safety rule) - every other INVALID_OUTPUT keeps its
+            # existing, unchanged generic message.
+            message = (
+                format_actionable_decision_issue(outcome.actionable_issue)
+                if outcome.actionable_issue is not None
+                else f"{_ASK_JARVIS_TO_INVALID_OUTPUT_PREFIX} {outcome.detail}."
             )
+            return JarvisResponse(success=False, message=message, plan=plan)
 
         if outcome.kind is PlanningOutcomeKind.UNSUPPORTED:
-            return JarvisResponse(
-                success=True,
-                message=UNSUPPORTED_CAPABILITY_MESSAGE,
-                plan=plan,
+            # Phase 101, Batch 2: same actionable_issue substitution -
+            # success stays True either way, matching this outcome's
+            # own existing, unchanged semantics ("Jarvis genuinely
+            # found nothing to run," never an error).
+            message = (
+                format_actionable_decision_issue(outcome.actionable_issue)
+                if outcome.actionable_issue is not None
+                else UNSUPPORTED_CAPABILITY_MESSAGE
             )
+            return JarvisResponse(success=True, message=message, plan=plan)
 
         if outcome.kind is PlanningOutcomeKind.EXECUTABLE_WORKFLOW:
             return self._start_update_focus_workflow(plan, outcome, session_id)
@@ -2552,12 +2564,17 @@ class JarvisOrchestrator:
             # two honest, non-technical public messages, chosen from
             # the bounded internal reason - never the reason code
             # itself, never the request, never a candidate/rejected
-            # value.
-            return JarvisResponse(
-                success=False,
-                message=_ask_jarvis_to_ungrounded_message(outcome.detail),
-                plan=plan,
+            # value. Phase 101, Batch 2: outcome.actionable_issue is
+            # populated only for the narrow, independently-confirmed
+            # missing/invalid-required-argument case - every other
+            # UNGROUNDED_SELECTION keeps its existing, unchanged
+            # generic message.
+            message = (
+                format_actionable_decision_issue(outcome.actionable_issue)
+                if outcome.actionable_issue is not None
+                else _ask_jarvis_to_ungrounded_message(outcome.detail)
             )
+            return JarvisResponse(success=False, message=message, plan=plan)
 
         # PlanningOutcomeKind.EXECUTABLE: a real, GREEN-preflighted
         # StructuredPlan with exactly one step.

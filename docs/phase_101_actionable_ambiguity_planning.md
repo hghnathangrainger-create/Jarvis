@@ -274,4 +274,40 @@ Typed verification (Candidate F, and Phase 100's own deferred Candidate A) is a 
 
 ---
 
-**This document is pending review. It has not been committed. No Phase 101 implementation has begun.**
+## 25. Final implementation (Batch 1, Batch 2, and closure)
+
+**Status: implemented and closed.**
+
+### 25.1 Batch 1 — dormant foundation
+
+Commits: planning gate `dee26fc`, Batch 1 `c2e7b25`.
+
+`intelligence/actionable_decision_issue.py` implemented exactly the schema in Section 9: `ActionableIssueKind` (2 members), `ActionableDecisionIssue`, the fixed five-capability guidance specification, and three classifiers reusing the real, unmodified `ground_decision()` as sole authority. `PlanningOutcome` gained one new optional field, populated but not yet consumed by any live path.
+
+### 25.2 Hardening before live activation
+
+Batch 1 gated `INVALID_OUTPUT` eligibility using exact human-readable `ToolSelectionParseError.reason` strings - correct for a dormant proof, but unsafe for live behaviour to depend on, since that wording could change during an unrelated message edit. Before live activation, `intelligence/structured_output.py` gained one small, additive discriminator: `ToolSelectionParseErrorKind` (`MISSING_REQUIRED_ARGUMENT`, `INVALID_ARGUMENT_TYPE`, `EMPTY_STRING_ARGUMENT`, `OTHER`), and `ToolSelectionParseError` gained one new optional keyword field, `kind`, defaulting to `OTHER`. Only the three raise sites that describe the required argument itself being absent/invalid now set a non-default kind; every other raise site (malformed JSON, an unknown decision value, an unknown capability id, an unexpected key set, ...) keeps the default `OTHER` unchanged. Existing `.reason` strings, and every existing caller that reads only `.reason`, are completely unaffected - confirmed by the full, unmodified `structured_output` test suite (257 tests) passing unchanged. `intelligence/actionable_decision_issue.py`'s `classify_actionable_issue_from_invalid_output()` now gates on `kind`, never on `.reason`.
+
+### 25.3 Batch 2 — live integration and closure
+
+Commit: see Section 26 below.
+
+**Injection point:** `core/orchestrator.py::_handle_ask_jarvis_to_request()` - the same, single existing function that already builds every `ask jarvis to:` response. Exactly three branches (`INVALID_OUTPUT`, `UNSUPPORTED`, `UNGROUNDED_SELECTION`) were extended with one additional check each: if `outcome.actionable_issue` is set, render it with the unmodified Batch 1 formatter (`format_actionable_decision_issue()`); otherwise, render the exact, unchanged, pre-existing generic message. `PlanningOutcomeKind` itself, `outcome.plan`, `outcome.detail`, and every `EXECUTABLE*`/`INVALID_COMPOUND_OUTPUT`/`UNGROUNDED_COMPOUND_SELECTION` branch are completely untouched.
+
+**Model-outcome stability, proven directly:** for `"enable schedule"` (no id), all three model behaviours (omitting the argument, hallucinating a value grounding then rejects, or returning `"unsupported"`) produce byte-identical guidance text. Repeated for `"search memories for"` (a string-argument capability).
+
+**Independent-evidence rule:** unchanged from Batch 1 - proven again at the live, end-to-end level (vague wording, negation, conflict, ambiguous multi-signature text, model/request disagreement, and non-allowlisted capabilities all still produce the existing generic message, never guidance).
+
+**Statelessness, proven live:** a first incomplete request returns guidance and creates zero durable state; a later, independent bare `"12"` request is never bound to it (no schedule is enabled, no approval exists); a later complete, valid request reaches the ordinary approval-gated pipeline exactly as before.
+
+**Verified Action Context isolation, proven live:** with real historical evidence seeded (a verified schedule 12, a verified ProjectState phase value) and `VerifiedActionContextBuilder` genuinely wired into the same `ContextAssembler`, a current incomplete request still renders the fixed placeholder (`<schedule id>`, `<phase value>`) and never the historical value.
+
+**Compound and valid-request regression, proven live:** both existing compound grammars (ProjectState and schedule) remain fully unchanged, including a schedule compound with genuinely different clause ids (no actionable guidance attaches to `CLAUSE_ARGUMENT_MISMATCH` - still deferred). All five capabilities' valid requests reach their existing, correct behaviour (GREEN reads execute immediately; YELLOW writes reach the existing "Confirmation required" approval-gated response) with zero actionable-guidance interference.
+
+### 25.4 Explicit non-goals (confirmed at closure)
+
+No stateful clarification. No pending-intent persistence or new table. No compound correction guidance (capability-collision and compound guidance remain deferred, per Section 6). No typed verification. No third compound. No second AI call. No Prompt Studio change. No CommandRouter change. No capability catalogue expansion. `dashboard_test.txt` never touched.
+
+---
+
+**Phase 101 is formally closed.**

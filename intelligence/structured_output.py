@@ -94,23 +94,66 @@ class ParsedToolSelection:
     arguments: dict[str, object]
 
 
+class ToolSelectionParseErrorKind(Enum):
+    """A narrow, stable, machine-readable discriminator for exactly the
+    distinctions Phase 101 (docs/phase_101_actionable_ambiguity_planning.md)
+    needs - never a general error-taxonomy for this module or the
+    repository. Every raise site not explicitly listed below keeps the
+    default, OTHER - this class deliberately does not attempt to
+    classify every one of this module's existing reason strings.
+
+    Attributes:
+        MISSING_REQUIRED_ARGUMENT: A declared required argument key was
+            absent from the model's own "arguments" object entirely.
+        INVALID_ARGUMENT_TYPE: A declared argument was present but its
+            JSON type did not match the capability's own declared type.
+        EMPTY_STRING_ARGUMENT: A declared string argument was present
+            and correctly typed, but empty or whitespace-only.
+        OTHER: Every other failure - malformed JSON, an unexpected
+            top-level key set, an unknown decision value, an unknown or
+            non-catalog capability id, an internal-only capability, an
+            unknown argument name, a NUL/control character, an
+            oversized string, or oversized raw output. Callers must
+            never treat OTHER as "safe to reinterpret as user
+            ambiguity."
+    """
+
+    MISSING_REQUIRED_ARGUMENT = "missing_required_argument"
+    INVALID_ARGUMENT_TYPE = "invalid_argument_type"
+    EMPTY_STRING_ARGUMENT = "empty_string_argument"
+    OTHER = "other"
+
+
 class ToolSelectionParseError(Exception):
     """Raised for any parsing or validation failure.
 
     Attributes:
         reason: A short, fixed, non-sensitive description of which
             rule failed - safe to show a user, never the raw model
-            output or an exception's own internal text.
+            output or an exception's own internal text. Unchanged by
+            the addition of `kind` below - every existing caller that
+            only ever reads `.reason` continues to work identically.
+        kind: A narrow, stable ToolSelectionParseErrorKind (Phase 101,
+            Batch 2) - defaults to OTHER for every raise site that does
+            not explicitly set it, so no existing behaviour changes.
     """
 
-    def __init__(self, reason: str) -> None:
-        """Initialise the error with its bounded reason.
+    def __init__(
+        self,
+        reason: str,
+        *,
+        kind: ToolSelectionParseErrorKind = ToolSelectionParseErrorKind.OTHER,
+    ) -> None:
+        """Initialise the error with its bounded reason and kind.
 
         Args:
             reason: A short, fixed, non-sensitive failure description.
+            kind: The narrow, stable discriminator - OTHER unless the
+                raise site explicitly names a more specific one.
         """
         super().__init__(reason)
         self.reason = reason
+        self.kind = kind
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -218,7 +261,10 @@ def _validate_string_argument(value: str) -> None:
     if len(value) > _MAX_STRING_ARGUMENT_CHARS:
         raise ToolSelectionParseError("oversized string argument")
     if not value.strip():
-        raise ToolSelectionParseError("empty or whitespace-only string argument")
+        raise ToolSelectionParseError(
+            "empty or whitespace-only string argument",
+            kind=ToolSelectionParseErrorKind.EMPTY_STRING_ARGUMENT,
+        )
     if "\x00" in value:
         raise ToolSelectionParseError("string argument contains a NUL character")
     if _is_control_char(value[0]) or _is_control_char(value[-1]):
@@ -255,7 +301,10 @@ def _validate_arguments(
     for spec in adapter.arguments:
         if spec.name not in arguments:
             if spec.required:
-                raise ToolSelectionParseError("missing required argument")
+                raise ToolSelectionParseError(
+                    "missing required argument",
+                    kind=ToolSelectionParseErrorKind.MISSING_REQUIRED_ARGUMENT,
+                )
             continue
 
         value = arguments[spec.name]
@@ -266,9 +315,15 @@ def _validate_arguments(
         # from being silently interchangeable (no coercion of any kind).
         if expected_type is bool:
             if not isinstance(value, bool):
-                raise ToolSelectionParseError("invalid argument type")
+                raise ToolSelectionParseError(
+                    "invalid argument type",
+                    kind=ToolSelectionParseErrorKind.INVALID_ARGUMENT_TYPE,
+                )
         elif isinstance(value, bool) or not isinstance(value, expected_type):
-            raise ToolSelectionParseError("invalid argument type")
+            raise ToolSelectionParseError(
+                "invalid argument type",
+                kind=ToolSelectionParseErrorKind.INVALID_ARGUMENT_TYPE,
+            )
 
         if expected_type is str:
             _validate_string_argument(value)
