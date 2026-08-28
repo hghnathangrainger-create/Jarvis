@@ -1,5 +1,28 @@
-__pycache__/ 
+__pycache__/
 *.pyc
 .pytest_cache/
+
+# Secrets and credentials
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+credentials/
+secrets/
+
+# Local/runtime data
 data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Local test file
+dashboard_test.txt
