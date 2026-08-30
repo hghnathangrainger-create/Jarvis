@@ -1,0 +1,9 @@
+{
+    "name": "weather",
+    "version": "1.0.0",
+    "author": "Jarvis Examples",
+    "description": "Example plugin that provides weather information lookups.",
+    "entry_point": "plugin",
+    "permissions": ["access_network", "read_memory"],
+    "min_jarvis_version": "0.1.0"
+}

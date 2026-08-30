@@ -123,6 +123,15 @@ class Settings:
     voice_input_provider: str = "none"
     openai_api_key: str = ""
     google_api_key: str = ""
+    wake_word: str = "jarvis"
+    stt_provider: str = "whisper"
+    tts_provider: str = "pyttsx3"
+    voice_language: str = "en"
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    api_username: str = "admin"
+    api_password: str = "changeme"
+    cors_origins: str = "*"
 
 
 def _get_required(name: str) -> str:
@@ -354,4 +363,13 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ),
         openai_api_key=_get_optional("OPENAI_API_KEY", ""),
         google_api_key=_get_optional("GOOGLE_API_KEY", ""),
+        wake_word=_get_optional("WAKE_WORD", "jarvis"),
+        stt_provider=_get_choice("STT_PROVIDER", "whisper", ("whisper", "fake")),
+        tts_provider=_get_choice("TTS_PROVIDER", "pyttsx3", ("pyttsx3", "fake")),
+        voice_language=_get_optional("VOICE_LANGUAGE", "en"),
+        api_host=_get_optional("API_HOST", "0.0.0.0"),
+        api_port=_get_int("API_PORT", 8000),
+        api_username=_get_optional("API_USERNAME", "admin"),
+        api_password=_get_optional("API_PASSWORD", "changeme"),
+        cors_origins=_get_optional("CORS_ORIGINS", "*"),
     )

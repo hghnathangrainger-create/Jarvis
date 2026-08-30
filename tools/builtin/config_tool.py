@@ -112,5 +112,9 @@ class ConfigTool(BaseTool):
             f"  Voice provider: {self._settings.voice_provider}",
             f"  Voice input enabled: {self._settings.voice_input_enabled}",
             f"  Voice input provider: {self._settings.voice_input_provider}",
+            f"  Wake word: {self._settings.wake_word}",
+            f"  STT provider: {self._settings.stt_provider}",
+            f"  TTS provider: {self._settings.tts_provider}",
+            f"  Voice language: {self._settings.voice_language}",
         )
         return self.ok("\n".join(lines))

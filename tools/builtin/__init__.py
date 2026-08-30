@@ -138,6 +138,14 @@ from tools.builtin.goal_progress_tool import GoalProgressTool
 from tools.builtin.knowledge_add_tool import KnowledgeAddTool
 from tools.builtin.knowledge_search_tool import KnowledgeSearchTool
 from tools.builtin.observability_tool import ObservabilityTool
+from tools.builtin.plugin_manager_tool import PluginManagerTool
+from tools.builtin.voice_control_tool import VoiceControlTool
+from tools.builtin.project_create_tool import ProjectCreateTool
+from tools.builtin.project_status_tool import ProjectStatusTool
+from tools.builtin.window_tool import WindowTool
+from tools.builtin.input_tool import InputTool
+from tools.builtin.command_tool import CommandTool
+from tools.builtin.screen_tool import ScreenTool
 from tools.builtin.file_copy_tool import FileCopyTool
 from tools.builtin.file_create_tool import FileCreateTool
 from tools.builtin.file_delete_tool import FileDeleteTool
@@ -191,6 +199,14 @@ __all__ = [
     "KnowledgeAddTool",
     "KnowledgeSearchTool",
     "ObservabilityTool",
+    "PluginManagerTool",
+    "VoiceControlTool",
+    "ProjectCreateTool",
+    "ProjectStatusTool",
+    "WindowTool",
+    "InputTool",
+    "CommandTool",
+    "ScreenTool",
     "MemoryTool",
     "FileListTool",
     "FileReadTool",

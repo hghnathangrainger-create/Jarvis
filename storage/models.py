@@ -1228,3 +1228,45 @@ class MetricsSnapshot(Base):
             f"<MetricsSnapshot id={self.id} "
             f"snapshot_time={self.snapshot_time!r}>"
         )
+
+class PluginEntry(Base):
+    """A registered plugin in the Jarvis plugin system.
+
+    Tracks installed plugins, their manifests, and enabled state.
+    One row per installed plugin.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        plugin_id: Unique plugin identifier (e.g. "weather").
+        name: Human-readable plugin name.
+        version: Plugin version string.
+        manifest_json: Full manifest as JSON for inspection.
+        enabled: Whether the plugin is active.
+        installed_at: When the plugin was first registered (UTC).
+        last_used: When the plugin was last loaded/used (UTC), or None.
+    """
+
+    __tablename__ = "plugin_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plugin_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, unique=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+    installed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    last_used: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PluginEntry plugin_id={self.plugin_id!r} "
+            f"enabled={self.enabled!r}>"
+        )

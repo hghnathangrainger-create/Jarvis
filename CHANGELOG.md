@@ -4,6 +4,70 @@ All notable changes to the Jarvis AI Operating System will be documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **FastAPI HTTP/WebSocket API server** (`api/` module) for Dashboard and Android Client:
+  - JWT authentication with 24-hour token expiry (`api/auth.py`, `api/routes_auth.py`)
+  - Chat endpoint — POST `/api/chat` routes messages through the orchestrator
+  - Memory endpoints — list, search, create, delete with category filtering
+  - Workflow endpoints — list active workflows, approve/cancel pending steps
+  - Goal/Project endpoints — CRUD for goals with progress and projects with tasks
+  - Plugin endpoints — list, enable, disable installed plugins
+  - System endpoints — health check (no auth), AI provider status, observability metrics
+  - WebSocket hub (`api/websocket.py`) — real-time event broadcasting with 50-event catch-up buffer
+  - CORS middleware, request logging middleware, global exception handler
+- **Computer Control module** (`computer_control/`) — full desktop automation:
+  - Input automation via pyautogui — click, type, hotkey, scroll, drag, move
+  - Window management via pygetwindow/psutil — launch, close, list, switch, resize, move, minimize, maximize
+  - Command execution — shell, PowerShell, Python scripts with timeouts and audit logging
+  - Screen analysis — screenshots (mss), OCR text extraction (pytesseract), UI element detection, AI vision analysis
+  - Security tier enforcement: GREEN (screen), YELLOW (input/window), RED (commands)
+  - 4 tool wrappers: InputTool, WindowTool, CommandTool, ScreenTool
+- **Plugin architecture** (`plugins/`):
+  - Plugin loader with manifest validation and entry point import (`plugins/loader.py`)
+  - Plugin sandbox with permission enforcement (`plugins/sandbox.py`)
+  - Plugin registry with enable/disable state (`plugins/registry.py`)
+  - PluginManagerTool (YELLOW) for listing, enabling, disabling plugins via CLI
+- **Voice pipeline** (`voice/`):
+  - VoicePipeline with wake word detection, STT, orchestrator integration, and TTS (`voice/pipeline.py`)
+  - WhisperSpeechToText provider wrapping faster-whisper (`voice/whisper_stt.py`)
+  - Pyttsx3TextToSpeech provider wrapping pyttsx3 (`voice/pyttsx3_tts.py`)
+  - WakeWordDetector with configurable sensitivity (`voice/wake_word.py`)
+  - VoiceControlTool for managing voice pipeline from CLI
+  - `--voice` CLI flag for continuous voice interaction mode
+- **Goal & Milestone tracking** (`goals/`):
+  - GoalManager with CRUD, milestones, tasks, and progress reports
+  - GoalCreateTool, GoalProgressTool, TaskCompleteTool
+- **Project management** (`projects/`):
+  - ProjectManager with projects, tasks, notes, and status tracking
+  - ProjectCreateTool, ProjectStatusTool
+- **Knowledge Library** (`knowledge/`):
+  - KnowledgeManager with keyword search and ChromaDB semantic search
+  - KnowledgeSearchTool (GREEN), KnowledgeAddTool (YELLOW)
+- **Observability enhancements**:
+  - Structured EventLogger with append-only audit log
+  - Tracer for request-level span tracking
+  - MetricsCollector for per-provider and per-tool statistics
+  - ObservabilityTool exposing metrics, traces, and provider stats via CLI
+- Console logging configured from LOG_LEVEL (Phase 54)
+
+### Changed
+
+- `config/settings.py` — added api_host, api_port, api_username, api_password, cors_origins
+- `main.py` — added `--server` flag for API server mode, `--voice` flag for voice mode, all subsystem wiring
+- `tools/builtin/__init__.py` — exported all new tools (WindowTool, InputTool, CommandTool, ScreenTool, GoalCreateTool, GoalProgressTool, TaskCompleteTool, ProjectCreateTool, ProjectStatusTool, KnowledgeAddTool, KnowledgeSearchTool, ObservabilityTool, PluginManagerTool, VoiceControlTool)
+- `pyproject.toml` — added fastapi, uvicorn, python-jose, passlib, websockets, Pillow, mss, pytesseract, pyautogui, pygetwindow, psutil, pyttsx3, sounddevice, numpy
+
+### Tests
+
+- 36 new API tests covering login flow, auth enforcement, chat, memory CRUD, workflows, goals, plugins, CORS, WebSocket, and error handling
+- Computer control tests covering models, InputAutomator, WindowManager, CommandExecutor, ScreenAnalyzer, and all 4 tool wrappers
+- Plugin tests covering loader, sandbox, registry, and PluginManagerTool
+- Project management tests covering ProjectManager and tool wrappers
+- Voice pipeline tests covering pipeline lifecycle, wake word, STT/TTS providers
+
 ## [0.2.0] - 2026-08-30
 
 ### Added

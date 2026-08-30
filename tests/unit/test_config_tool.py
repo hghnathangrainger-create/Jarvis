@@ -138,6 +138,10 @@ _EXPECTED_FIELD_LABELS: dict[str, str] = {
     "voice_provider": "Voice provider:",
     "voice_input_enabled": "Voice input enabled:",
     "voice_input_provider": "Voice input provider:",
+    "wake_word": "Wake word:",
+    "stt_provider": "STT provider:",
+    "tts_provider": "TTS provider:",
+    "voice_language": "Voice language:",
 }
 
 #: The one Settings field deliberately never shown by name+value - a

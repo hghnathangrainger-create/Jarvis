@@ -93,6 +93,9 @@ from intelligence.context import ContextAssembler
 from intelligence.verified_action_context import VerifiedActionContextBuilder
 from goals.manager import GoalManager
 from goals.store import GoalStore
+from projects.manager import ProjectManager
+from projects.store import ProjectStore
+from computer_control.manager import ComputerControlManager
 from knowledge.indexer import KnowledgeIndexer
 from knowledge.manager import KnowledgeManager
 from knowledge.store import KnowledgeStore
@@ -157,6 +160,12 @@ from tools.builtin import (
     KnowledgeSearchTool,
     ObservabilityTool,
     TaskCompleteTool,
+    ProjectCreateTool,
+    ProjectStatusTool,
+    WindowTool,
+    InputTool,
+    CommandTool,
+    ScreenTool,
 )
 from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
@@ -174,6 +183,13 @@ from workflow.schedule_compound_workflow_progress_store import (
     ScheduleCompoundWorkflowProgressStore,
 )
 from workflow.workflow_history_store import WorkflowHistoryStore
+
+# Plugin system.
+from plugins.loader import PluginLoader
+from plugins.models import PluginContext
+from plugins.registry import PluginRegistry as PluginRegistryStore
+from plugins.sandbox import PluginSandbox
+from tools.builtin.plugin_manager_tool import PluginManagerTool
 
 
 def build_orchestrator() -> JarvisOrchestrator:
@@ -205,6 +221,15 @@ def build_orchestrator() -> JarvisOrchestrator:
     # Goals and Milestones.
     goal_store = GoalStore(session_factory)
     goal_manager = GoalManager(store=goal_store)
+
+    # Project Management.
+    project_store = ProjectStore(session_factory)
+    project_manager = ProjectManager(store=project_store)
+
+    # Computer Control.
+    computer_control_manager = ComputerControlManager(
+        tracer=tracer, audit_logger=logger
+    )
 
     # Knowledge Library.
     knowledge_store = KnowledgeStore(session_factory)
@@ -313,6 +338,24 @@ def build_orchestrator() -> JarvisOrchestrator:
     registry.register_tool(GoalProgressTool(goal_manager))
     registry.register_tool(TaskCompleteTool(goal_manager))
 
+    # Project Management tools: read-only status and guarded writes.
+    # ProjectStatusTool is GREEN (read-only); ProjectCreateTool is YELLOW
+    # (modifies durable state, requiring approval).
+    registry.register_tool(ProjectStatusTool(project_manager))
+    registry.register_tool(ProjectCreateTool(project_manager))
+
+    # Computer Control tools: WindowTool/InputTool are YELLOW (modify state),
+    # CommandTool is RED (always requires explicit approval).
+    registry.register_tool(WindowTool(computer_control_manager))
+    registry.register_tool(InputTool(computer_control_manager))
+    registry.register_tool(CommandTool(computer_control_manager))
+    # ScreenTool is GREEN (read-only) — takes screenshots, OCR, AI analysis.
+    # Reuses the same ai_router already built above for AI vision analysis.
+    registry.register_tool(ScreenTool(
+        computer_control_manager,
+        ai_router=ai_router if 'ai_router' in dir() else None,
+    ))
+
     # Durable inbox (Phase 20, Batch 1/2): a durable, append-only record of
     # saved Jarvis-produced outputs - today, exactly one producer, the
     # "summarise web search for <query>" advisory summary. No tool is
@@ -320,6 +363,29 @@ def build_orchestrator() -> JarvisOrchestrator:
     # and read directly by the dashboard's own read model, never through
     # ToolExecutor.
     inbox_store = InboxStore(session_factory)
+
+    # Durable web-search-summary schedules (Phase 21, Batch 1): storage
+    # and CRUD only - creating, listing, enabling, and disabling a
+    # schedule row. Unlike inbox_store above, schedule management IS
+    # Plugin system: discover, validate, and load installed plugins.
+    # Plugins interact only through the existing tool and memory APIs.
+    plugin_registry = PluginRegistryStore(session_factory)
+    plugin_sandbox = PluginSandbox()
+    plugin_loader = PluginLoader(
+        installed_dir="plugins/installed",
+        sandbox=plugin_sandbox,
+    )
+    plugin_context = PluginContext(
+        memory=memory,
+        metrics=metrics,
+    )
+    loaded_plugins = plugin_loader.load_all(context=plugin_context)
+    for loaded in loaded_plugins:
+        plugin_registry.register(loaded.manifest)
+        for tool in loaded.tools:
+            registry.register_tool(tool)
+    # Register the plugin manager tool (YELLOW — modifies plugin state).
+    registry.register_tool(PluginManagerTool(plugin_registry))
 
     # Durable web-search-summary schedules (Phase 21, Batch 1): storage
     # and CRUD only - creating, listing, enabling, and disabling a
@@ -1407,6 +1473,102 @@ def continue_approved_unconsumed_workflows(
     )
 
 
+def _run_voice_mode(orchestrator: JarvisOrchestrator) -> None:
+    """Start the voice pipeline for continuous voice interaction.
+
+    Constructs the STT and TTS engines from settings, builds the
+    VoicePipeline, and enters the listen loop. The pipeline calls
+    orchestrator.handle_request() exactly like the text CLI does.
+
+    Args:
+        orchestrator: The wired JarvisOrchestrator.
+    """
+    from voice.models import VoiceConfig
+    from voice.pipeline import VoicePipeline
+
+    settings = load_settings()
+
+    # Build STT engine.
+    stt_engine = None
+    if settings.stt_provider == "whisper":
+        from voice.whisper_stt import WhisperSpeechToText
+        stt_engine = WhisperSpeechToText(
+            model_size="base",
+            language=settings.voice_language,
+        )
+        if not stt_engine.available:
+            print("Warning: faster-whisper not installed. STT unavailable.")
+            stt_engine = None
+    elif settings.stt_provider == "fake":
+        from voice.stt import FakeSpeechToTextProvider
+        stt_engine = FakeSpeechToTextProvider(text="")
+
+    # Build TTS engine.
+    tts_engine = None
+    if settings.tts_provider == "pyttsx3":
+        from voice.pyttsx3_tts import Pyttsx3TextToSpeech
+        tts_engine = Pyttsx3TextToSpeech()
+        if not tts_engine.available:
+            print("Warning: pyttsx3 not installed. TTS unavailable.")
+            tts_engine = None
+    elif settings.tts_provider == "fake":
+        from voice.tts import FakeTextToSpeechProvider
+        tts_engine = FakeTextToSpeechProvider()
+
+    config = VoiceConfig(
+        wake_word=settings.wake_word,
+        stt_provider=settings.stt_provider,
+        tts_provider=settings.tts_provider,
+        language=settings.voice_language,
+    )
+
+    pipeline = VoicePipeline(
+        config=config,
+        orchestrator=orchestrator,
+        stt_engine=stt_engine,
+        tts_engine=tts_engine,
+    )
+
+    print(f"Jarvis voice mode (wake word: '{config.wake_word}')")
+    print("Say the wake word to begin, or press Ctrl+C to stop.")
+    print()
+
+    try:
+        pipeline.start()
+        # Keep the main thread alive while the pipeline runs.
+        while pipeline.is_running:
+            import time
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping voice pipeline...")
+    finally:
+        pipeline.stop()
+        print("Voice pipeline stopped.")
+
+
+def _run_api_server(orchestrator: JarvisOrchestrator, settings: "Settings") -> None:
+    """Start the FastAPI HTTP/WebSocket API server.
+
+    Creates the FastAPI app from the wired orchestrator and runs it
+    with uvicorn. This is the entry point when --server is passed.
+
+    Args:
+        orchestrator: The wired JarvisOrchestrator.
+        settings: The loaded Settings object.
+    """
+    import uvicorn
+
+    from api.app import create_app
+
+    app = create_app(orchestrator=orchestrator)
+    host = settings.api_host
+    port = settings.api_port
+
+    print(f"Starting Jarvis API server on {host}:{port}")
+    print(f"API docs: http://{host}:{port}/docs")
+    uvicorn.run(app, host=host, port=port)
+
+
 def main() -> None:
     """Acquire the execution lock, build and recover the system, and
     start the interactive CLI.
@@ -1422,6 +1584,21 @@ def main() -> None:
     resume, and tool execution - and released on every exit path,
     including an unhandled exception propagating out of cli.run().
     """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Jarvis AI Operating System")
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Start in voice mode instead of text CLI.",
+    )
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Start the HTTP/WebSocket API server instead of the CLI.",
+    )
+    args = parser.parse_args()
+
     try:
         orchestrator, lock = start_execution_session()
     except AlreadyRunningError as exc:
@@ -1429,23 +1606,24 @@ def main() -> None:
         return
 
     try:
-        startup_notice = build_startup_notice()
-        voice_output, speak_responses = build_voice_output_service()
-        voice_input = build_voice_input_service()
-        # Phase 54, Batch 1: console logging is configured here, directly in
-        # the real process entry point - never inside build_orchestrator(),
-        # so the many existing tests that call build_orchestrator() directly
-        # are never affected. Idempotent - see configure_console_logging()'s
-        # own docstring.
         configure_console_logging(load_settings())
-        cli = JarvisCLI(
-            orchestrator,
-            startup_notice=startup_notice,
-            voice_output=voice_output,
-            speak_responses=speak_responses,
-            voice_input=voice_input,
-        )
-        cli.run()
+
+        if args.server:
+            _run_api_server(orchestrator, load_settings())
+        elif args.voice:
+            _run_voice_mode(orchestrator)
+        else:
+            startup_notice = build_startup_notice()
+            voice_output, speak_responses = build_voice_output_service()
+            voice_input = build_voice_input_service()
+            cli = JarvisCLI(
+                orchestrator,
+                startup_notice=startup_notice,
+                voice_output=voice_output,
+                speak_responses=speak_responses,
+                voice_input=voice_input,
+            )
+            cli.run()
     finally:
         lock.release()
 
