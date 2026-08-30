@@ -91,12 +91,20 @@ from core.schedule_compound_workflow import (
 from inbox.inbox_store import InboxStore
 from intelligence.context import ContextAssembler
 from intelligence.verified_action_context import VerifiedActionContextBuilder
+from goals.manager import GoalManager
+from goals.store import GoalStore
+from knowledge.indexer import KnowledgeIndexer
+from knowledge.manager import KnowledgeManager
+from knowledge.store import KnowledgeStore
 from memory.episodic_memory import EpisodicMemoryStore
 from memory.memory_manager import MemoryManager
 from notice.scheduled_inbox_notice import build_scheduled_inbox_notice
 from notice.scheduled_inbox_notice_store import ScheduledInboxNoticeStore
 from observability.logger import EventLogger
 from observability.logging_setup import configure_console_logging
+from observability.metrics import MetricsCollector
+from observability.store import ObservabilityStore
+from observability.tracer import Tracer
 from planner.planner import Planner
 from project_state.project_state_store import ProjectStateStore
 from quarantine.quarantine_store import QuarantineStore
@@ -143,6 +151,12 @@ from tools.builtin import (
     WebSearchTool,
     WebpageReadTool,
     WorkflowHistoryTool,
+    GoalCreateTool,
+    GoalProgressTool,
+    KnowledgeAddTool,
+    KnowledgeSearchTool,
+    ObservabilityTool,
+    TaskCompleteTool,
 )
 from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
@@ -180,10 +194,25 @@ def build_orchestrator() -> JarvisOrchestrator:
 
     # Observability and security.
     logger = EventLogger(AuditLog(session_factory))
+    obs_store = ObservabilityStore(session_factory)
+    metrics = MetricsCollector()
+    tracer = Tracer(obs_store)
     security = SecurityManager()
 
     # Memory.
     memory = MemoryManager(EpisodicMemoryStore(session_factory))
+
+    # Goals and Milestones.
+    goal_store = GoalStore(session_factory)
+    goal_manager = GoalManager(store=goal_store)
+
+    # Knowledge Library.
+    knowledge_store = KnowledgeStore(session_factory)
+    knowledge_indexer = KnowledgeIndexer()
+    knowledge_manager = KnowledgeManager(
+        store=knowledge_store,
+        indexer=knowledge_indexer,
+    )
 
     # Durable, read-only approval history (Phase 6, Batch 1). This store only
     # ever records what already happened; it has no tool_name or tool_input
@@ -264,6 +293,25 @@ def build_orchestrator() -> JarvisOrchestrator:
     # this read-only tool - never two separately constructed stores.
     workflow_history = WorkflowHistoryStore(session_factory)
     registry.register_tool(WorkflowHistoryTool(workflow_history))
+
+    # Knowledge Library tools: read-only search and guarded write.
+    # KnowledgeSearchTool is GREEN (read-only); KnowledgeAddTool is YELLOW
+    # (modifies durable state, requiring approval). Both reuse the same
+    # knowledge_manager instance already constructed above.
+    registry.register_tool(KnowledgeSearchTool(knowledge_manager))
+    registry.register_tool(KnowledgeAddTool(knowledge_manager))
+
+    # Observability tool: read-only GREEN, returns metrics, traces,
+    # provider stats, and tool usage. Reuses the same obs_store and
+    # metrics instances already constructed above.
+    registry.register_tool(ObservabilityTool(obs_store, metrics))
+
+    # Goals and Milestones tools: read-only progress and guarded writes.
+    # GoalProgressTool is GREEN (read-only); GoalCreateTool and TaskCompleteTool
+    # are YELLOW (modify durable state, requiring approval).
+    registry.register_tool(GoalCreateTool(goal_manager))
+    registry.register_tool(GoalProgressTool(goal_manager))
+    registry.register_tool(TaskCompleteTool(goal_manager))
 
     # Durable inbox (Phase 20, Batch 1/2): a durable, append-only record of
     # saved Jarvis-produced outputs - today, exactly one producer, the
@@ -578,6 +626,12 @@ def build_orchestrator() -> JarvisOrchestrator:
         # second trusted compound workflow's own progress-creation and
         # approval-time-validation gates.
         schedule_compound_progress_store=schedule_compound_progress_store,
+        # Knowledge Library: the same KnowledgeManager instance already built
+        # above (not a second one) — available for AI context assembly and
+        # any future knowledge-aware workflows.
+        knowledge_manager=knowledge_manager,
+        goal_manager=goal_manager,
+        tracer=tracer,
     )
 
 

@@ -101,7 +101,10 @@ from intelligence.verification import (
     verify_project_state_field,
     verify_schedule_enabled_state,
 )
+from goals.manager import GoalManager
+from knowledge.manager import KnowledgeManager
 from memory.memory_manager import MemoryManager
+from observability.tracer import Tracer
 from memory.memory_models import KNOWN_CATEGORIES
 from planner.plan_models import Plan
 from planner.planner import Planner
@@ -684,6 +687,9 @@ class JarvisOrchestrator:
         paused_workflow_store: PausedWorkflowStore | None = None,
         compound_progress_store: CompoundWorkflowProgressStore | None = None,
         schedule_compound_progress_store: ScheduleCompoundWorkflowProgressStore | None = None,
+        knowledge_manager: KnowledgeManager | None = None,
+        goal_manager: GoalManager | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         """Initialise the orchestrator with its collaborators.
 
@@ -815,6 +821,9 @@ class JarvisOrchestrator:
         self._paused_workflow_store = paused_workflow_store
         self._compound_progress_store = compound_progress_store
         self._schedule_compound_progress_store = schedule_compound_progress_store
+        self._knowledge_manager = knowledge_manager
+        self._goal_manager = goal_manager
+        self._tracer = tracer
 
     @property
     def approvals(self) -> ApprovalManager:
@@ -1916,6 +1925,47 @@ class JarvisOrchestrator:
         Returns:
             A JarvisResponse describing the outcome, with an advisory
             ai_suggestion attached only when AI reasoning is active.
+        """
+        # Start a trace for this user interaction.
+        trace_id: str | None = None
+        if self._tracer is not None:
+            trace_id = self._tracer.start_trace(
+                user_request, session_id=session_id
+            )
+
+        try:
+            return self._dispatch_request(
+                user_request, session_id, trace_id
+            )
+        except Exception as exc:
+            if self._tracer is not None and trace_id is not None:
+                self._tracer.end_trace(
+                    trace_id, status="failed", error=str(exc)
+                )
+            raise
+        else:
+            if self._tracer is not None and trace_id is not None:
+                self._tracer.end_trace(trace_id, status="completed")
+
+    def _dispatch_request(
+        self,
+        user_request: str,
+        session_id: int | None,
+        trace_id: str | None,
+    ) -> JarvisResponse:
+        """Dispatch a request to the appropriate handler.
+
+        This is the body of handle_request, extracted so that tracing
+        can wrap it cleanly. Does NOT start or end traces — that is
+        the caller's responsibility.
+
+        Args:
+            user_request: The user's request text.
+            session_id: Optional session identifier.
+            trace_id: Optional trace identifier for span recording.
+
+        Returns:
+            A JarvisResponse.
         """
         file_summary_path = self._command_router.match_file_summary(
             user_request.strip()

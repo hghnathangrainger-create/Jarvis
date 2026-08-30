@@ -133,6 +133,11 @@ from tools.builtin.approval_history_tool import ApprovalHistoryTool
 from tools.builtin.config_tool import ConfigTool
 from tools.builtin.echo_tool import EchoTool
 from tools.builtin.file_append_tool import FileAppendTool
+from tools.builtin.goal_create_tool import GoalCreateTool
+from tools.builtin.goal_progress_tool import GoalProgressTool
+from tools.builtin.knowledge_add_tool import KnowledgeAddTool
+from tools.builtin.knowledge_search_tool import KnowledgeSearchTool
+from tools.builtin.observability_tool import ObservabilityTool
 from tools.builtin.file_copy_tool import FileCopyTool
 from tools.builtin.file_create_tool import FileCreateTool
 from tools.builtin.file_delete_tool import FileDeleteTool
@@ -163,6 +168,7 @@ from tools.builtin.schedule_show_enabled_state_tool import (
 from tools.builtin.schedule_verify_enabled_state_tool import (
     ScheduleVerifyEnabledStateTool,
 )
+from tools.builtin.task_complete_tool import TaskCompleteTool
 from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
@@ -179,7 +185,12 @@ __all__ = [
     "ProjectStateVerifyTool",
     "QuarantineListTool",
     "EchoTool",
+    "GoalCreateTool",
+    "GoalProgressTool",
     "InfoTool",
+    "KnowledgeAddTool",
+    "KnowledgeSearchTool",
+    "ObservabilityTool",
     "MemoryTool",
     "FileListTool",
     "FileReadTool",
@@ -192,6 +203,7 @@ __all__ = [
     "FileRestoreTool",
     "MemoryUpdateTool",
     "MemoryForgetTool",
+    "TaskCompleteTool",
     "WorkflowHistoryTool",
     "WebSearchTool",
     "WebpageReadTool",

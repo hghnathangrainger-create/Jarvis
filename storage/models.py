@@ -1144,3 +1144,87 @@ class WorkflowCheckpointEntry(Base):
             f"<WorkflowCheckpointEntry workflow_id={self.workflow_id!r} "
             f"step_id={self.step_id!r} status={self.status!r}>"
         )
+
+
+class TraceEntry(Base):
+    """A single user-interaction trace for request tracing.
+
+    One row per user interaction. Tracks the full lifecycle from
+    start to end, including overall status and timing.
+    """
+
+    __tablename__ = "traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    user_input: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="running", server_default="running"
+    )
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    end_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TraceEntry trace_id={self.trace_id!r} "
+            f"status={self.status!r}>"
+        )
+
+
+class TraceSpan(Base):
+    """A single span within a trace — one subsystem call.
+
+    Tracks which subsystem was called, how long it took, and whether
+    it succeeded or failed.
+    """
+
+    __tablename__ = "trace_spans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, index=True
+    )
+    span_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    subsystem: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<TraceSpan trace_id={self.trace_id!r} "
+            f"span_name={self.span_name!r} status={self.status!r}>"
+        )
+
+
+class MetricsSnapshot(Base):
+    """Periodic snapshot of in-memory metrics for durable persistence.
+
+    Each row is a point-in-time JSON dump of the metrics collector's
+    counters, enabling historical analysis.
+    """
+
+    __tablename__ = "metrics_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False, index=True
+    )
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<MetricsSnapshot id={self.id} "
+            f"snapshot_time={self.snapshot_time!r}>"
+        )
