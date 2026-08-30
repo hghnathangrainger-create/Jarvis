@@ -1,17 +1,8 @@
 """
-dashboard package
+dashboard
 
-Local, read-only dashboard for existing durable Jarvis state (Phase 19).
+Web dashboard for the Jarvis AI Operating System.
 
-This package contains only the read-model/query composition layer
-(dashboard.read_model). The tkinter/ttk presentation layer lives in
-ui/dashboard_app.py, and the process entry point is the repository-root
-dashboard.py script - neither is part of this package, mirroring how
-ui/cli.py and main.py sit outside core/.
-
-Does NOT:
-    - Execute, approve, mutate, or schedule anything.
-    - Import CommandRouter, ToolExecutor, the live ApprovalManager,
-      WorkflowEngine, AIReasoningEngine, AIRouter, or WebSearchTool.
-    - Define any UI code.
+Provides a single-page application served by the FastAPI server,
+displaying real-time system state from the existing API endpoints.
 """

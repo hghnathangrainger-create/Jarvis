@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **System Lifecycle management** (`lifecycle/`) — Chapter 29 of the blueprint:
+  - LifecycleManager with startup sequencing (10 steps in dependency order)
+  - Graceful shutdown with signal handlers (SIGINT, SIGTERM)
+  - Crash recovery — detects and resumes interrupted workflows from checkpoints
+  - Safe Mode — GREEN-tier-only operation with manual activation via API
+  - Subsystem status tracking with per-subsystem state (starting/ready/failed/disabled)
+  - Lifecycle event audit trail logged to observability system
+  - `--safe-mode` CLI flag for direct Safe Mode startup
+  - WebSocket broadcasts for SYSTEM_SHUTDOWN and SAFE_MODE_ACTIVATED events
+- **Android Client backend** (`android/`) — server-side support for the Android companion app:
+  - Device registration and tracking with FCM token managementn  - Push notification service via Firebase Cloud Messaging (optional, graceful fallback)
+  - Remote command queue with 5-minute TTL expiry
+  - Command routing: chat → orchestrator, approve/cancel → approval manager, status → system status
+  - AndroidManager facade wrapping device store, notifications, and command queue
+  - 6 API endpoints: register, unregister, devices, command, poll, ack
+  - AndroidTool (GREEN) for CLI: list devices, send notifications, broadcast
+  - WebSocket auto-push for approval requests to Android devices via FCM
+- **Web Dashboard** (`dashboard/`) — real-time system frontend:
+  - Single-page app with 8 sections: Today, Tasks, Memory, Knowledge, Audit, Providers, Goals, Settings
+  - Dark terminal-themed CSS (background #0a0a0f, accent #00d4aa)
+  - Hash-based client-side router (#today, #memory, #goals, etc.)
+  - WebSocket real-time updates with auto-reconnect
+  - JWT authentication with login page
+  - Auto-refresh every 30 seconds as fallback
+  - Collapsible sidebar navigation
+  - No build tools — pure vanilla JS, no npm/Node.js
 - **FastAPI HTTP/WebSocket API server** (`api/` module) for Dashboard and Android Client:
   - JWT authentication with 24-hour token expiry (`api/auth.py`, `api/routes_auth.py`)
   - Chat endpoint — POST `/api/chat` routes messages through the orchestrator
@@ -56,13 +82,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - `config/settings.py` — added api_host, api_port, api_username, api_password, cors_origins
-- `main.py` — added `--server` flag for API server mode, `--voice` flag for voice mode, all subsystem wiring
+- `main.py` — added `--server` flag for API server mode, `--voice` flag for voice mode, `--safe-mode` flag, signal handlers for graceful shutdown, all subsystem wiring
+- `api/routes_system.py` — lifecycle-aware status endpoint, safe-mode/resume endpoints
+- `api/websocket.py` — added broadcast_system_event() for lifecycle events, Android push integration
 - `tools/builtin/__init__.py` — exported all new tools (WindowTool, InputTool, CommandTool, ScreenTool, GoalCreateTool, GoalProgressTool, TaskCompleteTool, ProjectCreateTool, ProjectStatusTool, KnowledgeAddTool, KnowledgeSearchTool, ObservabilityTool, PluginManagerTool, VoiceControlTool)
 - `pyproject.toml` — added fastapi, uvicorn, python-jose, passlib, websockets, Pillow, mss, pytesseract, pyautogui, pygetwindow, psutil, pyttsx3, sounddevice, numpy
 
 ### Tests
 
-- 36 new API tests covering login flow, auth enforcement, chat, memory CRUD, workflows, goals, plugins, CORS, WebSocket, and error handling
+- 38 lifecycle tests covering startup sequence, shutdown, crash recovery, safe mode, signal handlers, and API endpoints
+- 48 Android tests covering models, device store, notifications, command queue, manager integration, and API endpoints
+- 15 dashboard tests covering routes, static files, and API coexistence
+- 36 API tests covering login flow, auth enforcement, chat, memory CRUD, workflows, goals, plugins, CORS, WebSocket, and error handling
 - Computer control tests covering models, InputAutomator, WindowManager, CommandExecutor, ScreenAnalyzer, and all 4 tool wrappers
 - Plugin tests covering loader, sandbox, registry, and PluginManagerTool
 - Project management tests covering ProjectManager and tool wrappers

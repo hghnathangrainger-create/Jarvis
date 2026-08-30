@@ -805,6 +805,38 @@ def build_voice_input_service() -> VoiceInputService:
     return VoiceInputService(provider=provider, enabled=settings.voice_input_enabled)
 
 
+def _register_signal_handlers(orchestrator: JarvisOrchestrator) -> None:
+    """Register signal handlers for graceful shutdown.
+
+    SIGINT and SIGTERM trigger a graceful shutdown sequence via the
+    LifecycleManager.
+
+    Args:
+        orchestrator: The wired orchestrator (used for cleanup).
+    """
+    import signal
+
+    def _shutdown_handler(signum: int, frame: Any) -> None:
+        """Handle shutdown signals."""
+        sig_name = signal.Signals(signum).name
+        print(f"\nReceived {sig_name} — shutting down gracefully...")
+
+        try:
+            from api.routes_system import get_lifecycle_manager
+
+            lifecycle_mgr = get_lifecycle_manager()
+            if lifecycle_mgr is not None:
+                lifecycle_mgr.shutdown_system()
+        except Exception as exc:
+            print(f"Shutdown hook error: {exc}")
+
+        print("Jarvis stopped.")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
+
 class AlreadyRunningError(Exception):
     """Raised when another execution-capable Jarvis process already holds
     the OS execution lock for this exact database (Approval-to-Resume
@@ -1559,13 +1591,23 @@ def _run_api_server(orchestrator: JarvisOrchestrator, settings: "Settings") -> N
     import uvicorn
 
     from api.app import create_app
+    from api.routes_system import set_lifecycle_manager
+    from android.manager import AndroidManager
+    from lifecycle.manager import LifecycleManager
 
-    app = create_app(orchestrator=orchestrator)
+    # Create and start the lifecycle manager.
+    lifecycle_mgr = LifecycleManager()
+    lifecycle_mgr.start_system(orchestrator=orchestrator)
+    set_lifecycle_manager(lifecycle_mgr)
+
+    android_manager = AndroidManager(orchestrator=orchestrator)
+    app = create_app(orchestrator=orchestrator, android_manager=android_manager)
     host = settings.api_host
     port = settings.api_port
 
     print(f"Starting Jarvis API server on {host}:{port}")
     print(f"API docs: http://{host}:{port}/docs")
+    print(f"Dashboard: http://{host}:{port}/")
     uvicorn.run(app, host=host, port=port)
 
 
@@ -1597,6 +1639,11 @@ def main() -> None:
         action="store_true",
         help="Start the HTTP/WebSocket API server instead of the CLI.",
     )
+    parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        help="Start Jarvis in Safe Mode (GREEN-tier actions only).",
+    )
     args = parser.parse_args()
 
     try:
@@ -1607,6 +1654,20 @@ def main() -> None:
 
     try:
         configure_console_logging(load_settings())
+
+        # Register signal handlers for graceful shutdown.
+        _register_signal_handlers(orchestrator)
+
+        if args.safe_mode:
+            # Start in Safe Mode directly.
+            from lifecycle.manager import LifecycleManager
+            from api.routes_system import set_lifecycle_manager
+
+            lifecycle_mgr = LifecycleManager()
+            lifecycle_mgr.start_system(orchestrator=orchestrator)
+            lifecycle_mgr.enter_safe_mode("Started in Safe Mode via --safe-mode flag")
+            set_lifecycle_manager(lifecycle_mgr)
+            print("Jarvis started in Safe Mode. Only GREEN-tier actions permitted.")
 
         if args.server:
             _run_api_server(orchestrator, load_settings())

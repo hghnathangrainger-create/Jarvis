@@ -104,6 +104,10 @@ def app(mock_orchestrator, mock_memory_manager):
     os.environ["API_PASSWORD"] = "testpass"
 
     from api.app import create_app
+    from api.routes_system import set_lifecycle_manager
+
+    # Clear any lifecycle manager set by other test modules.
+    set_lifecycle_manager(None)
 
     mock_orchestrator._memory_manager = mock_memory_manager
     app = create_app(orchestrator=mock_orchestrator)

@@ -180,6 +180,7 @@ from tools.builtin.task_complete_tool import TaskCompleteTool
 from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
+from tools.builtin.android_tool import AndroidTool
 
 __all__ = [
     "ApprovalHistoryTool",
@@ -229,4 +230,5 @@ __all__ = [
     "ScheduleDisableTool",
     "ScheduleVerifyEnabledStateTool",
     "ScheduleShowEnabledStateTool",
+    "AndroidTool",
 ]

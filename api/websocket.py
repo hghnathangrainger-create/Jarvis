@@ -82,6 +82,9 @@ class ConnectionManager:
         then sent to every connected client. Failed sends silently
         remove the client.
 
+        Additionally, if the event is an approval request, it is
+        automatically pushed to all registered Android devices via FCM.
+
         Args:
             event: The event dict to broadcast. Should include at
                 minimum "type", "timestamp", and "data" keys.
@@ -102,6 +105,11 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect(conn)
 
+        # Push approval requests to Android devices via FCM.
+        event_type = event.get("type", "")
+        if event_type in ("approval_request", "workflow_step_complete"):
+            self._push_to_android(event)
+
     @property
     def active_connections(self) -> int:
         """Return the number of active connections."""
@@ -111,6 +119,52 @@ class ConnectionManager:
     def buffered_events(self) -> int:
         """Return the number of buffered events."""
         return len(self._event_buffer)
+
+    def _push_to_android(self, event: dict[str, Any]) -> None:
+        """Push an event to registered Android devices via FCM.
+
+        This is a non-blocking, best-effort operation. If the Android
+        manager is not available or Firebase is not configured, the
+        push is silently skipped.
+
+        Args:
+            event: The event to push.
+        """
+        try:
+            from api.app import get_android_manager
+
+            android_mgr = get_android_manager()
+            if android_mgr is None:
+                return
+
+            event_type = event.get("type", "")
+            if event_type == "approval_request":
+                data = event.get("data", {})
+                android_mgr.broadcast_approval_request(
+                    request_id=data.get("request_id", ""),
+                    action=data.get("action", ""),
+                    details=data.get("details", ""),
+                    tier=data.get("tier", "yellow"),
+                )
+            elif event_type == "workflow_step_complete":
+                data = event.get("data", {})
+                android_mgr.broadcast_task_completion(
+                    task_name=data.get("task_name", "workflow"),
+                    status=data.get("status", "completed"),
+                )
+        except Exception as exc:
+            logger.debug("Android push failed (non-critical): %s", exc)
+
+    async def broadcast_system_event(self, event: dict[str, Any]) -> None:
+        """Broadcast a system lifecycle event (shutdown, safe-mode, etc.).
+
+        This is a convenience method for lifecycle manager to broadcast
+        SYSTEM_SHUTDOWN and SAFE_MODE_ACTIVATED events.
+
+        Args:
+            event: The lifecycle event to broadcast.
+        """
+        await self.broadcast(event)
 
 
 # Module-level singleton — created once at import time.

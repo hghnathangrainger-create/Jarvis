@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jarvis — Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/static/css/style.css">
+</head>
+<body>
+    <div class="app" id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-logo">&#9881; Jarvis</span>
+                <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">&#9776;</button>
+            </div>
+            <nav class="sidebar-nav" id="sidebarNav">
+                <div class="nav-item active" data-section="today">
+                    <span class="nav-icon">&#9719;</span>
+                    <span class="nav-label">Today</span>
+                </div>
+                <div class="nav-item" data-section="tasks">
+                    <span class="nav-icon">&#9776;</span>
+                    <span class="nav-label">Tasks</span>
+                </div>
+                <div class="nav-item" data-section="memory">
+                    <span class="nav-icon">&#9997;</span>
+                    <span class="nav-label">Memory</span>
+                </div>
+                <div class="nav-item" data-section="knowledge">
+                    <span class="nav-icon">&#9733;</span>
+                    <span class="nav-label">Knowledge</span>
+                </div>
+                <div class="nav-item" data-section="audit">
+                    <span class="nav-icon">&#9881;</span>
+                    <span class="nav-label">Audit Log</span>
+                </div>
+                <div class="nav-item" data-section="providers">
+                    <span class="nav-icon">&#9889;</span>
+                    <span class="nav-label">AI Providers</span>
+                </div>
+                <div class="nav-item" data-section="goals">
+                    <span class="nav-icon">&#10003;</span>
+                    <span class="nav-label">Goals</span>
+                </div>
+                <div class="nav-item" data-section="settings">
+                    <span class="nav-icon">&#9881;</span>
+                    <span class="nav-label">Settings</span>
+                </div>
+            </nav>
+            <div class="sidebar-footer">Jarvis v0.3.0</div>
+        </aside>
+
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <span class="header-title" id="pageTitle">Today</span>
+            </div>
+            <div class="header-right">
+                <div class="connection-status">
+                    <div class="status-dot" id="wsStatus"></div>
+                    <span id="wsLabel">Connecting...</span>
+                </div>
+                <span class="uptime" id="uptime"></span>
+                <button class="btn btn-sm" id="logoutBtn">Logout</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main" id="mainContent">
+
+            <!-- TODAY -->
+            <div class="section active" id="section-today">
+                <div class="section-header">
+                    <h2 class="section-title">Today</h2>
+                </div>
+                <div class="grid-4" id="todayStats"></div>
+                <div class="grid-2" style="margin-top: 16px;">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Active Workflows</span>
+                            <span class="badge badge-green" id="workflowCount">0</span>
+                        </div>
+                        <div id="activeWorkflows">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">&#9719;</div>
+                                <div class="empty-state-text">No active workflows</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Recent Events</span>
+                        </div>
+                        <div class="event-list" id="recentEvents">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">&#9881;</div>
+                                <div class="empty-state-text">No events yet</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TASKS -->
+            <div class="section" id="section-tasks">
+                <div class="section-header">
+                    <h2 class="section-title">Tasks &amp; Workflows</h2>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Workflow Progress</span>
+                    </div>
+                    <div id="taskWorkflows">
+                        <div class="empty-state">
+                            <div class="empty-state-text">No active workflows</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MEMORY -->
+            <div class="section" id="section-memory">
+                <div class="section-header">
+                    <h2 class="section-title">Memory</h2>
+                    <button class="btn btn-primary" id="addMemoryBtn">+ Add Memory</button>
+                </div>
+                <div class="input-group">
+                    <input type="search" id="memorySearch" placeholder="Search memories..." style="flex:1;">
+                    <select id="memoryCategory">
+                        <option value="">All categories</option>
+                        <option value="general">General</option>
+                        <option value="project">Project</option>
+                        <option value="personal">Personal</option>
+                    </select>
+                </div>
+                <div class="card" id="memoryList">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">&#9997;</div>
+                        <div class="empty-state-text">No memories found</div>
+                    </div>
+                </div>
+                <!-- Add Memory Modal (inline) -->
+                <div id="addMemoryForm" style="display:none; margin-top:16px;">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">New Memory</span>
+                            <button class="btn btn-sm" id="cancelMemoryBtn">Cancel</button>
+                        </div>
+                        <textarea id="memoryContent" placeholder="What should Jarvis remember?" rows="3"></textarea>
+                        <div class="input-group" style="margin-top:8px;">
+                            <select id="memoryNewCategory">
+                                <option value="general">General</option>
+                                <option value="project">Project</option>
+                                <option value="personal">Personal</option>
+                            </select>
+                            <button class="btn btn-primary" id="saveMemoryBtn">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- KNOWLEDGE -->
+            <div class="section" id="section-knowledge">
+                <div class="section-header">
+                    <h2 class="section-title">Knowledge Library</h2>
+                </div>
+                <div class="input-group">
+                    <input type="search" id="knowledgeSearch" placeholder="Search knowledge..." style="flex:1;">
+                </div>
+                <div class="card" id="knowledgeList">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">&#9733;</div>
+                        <div class="empty-state-text">No knowledge entries found</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AUDIT LOG -->
+            <div class="section" id="section-audit">
+                <div class="section-header">
+                    <h2 class="section-title">Audit Log</h2>
+                </div>
+                <div class="input-group">
+                    <select id="auditFilter">
+                        <option value="">All subsystems</option>
+                        <option value="tool_call">Tool calls</option>
+                        <option value="ai_call">AI calls</option>
+                        <option value="http_request">HTTP requests</option>
+                        <option value="chat_request">Chat</option>
+                    </select>
+                    <input type="search" id="auditSearch" placeholder="Filter events..." style="flex:1;">
+                </div>
+                <div class="card">
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Source</th>
+                                    <th>Action</th>
+                                    <th>Outcome</th>
+                                    <th>Detail</th>
+                                </tr>
+                            </thead>
+                            <tbody id="auditLogBody">
+                                <tr><td colspan="5" class="empty-state-text" style="padding:20px; text-align:center;">No audit entries</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI PROVIDERS -->
+            <div class="section" id="section-providers">
+                <div class="section-header">
+                    <h2 class="section-title">AI Providers</h2>
+                </div>
+                <div class="grid-3" id="providerCards">
+                    <div class="empty-state">
+                        <div class="empty-state-text">Loading providers...</div>
+                    </div>
+                </div>
+                <div class="card" style="margin-top:16px;">
+                    <div class="card-header">
+                        <span class="card-title">Metrics</span>
+                    </div>
+                    <div id="metricsContent">
+                        <div class="empty-state">
+                            <div class="empty-state-text">No metrics available</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GOALS -->
+            <div class="section" id="section-goals">
+                <div class="section-header">
+                    <h2 class="section-title">Goals</h2>
+                    <button class="btn btn-primary" id="addGoalBtn">+ New Goal</button>
+                </div>
+                <div id="goalList">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">&#10003;</div>
+                        <div class="empty-state-text">No active goals</div>
+                    </div>
+                </div>
+                <div id="addGoalForm" style="display:none; margin-top:16px;">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">New Goal</span>
+                            <button class="btn btn-sm" id="cancelGoalBtn">Cancel</button>
+                        </div>
+                        <input type="text" id="goalTitle" placeholder="Goal title" style="width:100%; margin-bottom:8px;">
+                        <textarea id="goalDescription" placeholder="Description (optional)" rows="2"></textarea>
+                        <div class="input-group" style="margin-top:8px;">
+                            <select id="goalPriority">
+                                <option value="low">Low</option>
+                                <option value="medium" selected>Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                            </select>
+                            <button class="btn btn-primary" id="saveGoalBtn">Create</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SETTINGS -->
+            <div class="section" id="section-settings">
+                <div class="section-header">
+                    <h2 class="section-title">Settings</h2>
+                </div>
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">System Status</span>
+                        </div>
+                        <div id="settingsStatus">
+                            <div class="empty-state-text">Loading...</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Plugins</span>
+                        </div>
+                        <div id="settingsPlugins">
+                            <div class="empty-state-text">Loading plugins...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/dashboard/static/js/app.js"></script>
+</body>
+</html>
