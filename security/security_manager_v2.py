@@ -35,6 +35,7 @@ from security.models import (
 )
 from security.injection_detector import InjectionDetector
 from security.approval_store import ApprovalStore
+from security.security_manager import SecurityManager
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,8 @@ class SecurityManagerV2:
         self._log_all_green = log_all_green
         self._security_events: list[SecurityEvent] = []
         self._injection_stats: dict[str, int] = {}
+        # Reuse a single legacy SecurityManager instance
+        self._legacy_manager = SecurityManager()
 
     # -------------------------------------------------------------------
     # Action classification (delegates to existing SecurityManager logic)
@@ -87,10 +90,7 @@ class SecurityManagerV2:
         Returns:
             The SecurityLevel (GREEN, YELLOW, or RED).
         """
-        from security.security_manager import SecurityManager
-
-        legacy = SecurityManager()
-        decision = legacy.classify_action(action)
+        decision = self._legacy_manager.classify_action(action)
         return SecurityLevel(decision.tier.value)
 
     # -------------------------------------------------------------------

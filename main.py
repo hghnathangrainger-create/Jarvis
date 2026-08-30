@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from ai.cost_tracker import CostTracker
 from ai.prompt_builder import PromptBuilder, audit_suspicious_injection
@@ -652,7 +653,7 @@ def build_orchestrator() -> JarvisOrchestrator:
 
     # Cost tracking: records every AI API call with provider, model,
     # tokens, and estimated cost. Wired into the AI router below.
-    cost_tracker = CostTracker(settings.database_path)
+    cost_tracker = CostTracker()
 
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
     # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and
