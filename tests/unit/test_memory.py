@@ -213,3 +213,167 @@ def test_initialize_is_idempotent(tmp_path) -> None:
     initialize_database(engine)
     # Second call must be a no-op, not an error.
     initialize_database(engine)
+
+
+# --- ChromaDB vector store + semantic search ---------------------------------
+
+chromadb = pytest.importorskip("chromadb")
+
+
+@pytest.fixture()
+def vector_store(request):
+    """Build a fresh in-memory VectorStore with a unique collection name."""
+    from memory.vector_store import VectorStore
+
+    # ChromaDB's in-memory Client shares state within a process, so each
+    # test gets its own collection to avoid cross-test pollution.
+    # ChromaDB enforces 3-63 alphanumeric/underscore/hyphen characters.
+    import hashlib
+    short_hash = hashlib.md5(request.node.name.encode()).hexdigest()[:8]
+    unique_name = f"t_{short_hash}"
+    return VectorStore(collection_name=unique_name)
+
+
+@pytest.fixture()
+def manager_with_vector(store, vector_store):
+    """MemoryManager backed by both SQLite and ChromaDB."""
+    from memory.memory_manager import MemoryManager
+
+    return MemoryManager(store, vector_store=vector_store)
+
+
+# --- VectorStore unit tests -------------------------------------------------
+
+
+def test_vector_store_add_and_count(vector_store) -> None:
+    vector_store.add("hello world", metadata={"category": "general"}, id="1")
+    assert vector_store.count() == 1
+
+
+def test_vector_store_search_returns_results(vector_store) -> None:
+    vector_store.add("I love Python programming", id="1")
+    vector_store.add("the weather is nice today", id="2")
+    vector_store.add("Python is a great language", id="3")
+
+    results = vector_store.search("Python coding", top_k=2)
+    assert len(results) == 2
+    # All results should have the expected keys.
+    for r in results:
+        assert "id" in r
+        assert "text" in r
+        assert "metadata" in r
+        assert "distance" in r
+
+
+def test_vector_store_search_empty_store(vector_store) -> None:
+    results = vector_store.search("anything", top_k=5)
+    assert results == []
+
+
+def test_vector_store_search_empty_query(vector_store) -> None:
+    vector_store.add("something", id="1")
+    assert vector_store.search("") == []
+    assert vector_store.search("   ") == []
+
+
+def test_vector_store_delete(vector_store) -> None:
+    vector_store.add("hello", id="1")
+    assert vector_store.count() == 1
+    vector_store.delete("1")
+    assert vector_store.count() == 0
+
+
+def test_vector_store_persist_directory(tmp_path) -> None:
+    from memory.vector_store import VectorStore
+
+    vs = VectorStore(
+        collection_name="persist_test",
+        persist_directory=str(tmp_path / "chroma"),
+    )
+    vs.add("persistent memory", id="1")
+    assert vs.count() == 1
+
+
+# --- Manager + vector store integration tests -------------------------------
+
+
+def test_manager_save_indexes_to_vector_store(manager_with_vector) -> None:
+    record = manager_with_vector.save(
+        "I prefer dark mode in all apps", category="preference"
+    )
+    assert record is not None
+    # The vector store should have the same document.
+    vs = manager_with_vector._vector_store
+    assert vs.count() == 1
+    results = vs.search("dark mode", top_k=1)
+    assert len(results) == 1
+    assert results[0]["text"] == "I prefer dark mode in all apps"
+    assert results[0]["metadata"]["category"] == "preference"
+
+
+def test_semantic_search_returns_relevant_memories(manager_with_vector) -> None:
+    manager_with_vector.save("I love cooking Italian pasta", category="personal")
+    manager_with_vector.save("My project deadline is Friday", category="project")
+    manager_with_vector.save("Learning to make risotto", category="personal")
+
+    results = manager_with_vector.semantic_search("Italian food recipes", top_k=2)
+    assert len(results) <= 2
+    # The cooking/food memories should appear.
+    contents = [r.content for r in results]
+    assert any("Italian" in c for c in contents)
+
+
+def test_semantic_search_empty_store(manager_with_vector) -> None:
+    results = manager_with_vector.semantic_search("anything")
+    assert results == []
+
+
+def test_semantic_search_empty_query(manager_with_vector) -> None:
+    manager_with_vector.save("some memory")
+    results = manager_with_vector.semantic_search("")
+    assert results == []
+
+
+def test_semantic_search_respects_top_k(manager_with_vector) -> None:
+    for i in range(10):
+        manager_with_vector.save(f"memory about cats and kittens {i}")
+    results = manager_with_vector.semantic_search("cats", top_k=3)
+    assert len(results) <= 3
+
+
+def test_forget_removes_from_vector_store(manager_with_vector) -> None:
+    record = manager_with_vector.save("test memory for deletion")
+    assert manager_with_vector._vector_store.count() == 1
+    manager_with_vector.forget(record.id)
+    assert manager_with_vector._vector_store.count() == 0
+
+
+def test_manager_without_vector_store_semantic_search_raises(store) -> None:
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    with pytest.raises(RuntimeError, match="requires chromadb"):
+        manager.semantic_search("anything")
+
+
+def test_manager_without_vector_store_save_works(store) -> None:
+    """When no vector store is configured, save still works via SQLite."""
+    from memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(store)
+    record = manager.save("just sqlite, no vectors")
+    assert record is not None
+    assert record.content == "just sqlite, no vectors"
+    assert manager.count() == 1
+
+
+def test_semantic_search_with_category_filter(manager_with_vector) -> None:
+    manager_with_vector.save("Python tips and tricks", category="project")
+    manager_with_vector.save("Cooking with Python beans", category="personal")
+    manager_with_vector.save("Advanced Python patterns", category="project")
+
+    # Search with a category filter.
+    results = manager_with_vector._vector_store.search(
+        "Python", top_k=5, where={"category": "project"}
+    )
+    assert all(r["metadata"].get("category") == "project" for r in results)

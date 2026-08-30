@@ -143,7 +143,7 @@ _EXPECTED_FIELD_LABELS: dict[str, str] = {
 #: The one Settings field deliberately never shown by name+value - a
 #: real secret/credential, unlike every other field.
 _DELIBERATELY_EXCLUDED_SECRET_FIELDS: frozenset[str] = frozenset(
-    {"anthropic_api_key"}
+    {"anthropic_api_key", "openai_api_key", "google_api_key"}
 )
 
 
@@ -217,9 +217,9 @@ def test_no_voice_field_is_or_resembles_a_secret() -> None:
         )
     )
     lowered = result.output.lower()
-    # "api key: " (with trailing colon+space) appears exactly once, for
-    # the real Anthropic key line - never duplicated for a voice field.
-    assert lowered.count("api key: ") == 1
+    # "api key: " (with trailing colon+space) appears exactly three times,
+    # for Anthropic, OpenAI, and Google - never duplicated for a voice field.
+    assert lowered.count("api key: ") == 3
     for forbidden in ("secret", "credential"):
         assert forbidden not in lowered
 

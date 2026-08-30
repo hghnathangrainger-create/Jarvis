@@ -512,8 +512,14 @@ def build_orchestrator() -> JarvisOrchestrator:
     # None-when-disabled convention.
     tool_selection_router: AIRouter | None = None
     if settings.ai_reasoning_enabled:
+        from ai.providers.gemini_provider import GeminiProvider
+        from ai.providers.openai_provider import OpenAIProvider
+
+        claude_provider = ClaudeProvider(settings)
+        openai_provider = OpenAIProvider(settings.openai_api_key)
+        gemini_provider = GeminiProvider(settings.google_api_key)
         ai_router = AIRouter(
-            provider=ClaudeProvider(settings),
+            providers=(claude_provider, openai_provider, gemini_provider),
             # Phase 7, Batch 5A: a suspicious injection scan is now audited
             # through the same real logger, closing the gap where a
             # detected pattern was never reported anywhere.

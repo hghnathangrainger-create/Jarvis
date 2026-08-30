@@ -1012,15 +1012,22 @@ def test_update_focus_context_ids_are_not_populated_on_flat_structured_plan() ->
     assert not hasattr(outcome.workflow_plan, "context_ids_supplied")
 
 
-def test_no_retry_or_replan_fields_on_workflow_plan_steps() -> None:
+def test_no_replan_field_on_workflow_plan_steps() -> None:
+    """max_replans and retry_count remain absent; max_retries is now a
+    legitimate DAG workflow field (defaults to 0)."""
     import dataclasses
 
     from planner.plan_models import PlanStep
 
     field_names = {f.name for f in dataclasses.fields(PlanStep)}
-    assert "max_retries" not in field_names
     assert "max_replans" not in field_names
     assert "retry_count" not in field_names
+    # max_retries is now present as a DAG workflow extension, defaulting to 0.
+    step = PlanStep(
+        number=1, description="test", action="test",
+        tier=SecurityTier.GREEN, reason="test",
+    )
+    assert step.max_retries == 0
 
 
 # ---------------------------------------------------------------------------

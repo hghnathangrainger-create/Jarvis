@@ -92,13 +92,17 @@ class ConfigTool(BaseTool):
             "set"/"not set" - never its value, a masked form, its
             length, or any hash/fingerprint of it.
         """
-        key_status = "set" if self._settings.anthropic_api_key.strip() else "not set"
+        anthropic_status = "set" if self._settings.anthropic_api_key.strip() else "not set"
+        openai_status = "set" if self._settings.openai_api_key.strip() else "not set"
+        google_status = "set" if self._settings.google_api_key.strip() else "not set"
         lines = (
             "Jarvis configuration:",
             f"  AI model: {self._settings.ai_model}",
             f"  AI max tokens: {self._settings.ai_max_tokens}",
             f"  AI reasoning enabled: {self._settings.ai_reasoning_enabled}",
-            f"  Anthropic API key: {key_status}",
+            f"  Anthropic API key: {anthropic_status}",
+            f"  OpenAI API key: {openai_status}",
+            f"  Google API key: {google_status}",
             f"  Database path: {self._settings.database_path}",
             f"  Log level: {self._settings.log_level}",
             f"  Approval timeout (seconds): {self._settings.approval_timeout_seconds}",

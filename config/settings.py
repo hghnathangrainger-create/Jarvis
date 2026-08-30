@@ -121,6 +121,8 @@ class Settings:
     voice_provider: str = "none"
     voice_input_enabled: bool = False
     voice_input_provider: str = "none"
+    openai_api_key: str = ""
+    google_api_key: str = ""
 
 
 def _get_required(name: str) -> str:
@@ -350,4 +352,6 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         voice_input_provider=_get_choice(
             "VOICE_INPUT_PROVIDER", "none", ("none", "fake")
         ),
+        openai_api_key=_get_optional("OPENAI_API_KEY", ""),
+        google_api_key=_get_optional("GOOGLE_API_KEY", ""),
     )

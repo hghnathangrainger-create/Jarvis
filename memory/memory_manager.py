@@ -20,7 +20,12 @@ storage separate keeps both simple and independently testable.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from memory.episodic_memory import EpisodicMemoryStore, MemoryRecord
+from memory.vector_store import VectorStore
 
 #: Core phrase that signals the user does not want an exchange stored.
 #: Matched case-insensitively as a substring, so natural variations such as
@@ -35,13 +40,20 @@ class MemoryManager:
         _store: The episodic memory store used for persistence.
     """
 
-    def __init__(self, store: EpisodicMemoryStore) -> None:
+    def __init__(
+        self,
+        store: EpisodicMemoryStore,
+        vector_store: VectorStore | None = None,
+    ) -> None:
         """Initialise the manager with an episodic memory store.
 
         Args:
             store: The store used to persist and retrieve memories.
+            vector_store: Optional ChromaDB-backed vector store for semantic
+                search. When None, semantic_search() raises an error.
         """
         self._store = store
+        self._vector_store = vector_store
 
     def save(
         self,
@@ -74,12 +86,32 @@ class MemoryManager:
         if self.should_skip(text):
             return None
 
-        return self._store.save(
+        record = self._store.save(
             content=text,
             source=source,
             session_id=session_id,
             category=category,
         )
+
+        # Mirror to the vector store for semantic search.
+        if self._vector_store is not None and self._vector_store.available:
+            try:
+                self._vector_store.add(
+                    text=text,
+                    metadata={
+                        "memory_id": record.id,
+                        "category": record.category,
+                        "source": record.source,
+                        "created_at": record.created_at.isoformat(),
+                    },
+                    id=str(record.id),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to index memory %d in vector store", record.id
+                )
+
+        return record
 
     def list_recent(
         self, limit: int = 20, *, category: str | None = None
@@ -214,13 +246,65 @@ class MemoryManager:
     def forget(self, memory_id: int) -> bool:
         """Delete a single memory by id.
 
+        Also removes the memory from the vector store if one is configured.
+
         Args:
             memory_id: The id of the memory to forget.
 
         Returns:
             True if a memory was deleted, False if no memory had that id.
         """
-        return self._store.delete(memory_id)
+        deleted = self._store.delete(memory_id)
+        if deleted and self._vector_store is not None and self._vector_store.available:
+            try:
+                self._vector_store.delete(id=str(memory_id))
+            except Exception:
+                logger.warning(
+                    "Failed to remove memory %d from vector store", memory_id
+                )
+        return deleted
+
+    def semantic_search(
+        self, query: str, top_k: int = 5
+    ) -> list[MemoryRecord]:
+        """Return memories ranked by semantic similarity to the query.
+
+        Queries the ChromaDB vector store and looks up each matching
+        memory from SQLite to return full MemoryRecord objects.
+
+        Args:
+            query: The natural-language query to search for.
+            top_k: Maximum number of results. Defaults to 5.
+
+        Returns:
+            A list of MemoryRecord objects ordered by relevance (most
+            similar first). Returns an empty list if no vector store is
+            configured or if no results match.
+
+        Raises:
+            RuntimeError: If no vector store is configured.
+        """
+        if self._vector_store is None or not self._vector_store.available:
+            raise RuntimeError(
+                "Semantic search requires chromadb to be installed and a "
+                "vector store to be configured."
+            )
+
+        results = self._vector_store.search(query, top_k=top_k)
+        records: list[MemoryRecord] = []
+        for result in results:
+            # The vector store stores the memory_id in metadata.
+            meta = result.get("metadata") or {}
+            memory_id_str = meta.get("memory_id") or result.get("id")
+            if memory_id_str is not None:
+                try:
+                    memory_id = int(memory_id_str)
+                except (ValueError, TypeError):
+                    continue
+                record = self._store.get_by_id(memory_id)
+                if record is not None:
+                    records.append(record)
+        return records
 
     @staticmethod
     def should_skip(content: str) -> bool:

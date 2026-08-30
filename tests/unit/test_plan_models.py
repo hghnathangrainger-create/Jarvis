@@ -185,20 +185,27 @@ def test_input_from_previous_step_is_a_plain_bool_not_a_reference() -> None:
 # --- Explicit absence of out-of-scope fields ---------------------------------
 
 
-def test_plan_step_has_no_depends_on_field() -> None:
-    fields = {f.name for f in dataclasses.fields(PlanStep)}
-    assert "depends_on" not in fields
+def test_plan_step_has_depends_on_field() -> None:
+    """DAG workflow extension: depends_on defaults to empty list."""
+    step = _legacy_step()
+    assert step.depends_on == []
+    step_with_deps = dataclasses.replace(step, depends_on=["step_1"])
+    assert step_with_deps.depends_on == ["step_1"]
 
 
-def test_plan_step_has_no_retry_fields() -> None:
-    fields = {f.name for f in dataclasses.fields(PlanStep)}
-    assert "retry_count" not in fields
-    assert "max_retries" not in fields
+def test_plan_step_has_retry_fields() -> None:
+    """DAG workflow extension: max_retries defaults to 0."""
+    step = _legacy_step()
+    assert step.max_retries == 0
+    assert step.on_failure == "abort"
 
 
-def test_plan_step_has_no_on_failure_field() -> None:
-    fields = {f.name for f in dataclasses.fields(PlanStep)}
-    assert "on_failure" not in fields
+def test_plan_step_has_on_failure_field() -> None:
+    """DAG workflow extension: on_failure defaults to 'abort'."""
+    step = _legacy_step()
+    assert step.on_failure == "abort"
+    step_skip = dataclasses.replace(step, on_failure="skip")
+    assert step_skip.on_failure == "skip"
 
 
 def test_plan_step_has_no_status_field() -> None:
@@ -208,7 +215,8 @@ def test_plan_step_has_no_status_field() -> None:
     assert "status" not in fields
 
 
-def test_plan_step_has_exactly_the_approved_field_set() -> None:
+def test_plan_step_has_the_approved_field_set() -> None:
+    """PlanStep includes both original fields and DAG workflow extensions."""
     fields = {f.name for f in dataclasses.fields(PlanStep)}
     assert fields == {
         "number",
@@ -225,6 +233,15 @@ def test_plan_step_has_exactly_the_approved_field_set() -> None:
         "requires_verified_predecessor",
         "verification_field_name",
         "verification_expected_value",
+        # DAG workflow extensions (N-step execution with dependency
+        # resolution). All default to values that leave every existing
+        # PlanStep unchanged.
+        "step_id",
+        "depends_on",
+        "on_failure",
+        "max_retries",
+        "compensate",
+        "compensate_input",
     }
 
 

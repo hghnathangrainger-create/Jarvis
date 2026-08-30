@@ -128,6 +128,64 @@ class PlanStep:
     verification_field_name: str | None = None
     verification_expected_value: str | None = None
 
+    # --- DAG workflow extensions (Phase: N-step DAG Execution) ----------
+    # These fields are all optional with backward-compatible defaults.
+    # Existing two-step sequential workflows never set them and behaviour
+    # is byte-for-byte unchanged.
+
+    step_id: str | None = None
+    """Stable, unique identifier for this step within its plan.
+
+    Used by ``depends_on`` to declare inter-step dependencies.  When
+    None the engine auto-generates one from the step number (e.g.
+    ``"step_1"``), preserving full backward compatibility with every
+    existing plan that never sets this field.
+    """
+
+    depends_on: list[str] = field(default_factory=list)
+    """List of ``step_id`` values that must complete before this step
+    may run.  An empty list (the default) means this step has no
+    predecessors beyond what ``input_from_previous_step`` already
+    expresses, and it may execute as soon as all its literal inputs
+    are available.  The engine resolves the full DAG at run-time and
+    runs independent steps in parallel.
+    """
+
+    on_failure: str = "abort"
+    """What to do when this step fails after exhausting retries.
+
+    Supported values:
+        "abort"  - stop the entire workflow (default, matches Phase 15
+                   STOP-only behaviour).
+        "skip"   - mark this step as SKIPPED and continue with
+                   dependents that only require completed *or* skipped
+                   predecessors (future extension).
+        "retry"  - retry the step up to ``max_retries`` times before
+                   falling back to "abort".
+    """
+
+    max_retries: int = 0
+    """Maximum number of automatic retries when ``on_failure`` is
+    ``"retry"``.  Ignored for every other ``on_failure`` value.
+    """
+
+    compensate: str | None = None
+    """Optional tool_name to call as a compensating (undo) action when
+    a later step in the workflow fails and rollback is triggered.
+
+    The engine calls ``compensate`` via ``ToolExecutor.execute()`` with
+    the same security gate every other step uses.  Compensation actions
+    run in **reverse** topological order (last-compensated-first).  When
+    None, no compensation is performed for this step.
+    """
+
+    compensate_input: dict[str, object] = field(default_factory=dict)
+    """Static input passed to the ``compensate`` tool.  The engine may
+    extend this with runtime data (e.g. the step's own output metadata)
+    following the same narrow propagation rules the rest of the engine
+    already enforces.
+    """
+
     @property
     def is_blocked(self) -> bool:
         """Whether this step is blocked by default.

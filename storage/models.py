@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -1108,4 +1108,39 @@ class ScheduleCompoundWorkflowProgress(Base):
         return (
             f"<ScheduleCompoundWorkflowProgress workflow_id={self.workflow_id!r} "
             f"overall_status={self.overall_status!r}>"
+        )
+
+
+class WorkflowCheckpointEntry(Base):
+    """Per-step checkpoint for DAG workflow crash recovery.
+
+    One row per (workflow_id, step_id) tracking that step's progress.
+    Updated in-place as the step progresses through pending -> running ->
+    completed/failed/skipped.
+    """
+
+    __tablename__ = "workflow_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "step_id", name="uq_checkpoint_wf_step"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    step_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    tool_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retries_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WorkflowCheckpointEntry workflow_id={self.workflow_id!r} "
+            f"step_id={self.step_id!r} status={self.status!r}>"
         )

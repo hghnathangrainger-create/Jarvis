@@ -5,7 +5,11 @@ AI request routing for the Jarvis AI Operating System.
 
 Responsibilities:
     - Accept a request for AI assistance and route it to a provider.
-    - In Phase 1, always route to the Claude provider.
+    - Route through available providers in order, falling back to the next
+      on retryable errors (connection, timeout, and API errors).
+    - Parse model strings in "provider:model" format (e.g. "openai:gpt-4o")
+      and route directly to the named provider.
+    - Handle "auto" model strings by trying providers in configured order.
     - Build the structured prompt, invoke the provider, validate the response,
       and log every call through Observability.
 
@@ -36,25 +40,71 @@ _SOURCE = "ai_router"
 _ACTION_TYPE = "ai_call"
 
 
-class AIRouter:
-    """Routes AI requests to a provider and logs every call.
+def parse_model_string(
+    model: str, providers: tuple[AIProvider, ...]
+) -> tuple[AIProvider, str]:
+    """Parse a model string into a provider and model identifier.
 
-    In Phase 1 the routing policy is intentionally simple: every request is
-    sent to the single configured Claude provider. The interface is designed
-    so that multi-provider routing can be added later without changing callers.
+    Supported formats:
+        - "provider:model" (e.g. "openai:gpt-4o") routes directly to
+          the named provider, using the part after the colon as the model.
+        - "auto" returns the first provider, letting the caller fall
+          back through providers.
+        - Any other string is treated as a plain model name for the
+          first provider (legacy behaviour).
+
+    Args:
+        model: The model string to parse.
+        providers: The ordered tuple of available providers.
+
+    Returns:
+        A tuple of (provider, model_name) where provider is the matched
+        provider and model_name is the model identifier to pass to it.
+    """
+    if ":" in model:
+        provider_name, model_name = model.split(":", 1)
+        provider_name = provider_name.strip().lower()
+        model_name = model_name.strip()
+        for provider in providers:
+            if provider.name == provider_name:
+                return provider, model_name
+        raise AIProviderError(
+            f"No provider named '{provider_name}' is configured. "
+            f"Available providers: {[p.name for p in providers]}"
+        )
+
+    if model.strip().lower() == "auto":
+        if not providers:
+            raise AIProviderError("No providers are configured.")
+        return providers[0], providers[0].name
+
+    # Plain model name: use the first provider.
+    if not providers:
+        raise AIProviderError("No providers are configured.")
+    return providers[0], model
+
+
+class AIRouter:
+    """Routes AI requests to providers with automatic fallback.
+
+    When multiple providers are configured, the router tries each one in
+    order. Retryable errors (connection, timeout, API errors) trigger
+    fallback to the next available provider.
 
     Attributes:
-        _provider: The provider all requests are routed to in Phase 1.
+        _providers: The ordered tuple of providers to try.
         _prompt_builder: Builds structured prompts from request components.
         _validator: Validates provider responses.
         _logger: Emits a structured event for every AI call.
-        _settings: Application settings supplying the model and token limit.
+        _settings: Application settings supplying the default model and
+            token limit.
     """
 
     def __init__(
         self,
         *,
-        provider: AIProvider,
+        provider: AIProvider | None = None,
+        providers: tuple[AIProvider, ...] | None = None,
         prompt_builder: PromptBuilder,
         validator: ResponseValidator,
         logger: EventLogger,
@@ -63,13 +113,23 @@ class AIRouter:
         """Initialise the router with its collaborators.
 
         Args:
-            provider: The AI provider to route requests to.
+            provider: A single provider (backward-compatible alias for
+                providers=(provider,)). Ignored if providers is given.
+            providers: An ordered tuple of providers to try. When given,
+                takes precedence over the provider parameter.
             prompt_builder: The builder used to assemble structured prompts.
             validator: The validator used to check responses.
             logger: The event logger used to record every AI call.
             settings: Application settings supplying default model and tokens.
         """
-        self._provider = provider
+        if providers is not None:
+            self._providers = providers
+        elif provider is not None:
+            self._providers = (provider,)
+        else:
+            raise TypeError(
+                'AIRouter requires either "provider" or "providers" argument.'
+            )
         self._prompt_builder = prompt_builder
         self._validator = validator
         self._logger = logger
@@ -83,11 +143,11 @@ class AIRouter:
         context: AIContextBlock | None = None,
         session_id: int | None = None,
     ) -> AIResponse:
-        """Route a request to the provider and return a validated response.
+        """Route a request through available providers with fallback.
 
-        This builds the prompt, sends it to the provider, validates the
-        result, and logs the outcome through Observability. Both success and
-        failure are recorded.
+        Parses the model string from settings to determine which provider(s)
+        to try, then attempts each in order. Retryable errors trigger
+        fallback to the next provider.
 
         Args:
             system_instruction: The trusted instruction framing the model.
@@ -102,43 +162,93 @@ class AIRouter:
             A validated, provider-neutral AIResponse.
 
         Raises:
-            AIProviderError: If the provider fails to produce a response.
+            AIProviderError: If all providers fail or no provider is available.
             ResponseValidationError: If the response fails validation.
         """
-        request = self._prompt_builder.build(
-            system_instruction=system_instruction,
-            user_message=user_message,
-            model=self._settings.ai_model,
-            max_tokens=self._settings.ai_max_tokens,
-            context=context,
+        # Parse the model string to determine routing order.
+        requested_provider, resolved_model = parse_model_string(
+            self._settings.ai_model, self._providers
         )
 
-        start = time.monotonic()
-        try:
-            response = self._provider.generate(request)
-            validated = self._validator.validate(response)
-        except (AIProviderError, ResponseValidationError) as exc:
+        # Build provider queue: requested provider first, then remaining.
+        provider_queue = self._build_provider_queue(requested_provider)
+
+        last_error: Exception | None = None
+
+        for current_provider in provider_queue:
+            request = self._prompt_builder.build(
+                system_instruction=system_instruction,
+                user_message=user_message,
+                model=resolved_model,
+                max_tokens=self._settings.ai_max_tokens,
+                context=context,
+            )
+
+            start = time.monotonic()
+            try:
+                response = current_provider.generate(request)
+                validated = self._validator.validate(response)
+            except AIProviderError as exc:
+                duration_ms = self._elapsed_ms(start)
+                self._emit_audit_event(
+                    outcome=EventOutcome.FAILURE,
+                    detail=f"provider={current_provider.name} error={exc}",
+                    duration_ms=duration_ms,
+                    session_id=session_id,
+                )
+                last_error = exc
+                # Fall through to the next provider.
+                continue
+            except ResponseValidationError as exc:
+                duration_ms = self._elapsed_ms(start)
+                self._emit_audit_event(
+                    outcome=EventOutcome.FAILURE,
+                    detail=f"provider={current_provider.name} validation_error={exc}",
+                    duration_ms=duration_ms,
+                    session_id=session_id,
+                )
+                # Validation errors are not retryable: the provider worked
+                # but the response was invalid.
+                raise
+
             duration_ms = self._elapsed_ms(start)
             self._emit_audit_event(
-                outcome=EventOutcome.FAILURE,
-                detail=f"provider={self._provider.name} error={exc}",
+                outcome=EventOutcome.SUCCESS,
+                detail=(
+                    f"provider={validated.provider or current_provider.name} "
+                    f"model={validated.model} "
+                    f"in={validated.input_tokens} out={validated.output_tokens}"
+                ),
                 duration_ms=duration_ms,
                 session_id=session_id,
             )
-            raise
+            return validated
 
-        duration_ms = self._elapsed_ms(start)
-        self._emit_audit_event(
-            outcome=EventOutcome.SUCCESS,
-            detail=(
-                f"provider={validated.provider or self._provider.name} "
-                f"model={validated.model} "
-                f"in={validated.input_tokens} out={validated.output_tokens}"
-            ),
-            duration_ms=duration_ms,
-            session_id=session_id,
-        )
-        return validated
+        # All providers exhausted.
+        if last_error is not None:
+            raise last_error
+        raise AIProviderError("No providers are available.")
+
+    def _build_provider_queue(
+        self, requested_provider: AIProvider
+    ) -> list[AIProvider]:
+        """Build an ordered list of providers to try.
+
+        The requested provider comes first, followed by any remaining
+        providers from the configured tuple (skipping the requested one
+        if it appears later).
+
+        Args:
+            requested_provider: The provider to try first.
+
+        Returns:
+            An ordered list of providers to attempt.
+        """
+        queue: list[AIProvider] = [requested_provider]
+        for provider in self._providers:
+            if provider is not requested_provider:
+                queue.append(provider)
+        return queue
 
     def _emit_audit_event(
         self,
@@ -150,24 +260,9 @@ class AIRouter:
     ) -> None:
         """Emit this router's own ai_call audit event, isolating a failing logger.
 
-        This is the narrow fix for a real, disclosed observability gap found
-        during Phase 9 Batch 3's end-to-end verification: previously, both of
-        route()'s own self._logger.emit() calls were unguarded, so a raising
-        logger propagated out of route() itself - which
-        AIReasoningEngine.reason()'s existing broad `except Exception: return
-        None` then silently turned into an apparent "reasoning unavailable"
-        result, even though the provider call and validation had already
-        genuinely succeeded. That let an audit-logging failure change
-        routing success/failure semantics, violating the same "observability
-        must never alter an otherwise-authoritative outcome" rule already
-        upheld everywhere else (JarvisOrchestrator._audit_unexpected_action,
-        Phase 7 Batch 4; PromptBuilder's report_injection guard, Phase 7
-        Batch 5A; JarvisOrchestrator._audit_memory_acquisition, Phase 9
-        Batch 2).
-
         Only this logging/reporting boundary is isolated. It never affects
         provider selection, request construction, validation, or exception
-        propagation: the bare `raise` in the caller's except block always
+        propagation: the bare raise in the caller's except block always
         re-raises the original AIProviderError/ResponseValidationError
         untouched, regardless of whether this method's own emit() call
         succeeded or was swallowed here.
@@ -193,18 +288,16 @@ class AIRouter:
             pass
 
     def is_available(self) -> bool:
-        """Report whether the routed provider is currently usable.
+        """Report whether any routed provider is currently usable.
 
-        This is a lightweight passthrough to the underlying provider's own
-        availability check, so callers (such as AIReasoningEngine) never need
-        to hold a direct reference to a provider - only to the router.
+        This checks if at least one provider is available.
 
         Returns:
-            True if the provider reports itself available, False otherwise
+            True if any provider reports itself available, False otherwise
             (including if the availability check itself raises).
         """
         try:
-            return self._provider.is_available()
+            return any(provider.is_available() for provider in self._providers)
         except Exception:  # noqa: BLE001 - availability checks must never raise out
             return False
 
