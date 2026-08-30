@@ -37,6 +37,7 @@ _project_manager: Any = None
 _plugin_registry: Any = None
 _metrics_collector: Any = None
 _android_manager: Any = None
+_cost_tracker: Any = None
 
 
 def get_orchestrator() -> Any:
@@ -82,25 +83,32 @@ def get_android_manager() -> Any:
     return _android_manager
 
 
+def get_cost_tracker() -> Any:
+    """Return the CostTracker instance."""
+    return _cost_tracker
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
 
-def create_app(orchestrator: Any = None, android_manager: Any = None) -> FastAPI:
+def create_app(orchestrator: Any = None, android_manager: Any = None, cost_tracker: Any = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
         orchestrator: A fully-wired JarvisOrchestrator. When None, the
             app starts in degraded mode (subsystem endpoints return 503).
         android_manager: Optional AndroidManager for Android Client support.
+        cost_tracker: Optional CostTracker for cost monitoring.
 
     Returns:
         A configured FastAPI application ready to serve.
     """
-    global _orchestrator, _android_manager  # noqa: PLW0603
+    global _orchestrator, _android_manager, _cost_tracker  # noqa: PLW0603
     _orchestrator = orchestrator
     _android_manager = android_manager
+    _cost_tracker = cost_tracker
 
     # Subsystem references are read lazily from the orchestrator,
     # not cached at app creation time. This lets tests modify
@@ -193,6 +201,11 @@ def create_app(orchestrator: Any = None, android_manager: Any = None) -> FastAPI
     from api.routes_android import router as android_router
 
     app.include_router(android_router)
+
+    # Security routes.
+    from api.routes_security import router as security_router
+
+    app.include_router(security_router)
 
     # Dashboard routes.
     from dashboard.routes import mount_dashboard

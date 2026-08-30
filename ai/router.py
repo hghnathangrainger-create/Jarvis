@@ -29,6 +29,7 @@ from __future__ import annotations
 import time
 
 from ai.context_models import AIContextBlock
+from ai.cost_tracker import CostTracker, estimate_cost
 from ai.prompt_builder import PromptBuilder
 from ai.providers.base import AIProvider, AIProviderError, AIResponse
 from ai.response_validator import ResponseValidationError, ResponseValidator
@@ -109,6 +110,7 @@ class AIRouter:
         validator: ResponseValidator,
         logger: EventLogger,
         settings: Settings,
+        cost_tracker: CostTracker | None = None,
     ) -> None:
         """Initialise the router with its collaborators.
 
@@ -121,6 +123,7 @@ class AIRouter:
             validator: The validator used to check responses.
             logger: The event logger used to record every AI call.
             settings: Application settings supplying default model and tokens.
+            cost_tracker: Optional CostTracker for recording API costs.
         """
         if providers is not None:
             self._providers = providers
@@ -134,6 +137,7 @@ class AIRouter:
         self._validator = validator
         self._logger = logger
         self._settings = settings
+        self._cost_tracker = cost_tracker
 
     def route(
         self,

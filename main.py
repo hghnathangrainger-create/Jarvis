@@ -66,6 +66,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ai.cost_tracker import CostTracker
 from ai.prompt_builder import PromptBuilder, audit_suspicious_injection
 from ai.providers.claude import ClaudeProvider
 from ai.reasoning_engine import AIReasoningEngine
@@ -121,8 +122,10 @@ from storage.database import (
 )
 from scheduling.schedule_store import ScheduleStore
 from tools.builtin import (
+    AgentTool,
     ApprovalHistoryTool,
     ConfigTool,
+    CostTrackingTool,
     EchoTool,
     FileAppendTool,
     FileCopyTool,
@@ -355,6 +358,44 @@ def build_orchestrator() -> JarvisOrchestrator:
         computer_control_manager,
         ai_router=ai_router if 'ai_router' in dir() else None,
     ))
+    # Cost Tracking tool: GREEN (read-only) — monitors AI API costs.
+    registry.register_tool(CostTrackingTool(cost_tracker))
+
+    # AI Agent System (Chapter 20): specialised agents for focused tasks.
+    from agents.manager import AgentManager
+    from agents.research_agent import ResearchAgent
+    from agents.coding_agent import CodingAgent
+    from agents.content_agent import ContentAgent
+    from agents.learning_agent import LearningAgent
+    from agents.trading_agent import TradingAgent
+    from agents.planner_agent import PlannerSupportAgent
+
+    agent_manager = AgentManager()
+    agent_manager.register_agent(ResearchAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+        knowledge_manager=knowledge_manager,
+    ))
+    agent_manager.register_agent(CodingAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+    ))
+    agent_manager.register_agent(ContentAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+    ))
+    agent_manager.register_agent(LearningAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+        knowledge_manager=knowledge_manager,
+    ))
+    agent_manager.register_agent(TradingAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+    ))
+    agent_manager.register_agent(PlannerSupportAgent(
+        ai_router=ai_router if 'ai_router' in dir() else None,
+    ))
+    # Initialize all agents
+    for agent in agent_manager.get_all_agents():
+        agent.initialize()
+    # Agent tool: YELLOW (modifies state) — manages agent tasks.
+    registry.register_tool(AgentTool(agent_manager))
 
     # Durable inbox (Phase 20, Batch 1/2): a durable, append-only record of
     # saved Jarvis-produced outputs - today, exactly one producer, the
@@ -609,6 +650,10 @@ def build_orchestrator() -> JarvisOrchestrator:
     # fail-closed reasoning.
     workflow_engine.reload_paused(registry=registry, security_manager=security)
 
+    # Cost tracking: records every AI API call with provider, model,
+    # tokens, and estimated cost. Wired into the AI router below.
+    cost_tracker = CostTracker(settings.database_path)
+
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
     # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and
     # AIReasoningEngine are constructed - previously main.py never built
@@ -643,11 +688,12 @@ def build_orchestrator() -> JarvisOrchestrator:
             validator=ResponseValidator(),
             logger=logger,
             settings=settings,
+            cost_tracker=cost_tracker,
         )
         reasoning_engine = AIReasoningEngine(router=ai_router, enabled=True)
         tool_selection_router = ai_router
 
-    return JarvisOrchestrator(
+    orchestrator = JarvisOrchestrator(
         planner=planner,
         executor=executor,
         registry=registry,
@@ -699,6 +745,9 @@ def build_orchestrator() -> JarvisOrchestrator:
         goal_manager=goal_manager,
         tracer=tracer,
     )
+    # Attach cost tracker for API access.
+    orchestrator._cost_tracker = cost_tracker
+    return orchestrator
 
 
 def build_startup_notice() -> str | None:
@@ -1601,7 +1650,8 @@ def _run_api_server(orchestrator: JarvisOrchestrator, settings: "Settings") -> N
     set_lifecycle_manager(lifecycle_mgr)
 
     android_manager = AndroidManager(orchestrator=orchestrator)
-    app = create_app(orchestrator=orchestrator, android_manager=android_manager)
+    cost_tracker = getattr(orchestrator, '_cost_tracker', None)
+    app = create_app(orchestrator=orchestrator, android_manager=android_manager, cost_tracker=cost_tracker)
     host = settings.api_host
     port = settings.api_port
 

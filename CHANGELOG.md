@@ -4,6 +4,36 @@ All notable changes to the Jarvis AI Operating System will be documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0] - 2026
+
+### Added
+
+- **AI Router** — Multi-provider failover (Claude, OpenAI, Gemini, Ollama) with cost tracking and budget enforcement
+- **Vector Memory** — ChromaDB semantic search with SQLite structured storage
+- **DAG Workflow Engine** — Parallel execution, rollback/compensation, checkpoints, YELLOW approval gates
+- **Knowledge Library** — Hybrid search (keyword + semantic), CRUD tools
+- **Goal & Milestone Tracking** — Progress reports, overdue detection
+- **Observability** — Structured event logging, request tracing, in-memory metrics
+- **Plugin Architecture** — Manifest validation, sandboxed loader, permission enforcement
+- **Voice Pipeline** — Wake word detection, Whisper STT, pyttsx3 TTS (offline-first)
+- **Project Management** — Projects, tasks, notes, stats, goal linking
+- **Computer Control** — Input automation, window management, command execution, screenshots, OCR, AI vision
+- **API Server** — FastAPI REST + WebSocket with JWT authentication
+- **Dashboard** — Dark-themed web frontend with 8 sections, real-time WebSocket updates
+- **Android Client Backend** — Device registry, FCM push notifications, remote command queue
+- **System Lifecycle** — Startup sequencing, graceful shutdown, crash recovery, Safe Mode
+- **AI Provider Independence** — Ollama local fallback, cost tracking, daily/monthly budgets
+- **Security Manager** — GREEN/YELLOW/RED enforcement, 20+ injection patterns, approval workflows
+- **AI Agent System** — 6 specialized agents (Research, Coding, Content, Learning, Trading, Planner)
+
+### Infrastructure
+
+- FastAPI with JWT auth and CORS
+- WebSocket real-time event broadcasting
+- SQLite + ChromaDB dual storage
+- SQLAlchemy ORM with auto-migration
+- Poetry dependency management
+
 ## [Unreleased]
 
 ### Added

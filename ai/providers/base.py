@@ -77,6 +77,7 @@ class AIResponse:
     output_tokens: int | None = None
     stop_reason: str | None = None
     provider: str = field(default="")
+    cost_usd: float = 0.0
 
 
 class AIProviderError(Exception):

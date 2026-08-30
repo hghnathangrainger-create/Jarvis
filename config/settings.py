@@ -132,6 +132,14 @@ class Settings:
     api_username: str = "admin"
     api_password: str = "changeme"
     cors_origins: str = "*"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3"
+    cost_budget_daily: float | None = None
+    cost_budget_monthly: float | None = None
+    ai_preferred_provider: str | None = None
+    security_injection_sensitivity: str = "medium"
+    security_approval_ttl_seconds: int = 300
+    security_log_all_green: bool = False
 
 
 def _get_required(name: str) -> str:
@@ -316,6 +324,26 @@ def _get_log_level(name: str, default: str) -> str:
     return value
 
 
+def _get_optional_float(name: str, default: float | None) -> float | None:
+    """Read an optional environment variable and parse it as a float.
+
+    Args:
+        name: The name of the environment variable to read.
+        default: The value to use when the variable is missing or empty.
+
+    Returns:
+        The parsed float value, or the default if unset or empty.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     """Load, validate, and return application configuration.
 
@@ -372,4 +400,14 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         api_username=_get_optional("API_USERNAME", "admin"),
         api_password=_get_optional("API_PASSWORD", "changeme"),
         cors_origins=_get_optional("CORS_ORIGINS", "*"),
+        ollama_base_url=_get_optional("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ollama_model=_get_optional("OLLAMA_MODEL", "llama3"),
+        cost_budget_daily=_get_optional_float("COST_BUDGET_DAILY", None),
+        cost_budget_monthly=_get_optional_float("COST_BUDGET_MONTHLY", None),
+        ai_preferred_provider=_get_optional("AI_PREFERRED_PROVIDER", None),
+        security_injection_sensitivity=_get_choice(
+            "SECURITY_INJECTION_SENSITIVITY", "medium", ("low", "medium", "high")
+        ),
+        security_approval_ttl_seconds=_get_int("SECURITY_APPROVAL_TTL_SECONDS", 300),
+        security_log_all_green=_get_bool("SECURITY_LOG_ALL_GREEN", False),
     )

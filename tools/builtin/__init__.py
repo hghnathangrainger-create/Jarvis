@@ -181,6 +181,9 @@ from tools.builtin.web_search_tool import WebSearchTool
 from tools.builtin.webpage_read_tool import WebpageReadTool
 from tools.builtin.workflow_history_tool import WorkflowHistoryTool
 from tools.builtin.android_tool import AndroidTool
+from tools.builtin.cost_tracking_tool import CostTrackingTool
+from tools.builtin.security_tool import SecurityTool
+from tools.builtin.agent_tool import AgentTool
 
 __all__ = [
     "ApprovalHistoryTool",
@@ -231,4 +234,7 @@ __all__ = [
     "ScheduleVerifyEnabledStateTool",
     "ScheduleShowEnabledStateTool",
     "AndroidTool",
+    "CostTrackingTool",
+    "SecurityTool",
+    "AgentTool",
 ]

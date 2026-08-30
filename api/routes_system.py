@@ -141,6 +141,29 @@ async def system_metrics(
         return {"metrics": {}, "available": False, "error": str(exc)}
 
 
+@router.get("/costs")
+async def system_costs(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return AI cost tracking summary."""
+    try:
+        from api.app import get_cost_tracker
+
+        tracker = get_cost_tracker()
+        if tracker is None:
+            return {"error": "Cost tracker not available"}
+
+        return {
+            "daily": tracker.get_daily_cost(),
+            "monthly": tracker.get_monthly_cost(),
+            "by_provider": tracker.get_cost_by_provider(),
+            "history": tracker.get_cost_history(days=7),
+        }
+    except Exception as exc:
+        logger.error("Failed to get cost data: %s", exc)
+        return {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Safe Mode endpoints (YELLOW — requires auth)
 # ---------------------------------------------------------------------------
