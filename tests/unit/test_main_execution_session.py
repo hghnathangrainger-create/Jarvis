@@ -115,7 +115,7 @@ def test_main_releases_the_lock_when_cli_run_raises(
     monkeypatch.setattr(JarvisCLI, "run", _raising_run)
 
     with pytest.raises(RuntimeError, match="simulated CLI crash"):
-        main.main()
+        main.main(argv=[])
 
     from config.settings import load_settings
 
@@ -150,7 +150,7 @@ def test_main_prints_honest_message_and_returns_when_already_running(
     holder = ExecutionProcessLock(hermetic_db)
     holder.acquire()
     try:
-        main.main()  # must not raise, must not start a CLI loop
+        main.main(argv=[])  # must not raise, must not start a CLI loop
     finally:
         holder.release()
 

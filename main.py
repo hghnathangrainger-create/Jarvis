@@ -219,6 +219,11 @@ def build_orchestrator() -> JarvisOrchestrator:
     tracer = Tracer(obs_store)
     security = SecurityManager()
 
+    # Cost tracking: records every AI API call with provider, model,
+    # tokens, and estimated cost. Shared between the CostTrackingTool
+    # and the AI router (wired below).
+    cost_tracker = CostTracker()
+
     # Memory.
     memory = MemoryManager(EpisodicMemoryStore(session_factory))
 
@@ -650,10 +655,6 @@ def build_orchestrator() -> JarvisOrchestrator:
     # WorkflowEngine.reload_paused()'s own docstring for the full
     # fail-closed reasoning.
     workflow_engine.reload_paused(registry=registry, security_manager=security)
-
-    # Cost tracking: records every AI API call with provider, model,
-    # tokens, and estimated cost. Wired into the AI router below.
-    cost_tracker = CostTracker()
 
     # Advisory AI reasoning (Phase 7, Batch 2): reachable only when
     # AI_REASONING_ENABLED=true. This is the only place a real AIRouter and
@@ -1662,7 +1663,7 @@ def _run_api_server(orchestrator: JarvisOrchestrator, settings: "Settings") -> N
     uvicorn.run(app, host=host, port=port)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Acquire the execution lock, build and recover the system, and
     start the interactive CLI.
 
@@ -1695,7 +1696,7 @@ def main() -> None:
         action="store_true",
         help="Start Jarvis in Safe Mode (GREEN-tier actions only).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         orchestrator, lock = start_execution_session()

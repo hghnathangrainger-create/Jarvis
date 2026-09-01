@@ -95,18 +95,32 @@ class ConfigTool(BaseTool):
         anthropic_status = "set" if self._settings.anthropic_api_key.strip() else "not set"
         openai_status = "set" if self._settings.openai_api_key.strip() else "not set"
         google_status = "set" if self._settings.google_api_key.strip() else "not set"
+        api_password_status = "set" if self._settings.api_password.strip() else "not set"
         lines = (
             "Jarvis configuration:",
             f"  AI model: {self._settings.ai_model}",
             f"  AI max tokens: {self._settings.ai_max_tokens}",
             f"  AI reasoning enabled: {self._settings.ai_reasoning_enabled}",
+            f"  AI preferred provider: {self._settings.ai_preferred_provider or 'none'}",
             f"  Anthropic API key: {anthropic_status}",
             f"  OpenAI API key: {openai_status}",
             f"  Google API key: {google_status}",
+            f"  Ollama base URL: {self._settings.ollama_base_url}",
+            f"  Ollama model: {self._settings.ollama_model}",
             f"  Database path: {self._settings.database_path}",
             f"  Log level: {self._settings.log_level}",
             f"  Approval timeout (seconds): {self._settings.approval_timeout_seconds}",
             f"  Debug mode: {self._settings.debug}",
+            f"  API host: {self._settings.api_host}",
+            f"  API port: {self._settings.api_port}",
+            f"  API username: {self._settings.api_username}",
+            f"  API password: {api_password_status}",
+            f"  CORS origins: {self._settings.cors_origins}",
+            f"  Cost budget daily: {self._settings.cost_budget_daily or 'unlimited'}",
+            f"  Cost budget monthly: {self._settings.cost_budget_monthly or 'unlimited'}",
+            f"  Security injection sensitivity: {self._settings.security_injection_sensitivity}",
+            f"  Security approval TTL (seconds): {self._settings.security_approval_ttl_seconds}",
+            f"  Security log all GREEN: {self._settings.security_log_all_green}",
             f"  Voice enabled: {self._settings.voice_enabled}",
             f"  Voice speak mode: {self._settings.voice_speak_mode}",
             f"  Voice provider: {self._settings.voice_provider}",

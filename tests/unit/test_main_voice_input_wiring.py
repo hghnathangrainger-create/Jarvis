@@ -140,7 +140,7 @@ def test_main_passes_voice_input_into_jarvis_cli(
     monkeypatch.setattr(main, "build_startup_notice", lambda: None)
     monkeypatch.setattr(main, "build_voice_input_service", lambda: fake_service)
 
-    main.main()
+    main.main(argv=[])
 
     assert captured["voice_input"] is fake_service
     assert captured["ran"] is True

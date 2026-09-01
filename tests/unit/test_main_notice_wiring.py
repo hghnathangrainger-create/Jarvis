@@ -143,7 +143,7 @@ def test_main_passes_startup_notice_into_jarvis_cli(
     monkeypatch.setattr(main, "JarvisCLI", _FakeCLI)
     monkeypatch.setattr(main, "build_startup_notice", lambda: "Jarvis notice: test")
 
-    main.main()
+    main.main(argv=[])
 
     assert captured["startup_notice"] == "Jarvis notice: test"
     assert captured["ran"] is True

@@ -133,6 +133,18 @@ _EXPECTED_FIELD_LABELS: dict[str, str] = {
     "approval_timeout_seconds": "Approval timeout (seconds):",
     "debug": "Debug mode:",
     "ai_reasoning_enabled": "AI reasoning enabled:",
+    "ai_preferred_provider": "AI preferred provider:",
+    "ollama_base_url": "Ollama base URL:",
+    "ollama_model": "Ollama model:",
+    "api_host": "API host:",
+    "api_port": "API port:",
+    "api_username": "API username:",
+    "cors_origins": "CORS origins:",
+    "cost_budget_daily": "Cost budget daily:",
+    "cost_budget_monthly": "Cost budget monthly:",
+    "security_injection_sensitivity": "Security injection sensitivity:",
+    "security_approval_ttl_seconds": "Security approval TTL (seconds):",
+    "security_log_all_green": "Security log all GREEN:",
     "voice_enabled": "Voice enabled:",
     "voice_speak_mode": "Voice speak mode:",
     "voice_provider": "Voice provider:",
@@ -144,10 +156,9 @@ _EXPECTED_FIELD_LABELS: dict[str, str] = {
     "voice_language": "Voice language:",
 }
 
-#: The one Settings field deliberately never shown by name+value - a
-#: real secret/credential, unlike every other field.
+#: Secret/credential fields deliberately never shown by name+value.
 _DELIBERATELY_EXCLUDED_SECRET_FIELDS: frozenset[str] = frozenset(
-    {"anthropic_api_key", "openai_api_key", "google_api_key"}
+    {"anthropic_api_key", "openai_api_key", "google_api_key", "api_password"}
 )
 
 

@@ -26,6 +26,12 @@ from computer_control.models import ScreenshotResult, UIElement
 from computer_control.screen import ScreenAnalyzer
 from tools.base_tool import ToolRequest
 
+try:
+    import PIL  # noqa: F401
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 
 # ---------------------------------------------------------------------------
 # Model tests
@@ -200,6 +206,7 @@ class TestScreenAnalyzer:
         sa.pytesseract_available = False
         assert sa.extract_text(b"image_data") == ""
 
+    @pytest.mark.skipif(not _HAS_PIL, reason="Pillow not installed")
     def test_extract_text_mocked(self):
         """extract_text returns OCR text with mocked pytesseract."""
         sa = ScreenAnalyzer()
@@ -223,6 +230,7 @@ class TestScreenAnalyzer:
         sa.pytesseract_available = False
         assert sa.detect_ui_elements(b"image") == []
 
+    @pytest.mark.skipif(not _HAS_PIL, reason="Pillow not installed")
     def test_detect_ui_elements_mocked(self):
         """detect_ui_elements returns UIElements with mocked pytesseract."""
         sa = ScreenAnalyzer()

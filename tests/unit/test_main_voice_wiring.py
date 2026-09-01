@@ -147,7 +147,7 @@ def test_main_passes_voice_output_into_jarvis_cli(
         main, "build_voice_output_service", lambda: (fake_service, True)
     )
 
-    main.main()
+    main.main(argv=[])
 
     assert captured["voice_output"] is fake_service
     assert captured["speak_responses"] is True

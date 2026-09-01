@@ -81,7 +81,7 @@ def test_main_calls_configure_console_logging_once(
     monkeypatch.setattr(main, "JarvisCLI", _FakeCLI)
     monkeypatch.setattr(main, "configure_console_logging", _spy)
 
-    main.main()
+    main.main(argv=[])
 
     assert len(calls) == 1
 
@@ -98,7 +98,7 @@ def test_main_passes_real_settings_to_configure_console_logging(
     monkeypatch.setattr(main, "JarvisCLI", _FakeCLI)
     monkeypatch.setattr(main, "configure_console_logging", _spy)
 
-    main.main()
+    main.main(argv=[])
 
     assert captured[0].log_level == "WARNING"
 
@@ -107,13 +107,13 @@ def test_repeated_main_calls_never_attach_more_than_one_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Uses the real configure_console_logging() (not a spy) end to end,
-    proving the actual idempotency guarantee holds through main.main()
+    proving the actual idempotency guarantee holds through main.main(argv=[])
     itself, not just at the helper's own unit-test level."""
     monkeypatch.setattr(main, "JarvisCLI", _FakeCLI)
 
-    main.main()
-    main.main()
-    main.main()
+    main.main(argv=[])
+    main.main(argv=[])
+    main.main(argv=[])
 
     logger = logging.getLogger(APP_NAME)
     assert len(logger.handlers) == 1
