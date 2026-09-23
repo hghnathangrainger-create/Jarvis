@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="login">Login</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="server_url">Server URL</string>
+    <string name="chat">Chat</string>
+    <string name="dashboard">Dashboard</string>
+    <string name="memory">Memory</string>
+    <string name="goals">Goals</string>
+    <string name="settings">Settings</string>
+    <string name="send">Send</string>
+    <string name="search">Search</string>
+    <string name="logout">Logout</string>
+    <string name="connecting">Connecting...</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="error_connection">Connection error</string>
+    <string name="error_auth">Authentication failed</string>
+    <string name="no_memories">No memories found</string>
+    <string name="no_goals">No goals found</string>
+    <string name="add_memory">Add Memory</string>
+    <string name="create_goal">Create Goal</string>
+    <string name="approve">Approve</string>
+    <string name="deny">Deny</string>
+    <string name="cancel">Cancel</string>
+    <string name="save">Save</string>
+    <string name="delete">Delete</string>
+    <string name="voice">Voice</string>
+    <string name="recording">Recording...</string>
+    <string name="processing">Processing...</string>
+</resources>
