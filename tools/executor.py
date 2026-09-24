@@ -127,7 +127,10 @@ class ToolExecutor:
                     tool, request, SecurityTier.YELLOW, approval_decision
                 )
             return self._handle_needs_confirmation(
-                request, decision.reason, approval_decision
+                request,
+                decision.reason,
+                approval_decision,
+                metadata=self._safe_approval_metadata(tool, request),
             )
 
         # GREEN runs automatically.
@@ -182,6 +185,7 @@ class ToolExecutor:
         request: ToolRequest,
         reason: str,
         approval_decision: ApprovalDecision | None,
+        metadata: dict[str, str] | None = None,
     ) -> ToolResult:
         """Handle a YELLOW action that is not authorised to run.
 
@@ -193,6 +197,11 @@ class ToolExecutor:
             request: The originating request.
             reason: The Security Manager's reason for requiring confirmation.
             approval_decision: The supplied decision, if any (a decline here).
+            metadata: Optional read-only approval details the tool itself
+                provided via BaseTool.approval_metadata() (default: none),
+                forwarded so an approval request can show the concrete
+                target/proposal. Never produced by running the tool - only
+                by this read-only hook.
 
         Returns:
             A ToolResult indicating confirmation is required.
@@ -219,7 +228,36 @@ class ToolExecutor:
             success=False,
             error=message,
             requires_confirmation=True,
+            metadata=dict(metadata or {}),
         )
+
+    @staticmethod
+    def _safe_approval_metadata(tool: Any, request: ToolRequest) -> dict[str, str]:
+        """Call a tool's read-only approval_metadata() hook, isolating it.
+
+        The hook runs while a YELLOW action is being withheld, so a tool
+        failure must never alter the authoritative withhold decision (the
+        same observability-isolation principle the rest of this executor
+        follows). A hook that raises simply contributes no details.
+
+        Args:
+            tool: The tool whose hook is called.
+            request: The request being withheld.
+
+        Returns:
+            The tool's metadata details, or an empty dict on failure.
+        """
+        try:
+            metadata = tool.approval_metadata(request)
+        except Exception:  # noqa: BLE001 - approval display is best-effort
+            return {}
+        if not isinstance(metadata, dict):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in metadata.items()
+            if value is not None
+        }
 
     def _handle_run(
         self,

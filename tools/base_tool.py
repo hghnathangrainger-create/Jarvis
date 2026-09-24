@@ -114,6 +114,33 @@ class BaseTool(ABC):
         """
         return self.name
 
+    def approval_metadata(self, request: ToolRequest) -> dict[str, str]:
+        """Extra string details shown when this tool's action is withheld.
+
+        The Tool Executor calls this only when this tool's action
+        classifies YELLOW and no approved decision has been supplied
+        yet - i.e. exactly when an approval request is being built for
+        the user. The returned key/value pairs are attached to the
+        pending approval and rendered as "Details" lines by the existing
+        approval prompt, so a decision can be made with the concrete
+        target and proposal in view.
+
+        The default implementation returns no details, so every existing
+        tool's approval display is byte-for-byte unchanged. Overrides
+        must be read-only: this runs before approval, so it must never
+        perform the action itself, and must never raise (the executor
+        isolates failures, but honest, predictable details are always
+        preferred over an empty section).
+
+        Args:
+            request: The request being withheld.
+
+        Returns:
+            String key/value details for the approval request's
+            metadata, or an empty dict when there is nothing to add.
+        """
+        return {}
+
     @abstractmethod
     def run(self, request: ToolRequest) -> ToolResult:
         """Execute the tool and return its result.

@@ -48,6 +48,11 @@ Read-only tools (GREEN) - these never change any state:
       Batch 1). Never calls AI, a subprocess, or the web; has no live
       knowledge of the current git branch, commit, or test suite
       result.
+    - BrainReadTool: reports brain configuration/status, deterministically
+      searches, and reads one note from Nathan's external Markdown "3D
+      brain" (Markdown Brain Integration). Read-only, bounded, scoped to
+      BRAIN_PATH's allowed folders, never calls AI or the web, and works
+      identically with AI reasoning disabled.
     - PreparePromptTool: assembles a well-structured, Claude-ready
       prompt (implementation/review/brainstorm/critique/compare) for
       the user to copy and paste into an actual Claude conversation
@@ -117,6 +122,12 @@ they run, enforced by the Tool Executor and Approval Manager (Phase 4):
       record (Phase 89, Batch 1). Never inspects git, a subprocess, or
       the filesystem - every value comes only from what Nathan
       explicitly typed.
+    - BrainWriteTool: creates a new note in, or replaces one existing
+      note of, Nathan's external Markdown "3D brain" (Markdown Brain
+      Integration). Held for explicit approval exactly like every other
+      write tool; never overwrites on create, never creates folders,
+      never deletes, writes atomically, and is re-scoped to BRAIN_PATH's
+      allowed folders immediately before any write.
 
 No built-in tool edits in place, installs software, runs commands, or
 controls the computer. FileMoveTool, FileDeleteTool, and FileRestoreTool
@@ -129,7 +140,8 @@ overwrites an existing destination or permanently destroys anything.
 
 from __future__ import annotations
 from tools.builtin.approval_history_tool import ApprovalHistoryTool
-
+from tools.builtin.brain_read_tool import BrainReadTool
+from tools.builtin.brain_write_tool import BrainWriteTool
 from tools.builtin.config_tool import ConfigTool
 from tools.builtin.echo_tool import EchoTool
 from tools.builtin.file_append_tool import FileAppendTool
@@ -187,6 +199,8 @@ from tools.builtin.agent_tool import AgentTool
 
 __all__ = [
     "ApprovalHistoryTool",
+    "BrainReadTool",
+    "BrainWriteTool",
     "ConfigTool",
     "HealthCheckTool",
     "HelpTool",

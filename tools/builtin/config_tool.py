@@ -3,7 +3,9 @@ config_tool.py
 
 A safe, read-only tool that reports Jarvis's current configuration
 status (Phase 31; extended Phase 41, Batch 2 with voice output
-settings; extended Phase 41, Batch 4 with voice input settings).
+settings; extended Phase 41, Batch 4 with voice input settings;
+extended by the Markdown Brain Integration with the six BRAIN_*
+settings).
 
 ConfigTool is a GREEN tool: it only reads the already-loaded Settings
 object (never .env or os.environ directly) and reports its fields back
@@ -121,6 +123,12 @@ class ConfigTool(BaseTool):
             f"  Security injection sensitivity: {self._settings.security_injection_sensitivity}",
             f"  Security approval TTL (seconds): {self._settings.security_approval_ttl_seconds}",
             f"  Security log all GREEN: {self._settings.security_log_all_green}",
+            f"  Brain enabled: {self._settings.brain_enabled}",
+            f"  Brain path: {self._settings.brain_path or 'not set'}",
+            f"  Brain folders: {','.join(self._settings.brain_folders)}",
+            f"  Brain max file bytes: {self._settings.brain_max_file_bytes}",
+            f"  Brain search limit: {self._settings.brain_search_limit}",
+            f"  Brain AI context chars: {self._settings.brain_ai_context_chars}",
             f"  Voice enabled: {self._settings.voice_enabled}",
             f"  Voice speak mode: {self._settings.voice_speak_mode}",
             f"  Voice provider: {self._settings.voice_provider}",

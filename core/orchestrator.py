@@ -6111,6 +6111,13 @@ class JarvisOrchestrator:
                 reason=result.error or "This action requires your confirmation.",
                 security_tier=SecurityTier.YELLOW,
                 session_id=session_id,
+                # Read-only proposal details the tool itself supplied while
+                # being withheld (BaseTool.approval_metadata(), default
+                # empty) - e.g. a brain write's exact target path and
+                # bounded content preview - so the approval prompt shows
+                # the concrete proposal. Every existing tool returns no
+                # such details, leaving its approval display unchanged.
+                metadata=dict(result.metadata),
                 tool_name=tool_name,
                 tool_input=dict(tool_input),
             )

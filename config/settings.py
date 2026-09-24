@@ -106,6 +106,22 @@ class Settings:
             provider - never real audio or a real microphone). No real
             STT engine value exists yet; Nathan has not chosen one
             (docs/phase_41_implementation_plan.md).
+        brain_enabled: Whether the external Markdown "3D brain" integration
+            is switched on at all (default False). When False, every brain
+            command reports honestly that the integration is disabled; no
+            filesystem path is ever scanned.
+        brain_path: Root directory of the Markdown brain (Windows paths
+            accepted, e.g. "C:/Users/NathanGrainger/mi-aios"). Empty when
+            not configured. Jarvis never scans outside this root.
+        brain_folders: The included Markdown subfolders directly under
+            brain_path, in declared order. Validated at load time to be
+            single, non-hidden, non-excluded path segments only.
+        brain_max_file_bytes: Maximum size of a note scanned during a
+            brain search, and the read bound applied when showing a note.
+        brain_search_limit: Default maximum number of brain search results
+            returned in one search.
+        brain_ai_context_chars: Fixed character budget for the combined
+            brain excerpts supplied to advisory AI reasoning.
     """
 
     anthropic_api_key: str
@@ -140,6 +156,18 @@ class Settings:
     security_injection_sensitivity: str = "medium"
     security_approval_ttl_seconds: int = 300
     security_log_all_green: bool = False
+    brain_enabled: bool = False
+    brain_path: str = ""
+    brain_folders: tuple[str, ...] = (
+        "context",
+        "decisions",
+        "references",
+        "audits",
+        "brainstorms",
+    )
+    brain_max_file_bytes: int = 262_144
+    brain_search_limit: int = 25
+    brain_ai_context_chars: int = 4_000
 
 
 def _get_required(name: str) -> str:
@@ -324,6 +352,82 @@ def _get_log_level(name: str, default: str) -> str:
     return value
 
 
+def _get_brain_folders(name: str, default: str) -> tuple[str, ...]:
+    """Read and validate BRAIN_FOLDERS - the included Markdown subfolders.
+
+    The value is a comma-separated list of relative folder names under the
+    configured BRAIN_PATH root (for example
+    "context,decisions,references,audits,brainstorms"). Each entry must be
+    a single, safe path segment: non-empty, not "." or "..", never
+    absolute, never containing a path separator, never starting with "."
+    (so no hidden folder can be included), and never one of the excluded
+    directory names Jarvis refuses to scan ("apps", "node_modules",
+    "__pycache__", "venv"). This validation is what guarantees Jarvis can
+    never be configured to scan outside the configured root or into a
+    hidden/excluded folder.
+
+    Args:
+        name: The environment variable to read.
+        default: Fallback value used when the variable is unset or empty.
+
+    Returns:
+        The validated tuple of folder names, in their declared order.
+
+    Raises:
+        ConfigError: If the variable is set but any entry is not a single,
+            safe folder name.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return _split_brain_folders(default)
+
+    entries = _split_brain_folders(raw)
+    if not entries:
+        raise ConfigError(
+            f"Environment variable '{name}' must name at least one "
+            "included Markdown subfolder, got an empty list."
+        )
+
+    forbidden = {"apps", "node_modules", "__pycache__", "venv"}
+    for entry in entries:
+        if entry in {".", ".."}:
+            raise ConfigError(
+                f"Environment variable '{name}' contains an invalid "
+                f"folder name {entry!r}; '.' and '..' are never allowed."
+            )
+        if entry.startswith("."):
+            raise ConfigError(
+                f"Environment variable '{name}' contains a hidden folder "
+                f"name {entry!r}; hidden folders are never scanned."
+            )
+        if "/" in entry or "\\" in entry or ":" in entry:
+            raise ConfigError(
+                f"Environment variable '{name}' contains {entry!r}; each "
+                "entry must be a single folder name directly under the "
+                "BRAIN_PATH root, without path separators."
+            )
+        if entry in forbidden:
+            raise ConfigError(
+                f"Environment variable '{name}' contains {entry!r}, which "
+                "is always excluded from brain scanning."
+            )
+    return entries
+
+
+def _split_brain_folders(raw: str) -> tuple[str, ...]:
+    """Split a comma-separated folder list, dropping empty entries.
+
+    Args:
+        raw: The raw comma-separated value.
+
+    Returns:
+        The stripped, non-empty entries in declared order.
+    """
+    return tuple(
+        part.strip() for part in raw.split(",") if part.strip()
+    )
+
+
 def _get_optional_float(name: str, default: float | None) -> float | None:
     """Read an optional environment variable and parse it as a float.
 
@@ -410,4 +514,13 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         ),
         security_approval_ttl_seconds=_get_int("SECURITY_APPROVAL_TTL_SECONDS", 300),
         security_log_all_green=_get_bool("SECURITY_LOG_ALL_GREEN", False),
+        brain_enabled=_get_bool("BRAIN_ENABLED", False),
+        brain_path=_get_optional("BRAIN_PATH", ""),
+        brain_folders=_get_brain_folders(
+            "BRAIN_FOLDERS",
+            "context,decisions,references,audits,brainstorms",
+        ),
+        brain_max_file_bytes=_get_int("BRAIN_MAX_FILE_BYTES", 262_144),
+        brain_search_limit=_get_int("BRAIN_SEARCH_LIMIT", 25),
+        brain_ai_context_chars=_get_int("BRAIN_AI_CONTEXT_CHARS", 4_000),
     )
