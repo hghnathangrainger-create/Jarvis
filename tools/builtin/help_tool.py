@@ -28,9 +28,10 @@ two-step exception (update phase, then - only if verification
 succeeds - show project state) - the internal-only
 project_state_verify/schedule_verify_enabled_state tools, and the
 internal decision literal naming this exception, are deliberately
-never documented here, since neither is user-facing; updated Phase 99,
-Batch 1 to describe the same command's new read-only schedule-
-enabled-state-by-id capability).
+never documented here, since neither is user-facing;updated Phase 99,
+    Batch 1 to describe the same command's new read-only schedule-
+    enabled-state-by-id capability; updated by the Markdown Brain
+    Integration to document the five "brain ..." commands).
 
 HelpTool is a GREEN tool: it returns a static, hand-maintained list of
 command grammar phrases and one-line descriptions. It changes nothing,
@@ -111,6 +112,19 @@ _HELP_LINES: tuple[str, ...] = (
     "  restore file <quarantine-file-or-path> - restores a quarantined file (approval required)",
     "  summarise file <path> / summarize file <path> - AI summary of a file (advisory; "
     "requires AI_REASONING_ENABLED)",
+    "",
+    "Markdown brain (external notes folder; disabled unless BRAIN_ENABLED=true):",
+    "  brain status - shows whether the brain is enabled/configured and which "
+    "allowed folders exist (never scans notes)",
+    "  brain search <query> - deterministic, case-insensitive search over "
+    "filenames, note titles, and note content (up to BRAIN_SEARCH_LIMIT results "
+    "by default)",
+    "  brain read <path|title> - shows one Markdown note with its relative source "
+    "path (bounded by BRAIN_MAX_FILE_BYTES)",
+    "  brain remember <title> <content> - proposes creating a new note (approval "
+    "required; never overwrites an existing note)",
+    "  brain update <rel-path> <content> - proposes replacing an existing note "
+    "(approval required; never creates, never deletes)",
     "",
     "Web:",
     "  search the web for <query> - runs a live web search",

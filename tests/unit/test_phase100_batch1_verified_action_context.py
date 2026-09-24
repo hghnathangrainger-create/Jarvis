@@ -1313,7 +1313,11 @@ class TestLiveIntegrationConfinement:
     convention this codebase already established for Phase 98/99
     Batch 3's own activation proofs."""
 
-    def test_context_source_has_exactly_the_accepted_three_members(self) -> None:
+    def test_context_source_has_exactly_the_accepted_members(self) -> None:
+        """VERIFIED_ACTIONS is Phase 100's own accepted third member;
+        BRAIN is the Markdown Brain Integration's accepted fourth member
+        (its real consumer is the optional BrainService collaborator) -
+        both accepted, nothing else, never speculative."""
         source = _module_source("intelligence/context.py")
         tree = ast.parse(source)
         (context_source_node,) = (
@@ -1328,7 +1332,9 @@ class TestLiveIntegrationConfinement:
             for target in stmt.targets
             if isinstance(target, ast.Name)
         }
-        assert member_names == {"MEMORY", "PROJECT_STATE", "VERIFIED_ACTIONS"}
+        assert member_names == {
+            "MEMORY", "PROJECT_STATE", "VERIFIED_ACTIONS", "BRAIN",
+        }
 
     def test_verified_action_context_reference_confined_to_named_functions(
         self,

@@ -167,6 +167,43 @@ _JARVIS_BRAIN_EXACT_COMMANDS: frozenset[str] = frozenset(
     {"jarvis brain status", "show jarvis brain"}
 )
 
+#: Markdown brain commands (Markdown Brain Integration). One exact,
+#: read-only status phrase plus four fixed leading phrases; every phrase
+#: deliberately includes a trailing space (except the exact one) because
+#: _file_prefix() matches via plain str.startswith(), so a space-less
+#: prefix would also match a run-together typo ("brain readfoo") and a
+#: bare argument-less command ("brain search") must not match at all -
+#: mirroring _WEBPAGE_READ_PREFIXES' own stricter-grammar reasoning.
+#:
+#: Collision check, performed by direct comparison against every other
+#: exact/prefix table in this module (not assumed): no existing command
+#: anywhere STARTS WITH "brain" - the word appears only inside
+#: _JARVIS_BRAIN_EXACT_COMMANDS' two exact phrases, which begin with
+#: "jarvis "/"show " - so none of these five can collide as a prefix of,
+#: or be shadowed by, any existing entry. "brain status" is an exact
+#: phrase checked alongside them, and "brain search "/"brain read "
+#: diverge at their 8th character ('e' vs 't'/'a' after "brain s"/
+#: "brain r"), while "brain remember "/"brain update " share only their
+#: first word. Checked against the generic memory fallback in match()
+#: as well: "brain remember ..." CONTAINS the keyword "remember", so
+#: this whole family MUST be checked before that fallback (it is - see
+#: the dispatch order in match()), or the write command would be
+#: misrouted to the read-only memory tool.
+_BRAIN_STATUS_EXACT_COMMANDS: frozenset[str] = frozenset({"brain status"})
+_BRAIN_SEARCH_PREFIXES: tuple[str, ...] = ("brain search ",)
+_BRAIN_READ_PREFIXES: tuple[str, ...] = ("brain read ",)
+_BRAIN_REMEMBER_PREFIXES: tuple[str, ...] = ("brain remember ",)
+_BRAIN_UPDATE_PREFIXES: tuple[str, ...] = ("brain update ",)
+
+#: Brain command stems typed WITHOUT their mandatory argument. Matched
+#: only to guarantee they return None immediately rather than falling
+#: through to an unrelated family ("brain remember" contains the generic
+#: memory keyword "remember" and would otherwise be re-read as a memory
+#: save). An incomplete command is honestly not a command at all.
+_BRAIN_INCOMPLETE_EXACT: frozenset[str] = frozenset(
+    {"brain search", "brain read", "brain remember", "brain update"}
+)
+
 #: Leading phrases for the five "Claude Prompt Studio" modes (Phase
 #: 86, Batch 2), each mapping to PreparePromptTool's own "mode" input.
 #: None is a superset-string of another - they diverge at their second
@@ -849,6 +886,41 @@ class CommandRouter:
             "jarvis_brain"
         ):
             return "jarvis_brain"
+
+        # Markdown brain commands (Markdown Brain Integration): the
+        # read-only family (status/search/read) routes to brain_read
+        # (GREEN - see BrainReadTool.action_for's own fixed strings), the
+        # write family (remember/update) routes to brain_write (YELLOW -
+        # the Tool Executor withholds it for approval exactly like every
+        # other write command). Checked here, immediately after the
+        # jarvis-brain exact match above and WELL BEFORE the generic
+        # memory-keyword fallback near the end of this method, because
+        # "brain remember ..." contains "remember" - confirmed by direct
+        # comparison against every table above, not assumed.
+        #
+        # Once a request matches this family's grammar, it NEVER falls
+        # through to any other matcher: when the brain tool is not
+        # registered, the explicit None below keeps "brain remember ..."
+        # from being silently reinterpreted as a memory command (or any
+        # other family), it simply does not match at all.
+        if (
+            lowered.strip() in _BRAIN_STATUS_EXACT_COMMANDS
+            or self._file_prefix(lowered, _BRAIN_SEARCH_PREFIXES) is not None
+            or self._file_prefix(lowered, _BRAIN_READ_PREFIXES) is not None
+        ):
+            return "brain_read" if self._registry.has_tool("brain_read") else None
+
+        if (
+            self._file_prefix(lowered, _BRAIN_REMEMBER_PREFIXES) is not None
+            or self._file_prefix(lowered, _BRAIN_UPDATE_PREFIXES) is not None
+        ):
+            return "brain_write" if self._registry.has_tool("brain_write") else None
+
+        if lowered.strip() in _BRAIN_INCOMPLETE_EXACT:
+            # A brain stem with its mandatory argument missing: never
+            # fall through to an unrelated family (see the constant's
+            # own docstring) - it simply does not match.
+            return None
 
         # Claude Prompt Studio (Phase 86, Batch 2): read-only and GREEN.
         # Prefix match only, on a fixed set of five mode-specific
@@ -1857,6 +1929,12 @@ class CommandRouter:
         if tool_name == "project_state_update":
             return self._build_project_state_update_input(text)
 
+        if tool_name == "brain_read":
+            return self._build_brain_read_input(text)
+
+        if tool_name == "brain_write":
+            return self._build_brain_write_input(text)
+
         # schedule_list takes no input
         # info takes no input
         # help takes no input
@@ -1864,6 +1942,82 @@ class CommandRouter:
         # jarvis_brain takes no input
         # project_state_show takes no input
         return {}
+
+    @classmethod
+    def _build_brain_read_input(cls, text: str) -> dict[str, object]:
+        """Build input for the read-only brain tool.
+
+        Recognised shapes: "brain status" (exact), "brain search <query>",
+        and "brain read <path|title>". The trailing text is extracted
+        verbatim (only surrounding whitespace/quotes stripped) - never
+        validated or interpreted here, exactly like every other
+        build_input() branch; BrainReadTool/BrainService own all
+        validation.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dict: {"op": "status"}, {"op": "search", "query":
+            ...}, or {"op": "read", "path": ...}.
+        """
+        if text.strip().casefold() in _BRAIN_STATUS_EXACT_COMMANDS:
+            return {"op": "status"}
+
+        search_prefix = cls._file_prefix(text.casefold(), _BRAIN_SEARCH_PREFIXES)
+        if search_prefix is not None:
+            query = text[len(search_prefix) :].strip().strip("'\"")
+            return {"op": "search", "query": query}
+
+        read_prefix = cls._file_prefix(text.casefold(), _BRAIN_READ_PREFIXES)
+        if read_prefix is not None:
+            reference = text[len(read_prefix) :].strip().strip("'\"")
+            return {"op": "read", "path": reference}
+
+        # Unreachable via match() (it only routes the three shapes above),
+        # but reported honestly rather than guessed at.
+        return {"op": "status"}
+
+    @classmethod
+    def _build_brain_write_input(cls, text: str) -> dict[str, object]:
+        """Build input for the approval-gated brain write tool.
+
+        Recognised shapes: "brain remember <title> <content>" and "brain
+        update <rel-path> <content>". The FIRST whitespace-delimited token
+        after the prefix is the title/path; everything after it is the
+        proposed content, verbatim. When no content follows, content is
+        the empty string and BrainWriteTool reports that honestly after
+        approval - this method never invents or trims content beyond
+        surrounding whitespace.
+
+        Args:
+            text: The original request text.
+
+        Returns:
+            The input dict: {"op": "remember", "title": ..., "content":
+            ...} or {"op": "update", "path": ..., "content": ...}.
+        """
+        update_prefix = cls._file_prefix(text.casefold(), _BRAIN_UPDATE_PREFIXES)
+        if update_prefix is not None:
+            remainder = text[len(update_prefix) :]
+            parts = remainder.split(None, 1)
+            reference = parts[0] if parts else ""
+            content = parts[1].strip() if len(parts) > 1 else ""
+            return {"op": "update", "path": reference, "content": content}
+
+        remember_prefix = cls._file_prefix(
+            text.casefold(), _BRAIN_REMEMBER_PREFIXES
+        )
+        if remember_prefix is not None:
+            remainder = text[len(remember_prefix) :]
+            parts = remainder.split(None, 1)
+            title = parts[0] if parts else ""
+            content = parts[1].strip() if len(parts) > 1 else ""
+            return {"op": "remember", "title": title, "content": content}
+
+        # Unreachable via match() (it only routes the two shapes above),
+        # but reported honestly rather than guessed at.
+        return {"op": "remember", "title": "", "content": ""}
 
     @staticmethod
     def _contains(text: str, keywords: tuple[str, ...]) -> bool:

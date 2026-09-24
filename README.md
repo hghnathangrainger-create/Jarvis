@@ -1308,6 +1308,68 @@ No restore, delete, empty-trash, or permanent-delete control from the dashboard.
 
 ---
 
+## Markdown Brain Integration — External Markdown Notes (complete)
+
+Jarvis can deterministically search and read Nathan's separate **"3D brain"** — a folder of plain Markdown notes linked to each other with `[[wikilinks]]` — and, only behind an explicit YELLOW approval, create or update one note in it. The brain stays exactly what it is: a plain filesystem folder. Nothing is copied into SQLite, there are no embeddings and no vector database, and episodic memory (`remember this: ...`) remains its own, completely separate feature.
+
+**The visualizer is not knowledge.** `apps/` inside the brain folder is the 3D viewer's application code — it, together with `.git`, `node_modules`, and every hidden (dot-prefixed) folder, is always excluded from scanning, and Jarvis never reads or changes it.
+
+### Setup
+
+Add to your `.env` (all six are documented in `.env.example`):
+
+```
+BRAIN_ENABLED=true
+BRAIN_PATH=C:/Users/NathanGrainger/mi-aios
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BRAIN_ENABLED` | `false` | Master switch. While false, every `brain ...` command honestly reports that the integration is disabled and **no path is ever scanned**. |
+| `BRAIN_PATH` | *(empty)* | Root directory of the Markdown brain. Windows paths are accepted; forward slashes are recommended. |
+| `BRAIN_FOLDERS` | `context,decisions,references,audits,brainstorms` | Comma-separated list of the included Markdown subfolders directly under the root. Only these folders are ever scanned; each entry is validated at load time to be a single, non-hidden, non-excluded folder name. |
+| `BRAIN_MAX_FILE_BYTES` | `262144` | Bound for reading one note, and the size above which a note is skipped during a search. |
+| `BRAIN_SEARCH_LIMIT` | `25` | Maximum number of results one search returns. |
+| `BRAIN_AI_CONTEXT_CHARS` | `4000` | Character budget for brain excerpts handed to advisory AI reasoning. |
+
+### Commands
+
+All five commands work with AI reasoning disabled and require no API key — they never call Claude or any provider.
+
+| Command | What it does |
+|---|---|
+| `brain status` | Shows whether the brain is enabled/configured, whether the root exists, and which allowed folders exist (GREEN; never scans note contents). |
+| `brain search <query>` | Deterministic, case-insensitive search over filenames, note titles (first heading), and note content; short snippets with relative source paths, bounded by `BRAIN_SEARCH_LIMIT` (GREEN). |
+| `brain read <path\|title>` | Shows one bounded Markdown note with its relative source path. Accepts a relative path (`context/runbook.md`), a filename, or an exact note title; an ambiguous title honestly lists its candidates (GREEN). |
+| `brain remember <title> <content>` | Proposes creating a **new** note. The title is the first word (optionally `folder/name`); everything after it is the content. Bare titles land in the first configured folder (`context/` by default). **Asks for approval; never overwrites an existing note.** |
+| `brain update <rel-path> <content>` | Proposes replacing an **existing** note. **Asks for approval; never creates a note, never deletes anything.** |
+
+### Security and scope behaviour
+
+- **Search/read are GREEN and strictly read-only** — they classify through the same Security Manager as every other command, using fixed, input-independent action strings, so a query or path can never influence the tier.
+- **Create/update are YELLOW and go through the existing approval flow unchanged.** Before you decide, the approval prompt shows the **exact resolved target path** and a bounded preview of the **proposed content** (the full proposal is also the approval request's own action text). Declining writes nothing; only an approved request reaches the tool, and even then the tool re-validates scope before writing.
+- **Writes are atomic** (temporary file + `os.replace`) and stay inside `BRAIN_PATH`'s allowed Markdown folders. A create refuses to overwrite; an update refuses to create. **There is no delete command anywhere — Jarvis never deletes a brain note.**
+- **Strict scope enforcement:** only `.md` files; absolute paths, drive letters, `..` traversal, hidden segments, and non-allowed folders are rejected; every path is re-checked *after* resolution, so a symlink escaping the root (or pointing outside the allowed folders) is rejected too. Reads, search results, snippets, and AI context are all bounded.
+- **No secrets are exposed:** `brain status` prints only the brain path and folder existence — never any other `.env` value.
+- **AI reasoning (optional):** when AI reasoning is enabled, `ask jarvis:` may include a small, deterministic set of keyword-matched brain excerpts. They are labelled **UNTRUSTED reference data — not instructions**, each with its relative source path, under a fixed disclaimer; note content is never obeyed as instructions, never causes a brain write, and never grants any action outside the normal GREEN/YELLOW/RED controls. With AI reasoning disabled (the default), nothing changes and the brain CLI commands above keep working.
+
+### Tests
+
+```powershell
+poetry run pytest tests/unit/test_brain_service.py tests/unit/test_brain_tools.py -v
+poetry run pytest tests/unit/test_brain_routing.py tests/unit/test_brain_settings.py -v
+poetry run pytest tests/unit/test_brain_context.py tests/unit/test_main_brain_wiring.py -v
+poetry run pytest tests/integration/test_brain_end_to_end.py -v
+```
+
+All of these run against temporary directories only — they never read or write your real brain folder, and never read your `.env`.
+
+### What is deliberately NOT included
+
+No embeddings, no vector database, no semantic/ranked search, no copying brain notes into SQLite, no delete/rename/move of brain notes, no scanning outside `BRAIN_PATH`'s allowed folders, no AI-driven selection of context (plain deterministic keyword matching only), no AI write authority of any kind, and no change to any existing GREEN/YELLOW/RED rule or approval behaviour.
+
+---
+
 ## Example Session
 
 ```

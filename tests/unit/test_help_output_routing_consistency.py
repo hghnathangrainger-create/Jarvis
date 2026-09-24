@@ -104,6 +104,18 @@ _REPRESENTATIVE_PHRASES: tuple[tuple[str, str], ...] = (
     ("Files: list quarantine", "list quarantine"),
     ("Files: restore file", "restore file notes.txt"),
     ("Files: summarise file", "summarise file notes.txt"),
+    # Markdown brain
+    ("Markdown brain: brain status", "brain status"),
+    ("Markdown brain: brain search", "brain search deployment"),
+    ("Markdown brain: brain read", "brain read context/nonexistent-note"),
+    (
+        "Markdown brain: brain remember",
+        "brain remember context/consistency_probe probe content",
+    ),
+    (
+        "Markdown brain: brain update",
+        "brain update context/nonexistent-note probe",
+    ),
     # Web
     ("Web: search the web", "search the web for cats"),
     ("Web: summarise web search", "summarise web search for cats"),

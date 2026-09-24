@@ -114,6 +114,24 @@ class LifecycleManager:
         # Step 10: Start FastAPI server (non-critical).
         self._start_subsystem("api_server", self._start_api_server)
 
+        # Step 11: Knowledge Library (non-critical).
+        self._start_subsystem("knowledge", self._start_knowledge)
+
+        # Step 12: Goal & Milestone Tracking (non-critical).
+        self._start_subsystem("goals", self._start_goals)
+
+        # Step 13: Project Management (non-critical).
+        self._start_subsystem("projects", self._start_projects)
+
+        # Step 14: Computer Control (non-critical).
+        self._start_subsystem("computer_control", self._start_computer_control)
+
+        # Step 15: AI Agent System (non-critical).
+        self._start_subsystem("agents", self._start_agents)
+
+        # Step 16: Android Client Backend (non-critical).
+        self._start_subsystem("android", self._start_android)
+
         # Set state to READY.
         self.state = SystemState.READY
         self._log_event("startup_complete", details="All subsystems initialised")
@@ -226,6 +244,36 @@ class LifecycleManager:
 
     def _start_api_server(self) -> bool:
         """Start the FastAPI server (handled externally via uvicorn)."""
+        return True
+
+    def _start_knowledge(self) -> bool:
+        """Initialize the Knowledge Library."""
+        # Knowledge is wired through the orchestrator.
+        return True
+
+    def _start_goals(self) -> bool:
+        """Initialize Goal & Milestone tracking."""
+        # Goals are wired through the orchestrator.
+        return True
+
+    def _start_projects(self) -> bool:
+        """Initialize Project Management."""
+        # Projects are wired through the orchestrator.
+        return True
+
+    def _start_computer_control(self) -> bool:
+        """Initialize Computer Control subsystem."""
+        # Computer control is wired through the orchestrator.
+        return True
+
+    def _start_agents(self) -> bool:
+        """Initialize AI Agent System."""
+        # Agents are wired through the orchestrator.
+        return True
+
+    def _start_android(self) -> bool:
+        """Initialize Android Client Backend."""
+        # Android backend is wired through the orchestrator.
         return True
 
     def _startup_summary(self, errors: list[str] | None = None) -> dict[str, Any]:

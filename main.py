@@ -125,6 +125,8 @@ from scheduling.schedule_store import ScheduleStore
 from tools.builtin import (
     AgentTool,
     ApprovalHistoryTool,
+    BrainReadTool,
+    BrainWriteTool,
     ConfigTool,
     CostTrackingTool,
     EchoTool,
@@ -171,6 +173,7 @@ from tools.builtin import (
     CommandTool,
     ScreenTool,
 )
+from tools.brain_service import BrainService
 from tools.duckduckgo_search_provider import DuckDuckGoSearchProvider
 from tools.executor import ToolExecutor
 from tools.registry import ToolRegistry
@@ -318,6 +321,32 @@ def build_orchestrator() -> JarvisOrchestrator:
     # instance above, never a second QuarantineStore/database connection.
     registry.register_tool(FileRestoreTool(quarantine_store))
     registry.register_tool(ApprovalHistoryTool(approval_history))
+
+    # Markdown brain (Markdown Brain Integration): one shared
+    # BrainService built from the already-loaded Settings - the single
+    # place BRAIN_* configuration is ever read. Both brain tools below
+    # and the optional ContextAssembler brain source reuse this exact
+    # instance; nothing ever constructs a second service, and the
+    # service itself touches no filesystem until a command runs. Both
+    # tools are registered even when the brain is disabled/unconfigured
+    # (the default), so "brain status" can honestly report WHY brain
+    # commands are unavailable instead of falling through to the
+    # generic unmatched-request response - and no path is ever scanned
+    # while disabled.
+    brain_service = BrainService(
+        enabled=settings.brain_enabled,
+        root=settings.brain_path,
+        folders=settings.brain_folders,
+        max_file_bytes=settings.brain_max_file_bytes,
+        search_limit=settings.brain_search_limit,
+        ai_context_chars=settings.brain_ai_context_chars,
+    )
+    # BrainReadTool is GREEN (status/search/read - read-only);
+    # BrainWriteTool is YELLOW (remember/update - held for explicit
+    # approval by the Tool Executor/Approval Manager, exactly like every
+    # other write tool). Neither ever calls AI or the network.
+    registry.register_tool(BrainReadTool(brain_service))
+    registry.register_tool(BrainWriteTool(brain_service))
 
     # Durable workflow lifecycle history (Durable Workflow Lifecycle
     # Foundation - a prerequisite turn, not a numbered phase). Mirrors
@@ -625,6 +654,12 @@ def build_orchestrator() -> JarvisOrchestrator:
         memory_manager=memory,
         project_state_store=project_state_store,
         verified_action_context_builder=verified_action_context_builder,
+        # Markdown Brain Integration: optional fourth source. With
+        # BRAIN_ENABLED unset/false (the default) or BRAIN_PATH unset,
+        # this contributes nothing - brain context is strictly additive,
+        # and the CLI brain commands above are completely unaffected by
+        # whether this source (or AI reasoning itself) is active.
+        brain_service=brain_service,
     )
 
     # Sequential Workflow Engine (Phase 15, Batch 2/3): reuses the exact same

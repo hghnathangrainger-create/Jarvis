@@ -330,10 +330,13 @@ def test_emit_audit_event_helper_exists_and_wraps_only_emit() -> None:
         and node.type is not None
         and getattr(node.type, "id", None) == "Exception"
     ]
-    # Exactly two bare `except Exception` blocks are expected: the
-    # pre-existing tool-exception isolation in _handle_run, and the new
-    # logger-emit isolation in _emit_audit_event.
-    assert len(except_handlers) == 2
+    # Exactly three bare `except Exception` blocks are expected: the
+    # pre-existing tool-exception isolation in _handle_run, the
+    # logger-emit isolation in _emit_audit_event, and the read-only
+    # approval-metadata-hook isolation in _safe_approval_metadata (the
+    # same narrow pattern: a best-effort, non-authoritative side channel
+    # can never alter the outcome already decided).
+    assert len(except_handlers) == 3
 
 
 def test_logger_isolation_except_block_body_is_a_single_pass() -> None:

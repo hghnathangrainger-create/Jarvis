@@ -27,17 +27,31 @@ Responsibilities:
       from the two live compound workflows, and render them beneath a
       fixed heading and disclaimer establishing they are historical,
       non-authoritative evidence (Phase 100, Batch 2).
+    - Read, through the optional BrainService collaborator, a small set
+      of deterministic keyword-matched excerpts from the configured
+      external Markdown "3D brain", each labelled with its relative
+      source path beneath a fixed heading and disclaimer establishing
+      the text is UNTRUSTED reference data, never instructions (Markdown
+      Brain Integration). Omitted entirely whenever the brain is
+      disabled or unconfigured, so nothing changes for any existing
+      setup.
     - Apply fixed, hand-maintained character budgets (Section 24.A.5,
       extended by Section 12A.11): 500 characters per item, a
       500-character fixed ProjectState reservation, a 2,500-character
       fixed memory allocation, and a 1,000-character fixed Verified
       Action Context allocation - three independent budgets, never one
       shared, reallocatable pool.
-    - Combine the assembled, always-UNTRUSTED ContextItems into a
-      single AIContextBlock for the existing, unmodified
+    - Combine the assembled, always-UNTRUSTED ContextItems into      a single AIContextBlock for the existing, unmodified
       PromptBuilder/AIRouter/AIReasoningEngine path to consume -
       mirroring ai/memory_ingestion.py's own established
       multi-record-into-one-block combination pattern exactly.
+    - Optionally combine bounded, deterministic keyword excerpts from
+      the configured external Markdown "3D brain" as a fourth source
+      (Markdown Brain Integration) - each excerpt labelled with its
+      relative source path under a fixed UNTRUSTED-reference-data
+      heading and disclaimer, contributed only when the brain is
+      actually enabled and configured, and never obeyed as
+      instructions.
 
 Does NOT:
     - Call any AI provider, or perform any AI-assisted selection or
@@ -73,9 +87,11 @@ from enum import Enum
 
 from ai.context_models import AIContextBlock
 from config.constants import ContentTrust
+from intelligence.brain_context import build_brain_context_text
 from intelligence.verified_action_context import VerifiedActionContextBuilder
 from memory.memory_manager import MemoryManager
 from project_state.project_state_store import ProjectStateRecord, ProjectStateStore
+from tools.brain_service import BrainService
 
 #: The fixed Section 24.A.4 stopword tuple, verbatim. Removed from every
 #: derived query, alongside _COMMAND_PREFIX_WORDS below, before the
@@ -118,6 +134,20 @@ _MAX_MEMORY_ITEMS = 5
 #: already bounds its own entry count/ordering; this is only a
 #: character-count safety net for the rendered section as a whole.
 _VERIFIED_ACTIONS_CHAR_BUDGET = 1000
+
+#: Markdown Brain Integration: no second fixed character budget is
+#: imposed here - BrainService itself already bounds the excerpt text
+#: to the configured BRAIN_AI_CONTEXT_CHARS budget, and
+#: intelligence/brain_context.py additionally caps the per-note excerpt
+#: and the note count, so this source's contribution is bounded by
+#: construction before it ever reaches this assembler.
+#:
+#: Fixed, bounded, non-sensitive failure note for a genuine brain
+#: retrieval error - the same convention as
+#: _VERIFIED_ACTION_CONTEXT_UNAVAILABLE_NOTE above. Never a raw
+#: exception, filesystem path, or database string, and - like every
+#: note - never included in build_ai_context_block()'s combined text.
+_BRAIN_CONTEXT_UNAVAILABLE_NOTE = "brain context unavailable"
 
 #: Per-item truncation notice. Mirrors ai/memory_ingestion.py's own
 #: _TRUNCATION_NOTICE_TEMPLATE convention exactly (truncate the raw
@@ -163,14 +193,18 @@ class ContextSource(Enum):
     (MEMORY, PROJECT_STATE). Phase 100, Batch 2
     (docs/phase_100_intelligence_core_gap_audit.md) adds the third
     member, VERIFIED_ACTIONS, for its own real, already-built consumer
-    (VerifiedActionContextBuilder) - never added speculatively, exactly
-    matching the bar this docstring already set. A future batch may add
-    a further member only under the same condition.
+    (VerifiedActionContextBuilder). The Markdown Brain Integration adds
+    the fourth member, BRAIN, for its own real consumer (the optional
+    BrainService collaborator wired by main.py) - never added
+    speculatively, exactly matching the bar this docstring already set.
+    A future batch may add a further member only under the same
+    condition.
     """
 
     MEMORY = "memory"
     PROJECT_STATE = "project_state"
     VERIFIED_ACTIONS = "verified_actions"
+    BRAIN = "brain"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,8 +249,9 @@ class AssembledContext:
     Attributes:
         request_text: The live request text, verbatim (never itemized;
             never counted toward the item character budget below).
-        items: The assembled, ordered ContextItems - up to six total
-            (up to five memory + up to one ProjectState).
+        items: The assembled, ordered ContextItems - up to five memory,
+            up to one ProjectState, up to one Verified Action Context,
+            and up to one Markdown-brain excerpt block.
         total_chars: The sum of every included item's own final
             (post-truncation) text length. Never includes
             request_text, and never includes delimiter/label framing.
@@ -383,6 +418,12 @@ class ContextAssembler:
             one narrow, owned dependency wrapping the durable compound-
             progress/pending-approval stores (Phase 100, Batch 2). None
             disables this source entirely, contributing nothing.
+        _brain_service: Used only for search_any() - the one narrow,
+            owned dependency wrapping the configured external Markdown
+            brain (Markdown Brain Integration). None, or a disabled /
+            unconfigured service, disables this source entirely,
+            contributing nothing. Never used for any write method; this
+            assembler only ever reads.
     """
 
     def __init__(
@@ -391,6 +432,7 @@ class ContextAssembler:
         memory_manager: MemoryManager,
         project_state_store: ProjectStateStore,
         verified_action_context_builder: VerifiedActionContextBuilder | None = None,
+        brain_service: BrainService | None = None,
     ) -> None:
         """Initialise the assembler with its read-only collaborators.
 
@@ -406,17 +448,27 @@ class ContextAssembler:
                 every existing caller/test continues to construct a
                 ContextAssembler unchanged; omitting it simply means
                 this third source contributes nothing.
+            brain_service: The optional BrainService (Markdown Brain
+                Integration) used to read bounded, deterministic keyword
+                excerpts from the configured external Markdown brain.
+                Optional and defaulting to None so every existing
+                caller/test continues to construct a ContextAssembler
+                unchanged; omitting it (or supplying a disabled /
+                unconfigured service) simply means this fourth source
+                contributes nothing.
         """
         self._memory_manager = memory_manager
         self._project_state_store = project_state_store
         self._verified_action_context_builder = verified_action_context_builder
+        self._brain_service = brain_service
 
     def assemble(self, request_text: str) -> AssembledContext:
         """Assemble bounded context for one live request.
 
         ProjectState is always attempted first (Section 24.A.5's fixed
         source priority), then memory selection, then Verified Action
-        Context (Phase 100, Batch 2). A failure in any one source never
+        Context (Phase 100, Batch 2), then Markdown brain excerpts
+        (Markdown Brain Integration). A failure in any one source never
         aborts the others, and never aborts the overall assembly - each
         is isolated in its own try/except, represented as a short,
         fixed, non-sensitive note.
@@ -432,7 +484,7 @@ class ContextAssembler:
                 the "ask jarvis:" prefix and surrounding whitespace).
 
         Returns:
-            An AssembledContext with up to seven items, honest notes,
+            An AssembledContext with up to eight items, honest notes,
             and correct truncated/total_chars accounting.
         """
         notes: list[str] = []
@@ -456,12 +508,20 @@ class ContextAssembler:
         notes.extend(va_notes)
         any_truncated_or_omitted = any_truncated_or_omitted or va_truncated
 
+        brain_item, brain_truncated, brain_notes = self._build_brain_item(
+            request_text
+        )
+        notes.extend(brain_notes)
+        any_truncated_or_omitted = any_truncated_or_omitted or brain_truncated
+
         items: list[ContextItem] = []
         if project_state_item is not None:
             items.append(project_state_item)
         items.extend(memory_items)
         if verified_action_item is not None:
             items.append(verified_action_item)
+        if brain_item is not None:
+            items.append(brain_item)
 
         total_chars = sum(len(item.text) for item in items)
 
@@ -553,6 +613,65 @@ class ContextAssembler:
             ),
         )
         return item, truncated, []
+
+    def _build_brain_item(
+        self, request_text: str
+    ) -> tuple[ContextItem | None, bool, list[str]]:
+        """Build the single, optional Markdown-brain ContextItem.
+
+        Markdown Brain Integration: contributes nothing - no item and no
+        note - when the brain service was never wired (None), when it is
+        disabled or unconfigured (an absent feature is not a failure),
+        or when no query term matched any note (nothing relevant was
+        deterministically found). A genuine retrieval error contributes
+        one fixed, bounded, non-sensitive note to AssembledContext.notes
+        only - never included in the AI prompt itself, exactly like the
+        optional historical-evidence source's own failure handling.
+
+        Selection is plain deterministic keyword matching (the same
+        derive_query_terms used for memory selection, applied to
+        BrainService.search_any) - never semantic search, never
+        AI-selected content. The item's text already carries its own
+        fixed UNTRUSTED-reference-data heading, disclaimer, and per-note
+        relative source paths; its ContextItem trust is UNTRUSTED like
+        every other item this assembler produces.
+
+        Args:
+            request_text: The live request text.
+
+        Returns:
+            A tuple of (item, truncated, notes). item is None unless at
+            least one brain note matched. truncated is always False -
+            any budget-driven omission inside the brain block is
+            disclosed by the block's own embedded notice, not by
+            re-slicing it here.
+        """
+        if self._brain_service is None or not self._brain_service.configured:
+            return None, False, []
+
+        terms = derive_query_terms(request_text)
+        if not terms:
+            return None, False, []
+
+        try:
+            text = build_brain_context_text(self._brain_service, terms)
+        except Exception:
+            return None, False, [_BRAIN_CONTEXT_UNAVAILABLE_NOTE]
+        if not text:
+            return None, False, []
+
+        item = ContextItem(
+            context_id="brain:excerpts",
+            source=ContextSource.BRAIN,
+            source_record_id=None,
+            text=text,
+            trust=ContentTrust.UNTRUSTED,
+            relevance_reason=(
+                "deterministic keyword matches from the configured "
+                "Markdown brain"
+            ),
+        )
+        return item, False, []
 
     def _build_memory_items(
         self, request_text: str

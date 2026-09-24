@@ -19,6 +19,10 @@
                     <span class="nav-icon">&#9719;</span>
                     <span class="nav-label">Today</span>
                 </div>
+                <div class="nav-item" data-section="chat">
+                    <span class="nav-icon">&#9993;</span>
+                    <span class="nav-label">Chat</span>
+                </div>
                 <div class="nav-item" data-section="tasks">
                     <span class="nav-icon">&#9776;</span>
                     <span class="nav-label">Tasks</span>
@@ -75,6 +79,12 @@
                     <h2 class="section-title">Today</h2>
                 </div>
                 <div class="grid-4" id="todayStats"></div>
+                <div class="card" style="margin-top: 16px;">
+                    <div class="card-header">
+                        <span class="card-title">Subsystems</span>
+                    </div>
+                    <div id="todaySubsystems"></div>
+                </div>
                 <div class="grid-2" style="margin-top: 16px;">
                     <div class="card">
                         <div class="card-header">
@@ -97,6 +107,34 @@
                                 <div class="empty-state-icon">&#9881;</div>
                                 <div class="empty-state-text">No events yet</div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CHAT -->
+            <div class="section" id="section-chat">
+                <div class="section-header">
+                    <h2 class="section-title">Chat with Jarvis</h2>
+                    <div class="input-group">
+                        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:13px; color:var(--text-muted);">
+                            <input type="checkbox" id="ttsToggle" checked>
+                            🔊 Voice
+                        </label>
+                    </div>
+                </div>
+                <div class="chat-container">
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="chat-empty">
+                            <div style="font-size:48px; margin-bottom:12px;">&#9881;</div>
+                            <div style="font-size:16px; color:var(--text-secondary);">Ask Jarvis anything...</div>
+                            <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">Type a message below to get started</div>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <div class="chat-input-wrapper">
+                            <textarea id="chatInput" class="chat-input" placeholder="Type your message..." rows="1"></textarea>
+                            <button class="chat-send-btn" id="chatSendBtn" title="Send message">&#9654;</button>
                         </div>
                     </div>
                 </div>

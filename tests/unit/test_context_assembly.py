@@ -131,13 +131,15 @@ def _assembler(
 # --- A. Context contract tests -------------------------------------------------
 
 
-def test_context_source_has_exactly_three_bounded_members() -> None:
+def test_context_source_has_exactly_four_bounded_members() -> None:
     """Phase 100, Batch 2 (docs/phase_100_intelligence_core_gap_audit.md)
-    adds VERIFIED_ACTIONS as a third member, for its own real,
-    already-built consumer (VerifiedActionContextBuilder) - not
-    speculatively, matching the bar ContextSource's own docstring sets."""
+    adds VERIFIED_ACTIONS as a third member, and the Markdown Brain
+    Integration adds BRAIN as a fourth - each for its own real,
+    already-built consumer (VerifiedActionContextBuilder / the optional
+    BrainService collaborator wired by main.py) - never speculatively,
+    matching the bar ContextSource's own docstring sets."""
     assert {member.value for member in ContextSource} == {
-        "memory", "project_state", "verified_actions",
+        "memory", "project_state", "verified_actions", "brain",
     }
 
 
@@ -389,12 +391,13 @@ def test_recent_failure_is_isolated_from_lexical_success() -> None:
 def test_memory_selection_never_calls_any_ai_dependency() -> None:
     """Structural proof: ContextAssembler's constructor accepts only
     MemoryManager/ProjectStateStore/VerifiedActionContextBuilder (the
-    last added by Phase 100, Batch 2) - it has no AI-related
-    collaborator to call in the first place."""
+    last added by Phase 100, Batch 2)/BrainService (Markdown Brain
+    Integration, read-only filesystem access only) - it has no
+    AI-related collaborator to call in the first place."""
     signature = inspect.signature(ContextAssembler.__init__)
     assert set(signature.parameters) == {
         "self", "memory_manager", "project_state_store",
-        "verified_action_context_builder",
+        "verified_action_context_builder", "brain_service",
     }
 
 

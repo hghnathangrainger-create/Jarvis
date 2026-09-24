@@ -156,7 +156,7 @@
         });
         // Update title.
         const titles = {
-            today: 'Today', tasks: 'Tasks & Workflows', memory: 'Memory',
+            today: 'Today', chat: 'Chat', tasks: 'Tasks & Workflows', memory: 'Memory',
             knowledge: 'Knowledge Library', audit: 'Audit Log',
             providers: 'AI Providers', goals: 'Goals', settings: 'Settings'
         };
@@ -174,6 +174,7 @@
     async function loadSection(section) {
         switch (section) {
             case 'today': await loadToday(); break;
+            case 'chat': loadChat(); break;
             case 'tasks': await loadTasks(); break;
             case 'memory': await loadMemory(); break;
             case 'knowledge': await loadKnowledge(); break;
@@ -209,7 +210,24 @@
     }
 
     function renderSubsystemGrid(subsystems) {
-        // Also used by Today and Settings.
+        // Render the subsystem grid on the Today page.
+        var el = document.getElementById('todaySubsystems');
+        if (!el) return;
+        var keys = Object.keys(subsystems);
+        if (keys.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">No subsystem data</div></div>';
+            return;
+        }
+        el.innerHTML = '<div class="subsystem-grid">' +
+            keys.map(function (name) {
+                var online = subsystems[name];
+                var displayName = name.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+                return '<div class="subsystem-item">' +
+                    '<div class="subsystem-dot ' + (online ? 'online' : 'offline') + '"></div>' +
+                    '<span class="subsystem-name">' + escHtml(displayName) + '</span>' +
+                    '</div>';
+            }).join('') +
+            '</div>';
     }
 
     function renderRecentEvents() {
@@ -558,6 +576,112 @@
     }
 
     // -----------------------------------------------------------------------
+    // Chat
+    // -----------------------------------------------------------------------
+
+    var chatHistory = [];
+    var chatSending = false;
+
+    function loadChat() {
+        // Chat is stateful — no API call needed on section load.
+        var input = document.getElementById('chatInput');
+        if (input) input.focus();
+    }
+
+    function appendChatMessage(role, text) {
+        var container = document.getElementById('chatMessages');
+        if (!container) return;
+
+        // Remove empty state on first message.
+        var empty = container.querySelector('.chat-empty');
+        if (empty) empty.remove();
+
+        var div = document.createElement('div');
+        div.className = 'chat-msg ' + role;
+        if (role === 'jarvis') {
+            div.innerHTML = '<div class="chat-msg-label">Jarvis</div>' + escHtml(text);
+        } else {
+            div.textContent = text;
+        }
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
+    }
+
+    function showTyping() {
+        var container = document.getElementById('chatMessages');
+        if (!container) return null;
+        var div = document.createElement('div');
+        div.className = 'chat-typing';
+        div.innerHTML = '<span></span><span></span><span></span>';
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
+    }
+
+    function removeTyping(el) {
+        if (el && el.parentNode) el.parentNode.remove();
+    }
+
+    function speakText(text) {
+        if (!('speechSynthesis' in window)) return;
+        var toggle = document.getElementById('ttsToggle');
+        if (toggle && !toggle.checked) return;
+        // Cancel any ongoing speech.
+        window.speechSynthesis.cancel();
+        var utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        // Try to pick an English voice.
+        var voices = window.speechSynthesis.getVoices();
+        var english = voices.filter(function (v) { return v.lang.startsWith('en'); });
+        if (english.length > 0) utterance.voice = english[0];
+        window.speechSynthesis.speak(utterance);
+    }
+
+    async function sendChatMessage() {
+        var input = document.getElementById('chatInput');
+        var btn = document.getElementById('chatSendBtn');
+        if (!input || !btn) return;
+
+        var text = input.value.trim();
+        if (!text || chatSending) return;
+
+        chatSending = true;
+        btn.disabled = true;
+        input.value = '';
+        input.style.height = 'auto';
+
+        appendChatMessage('user', text);
+        chatHistory.push({ role: 'user', content: text });
+
+        var typingEl = showTyping();
+
+        try {
+            var data = await apiPost('/api/chat', { message: text, mode: 'text' });
+            removeTyping(typingEl);
+
+            if (data && data.response) {
+                appendChatMessage('jarvis', data.response);
+                chatHistory.push({ role: 'jarvis', content: data.response });
+                speakText(data.response);
+            } else if (data && data.error) {
+                appendChatMessage('error', data.error);
+            } else {
+                appendChatMessage('error', 'No response from Jarvis.');
+            }
+        } catch (err) {
+            removeTyping(typingEl);
+            appendChatMessage('error', 'Connection error: ' + err.message);
+        }
+
+        chatSending = false;
+        btn.disabled = false;
+        input.focus();
+    }
+
+    // -----------------------------------------------------------------------
     // Init
     // -----------------------------------------------------------------------
 
@@ -565,6 +689,33 @@
         if (!checkAuth()) return;
         initEventBindings();
         connectWebSocket();
+
+        // Chat event listeners.
+        var chatInput = document.getElementById('chatInput');
+        var chatSendBtn = document.getElementById('chatSendBtn');
+        if (chatSendBtn) {
+            chatSendBtn.addEventListener('click', sendChatMessage);
+        }
+        if (chatInput) {
+            chatInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChatMessage();
+                }
+            });
+            // Auto-resize textarea.
+            chatInput.addEventListener('input', function () {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            });
+        }
+        // Load voices for TTS.
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.getVoices();
+            window.speechSynthesis.onvoiceschanged = function () {
+                window.speechSynthesis.getVoices();
+            };
+        }
 
         // Navigate to hash section or default.
         var hash = window.location.hash.replace('#', '') || 'today';

@@ -171,6 +171,20 @@ _RULES: tuple[_Rule, ...] = (
     # Does not collide with "update memory" (a different, longer
     # keyword phrase) or any other existing rule.
     _Rule("update jarvis project state", SecurityTier.YELLOW, "Updating the project-state record changes stored content and must be confirmed."),
+    # Markdown brain writes: creating or replacing an external Markdown
+    # note changes state, exactly like "update memory" above - explicit
+    # rules are added rather than relying on the default YELLOW fallback,
+    # so the reason is always specific and auditable. Both action strings
+    # are fixed and input-independent (BrainWriteTool.action_for derives
+    # them from the fixed sub-command only), so a note title, path, or
+    # content can never influence classification. Checked directly against
+    # every existing rule: neither phrase contains, nor is contained by,
+    # "write file"/"edit file"/"update memory"/"delete" (the classification
+    # walks this ordered table, and both phrases diverge from each of those
+    # at or before their second word) - confirmed by direct comparison,
+    # not assumed.
+    _Rule("write brain note", SecurityTier.YELLOW, "Creating a Markdown brain note changes external state and must be confirmed."),
+    _Rule("update brain note", SecurityTier.YELLOW, "Replacing a Markdown brain note changes external state and must be confirmed."),
     _Rule("delete file", SecurityTier.YELLOW, "Deleting a file changes state and should be confirmed."),
     _Rule("delete folder", SecurityTier.YELLOW, "Deleting a folder changes state and should be confirmed."),
     # Phase 38: restoring a quarantined file changes the filesystem (a
@@ -250,6 +264,18 @@ _RULES: tuple[_Rule, ...] = (
     # generic "show" rule below without this entry, but listed
     # explicitly for the same reason as "show available commands" above.
     _Rule("show system health", SecurityTier.GREEN, "Showing system health status is read-only and safe."),
+    # Markdown brain reads: already covered by the generic
+    # "search"/"read"/"show" rules below without these entries, but listed
+    # explicitly for the same reason as "search files" above - each command
+    # family's own tailored, auditable reason. Listed before their generic
+    # counterparts so the tailored reason always wins. Checked directly
+    # against every YELLOW/RED rule above: no rule's keyword appears in
+    # any of these three strings (in particular none contains "read
+    # webpage", the one YELLOW rule that also starts with "read") -
+    # confirmed by direct comparison, not assumed.
+    _Rule("search brain notes", SecurityTier.GREEN, "Searching brain notes is read-only and safe."),
+    _Rule("read brain note", SecurityTier.GREEN, "Reading a brain note does not change anything."),
+    _Rule("show brain status", SecurityTier.GREEN, "Showing brain configuration status is read-only and never exposes secret values."),
     _Rule("search", SecurityTier.GREEN, "Searching is read-only and safe."),
     _Rule("read file", SecurityTier.GREEN, "Reading a file does not change anything."),
     _Rule("read", SecurityTier.GREEN, "Reading does not change anything."),
